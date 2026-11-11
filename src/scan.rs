@@ -317,3 +317,29 @@ impl Tally {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::path::Path;
+
+    use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags, statx};
+    use tempfile::TempDir;
+
+    use super::is_mount_root;
+
+    /// The test reads existing mounts rather than creating a bind mount, so it
+    /// leaves the host's mount table unchanged and needs no privilege.
+    #[test]
+    fn detects_mount_roots_by_attribute() {
+        let dir = TempDir::new().unwrap();
+        assert!(!is_mount_root(dir.path()));
+
+        let root = Path::new("/");
+        let stat = statx(CWD, root, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::empty()).unwrap();
+        if !stat.stx_attributes_mask.contains(StatxAttributes::MOUNT_ROOT) {
+            eprintln!("skipped: the kernel omits the mount-root attribute");
+            return;
+        }
+        assert!(is_mount_root(root));
+    }
+}

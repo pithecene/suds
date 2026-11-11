@@ -397,37 +397,6 @@ fn mount_points_are_reported_and_not_crossed() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn bind_mount_on_the_same_device_is_not_crossed() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path().join("root");
-    write(&root.join("own"), 10);
-    fs::create_dir_all(root.join("mounted")).unwrap();
-    // If the traversal did not stop at the mount boundary, it would loop
-    // through a bind mount of the root's ancestor.
-    let mounted = Command::new("mount")
-        .arg("--bind")
-        .arg(dir.path())
-        .arg(root.join("mounted"))
-        .output();
-    if !mounted.is_ok_and(|output| output.status.success()) {
-        eprintln!("skipped: this process cannot create a bind mount");
-        return;
-    }
-
-    let (report, _) = inspect(&[&root]);
-    let unmounted = Command::new("umount").arg(root.join("mounted")).status();
-    assert!(unmounted.is_ok_and(|status| status.success()));
-    let root_value = &report["roots"][0];
-    assert_eq!(root_value["skipped_mount_count"], 1);
-    assert_eq!(
-        root_value["skipped_mounts"][0],
-        root.join("mounted").to_str().unwrap()
-    );
-    assert_eq!(root_value["files"], 1);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn linux_without_roots_exits_two() {
     let output = suds(&[], &[]);
     assert_eq!(output.status.code(), Some(2));

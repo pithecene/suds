@@ -27,7 +27,11 @@ const BLOCK_UNIT: u64 = 512;
 /// Scans one root and returns its result.
 pub fn scan_root(spec: &RootSpec) -> RootResult {
     let started = Instant::now();
-    let (status, walker, measure, children) = walk_root(&spec.path);
+    let (status, walker, measure, children) = match &spec.anchor {
+        Some(anchor) => check_ancestors(anchor, &spec.path),
+        None => None,
+    }
+    .unwrap_or_else(|| walk_root(&spec.path));
     RootResult {
         id: spec.id.clone(),
         kind: spec.kind,
@@ -43,7 +47,44 @@ pub fn scan_root(spec: &RootSpec) -> RootResult {
     }
 }
 
-fn walk_root(root: &Path) -> (RootStatus, Walker, Measure, Vec<Child>) {
+type Outcome = (RootStatus, Walker, Measure, Vec<Child>);
+
+/// Examines each directory between a default root's anchor and the root
+/// without following links. The function returns an outcome when a directory
+/// is absent, unreadable, or a symbolic link, and `None` when the scan may
+/// proceed.
+fn check_ancestors(anchor: &Path, root: &Path) -> Option<Outcome> {
+    let relative = root.strip_prefix(anchor).ok()?;
+    let mut path = anchor.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        // The root's own final component is the scan's first entry.
+        if components.peek().is_none() {
+            break;
+        }
+        path.push(component);
+        let mut walker = Walker::new(0);
+        let status = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let err = io::Error::other(
+                    "this symbolic link lies on the root's path, and the scan follows no symbolic link",
+                );
+                walker.record_error(&path, &err);
+                RootStatus::Unreadable
+            }
+            Ok(_) => continue,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => RootStatus::Absent,
+            Err(err) => {
+                walker.record_error(&path, &err);
+                RootStatus::Unreadable
+            }
+        };
+        return Some((status, walker, Measure::default(), Vec::new()));
+    }
+    None
+}
+
+fn walk_root(root: &Path) -> Outcome {
     let meta = match fs::symlink_metadata(root) {
         Ok(meta) => meta,
         Err(err) => {
@@ -163,7 +204,19 @@ impl Walker {
             }
         };
         let kind = entry_kind(meta.file_type());
-        if meta.dev() != self.device || (kind == EntryKind::Directory && is_mount_root(path)) {
+        let mut mount = meta.dev() != self.device;
+        if !mount && kind == EntryKind::Directory {
+            // A failed check leaves the entry unmeasured and the root partial,
+            // because the scan cannot rule out a mount boundary.
+            match is_mount_root(path) {
+                Ok(root) => mount = root,
+                Err(err) => {
+                    self.record_error(path, &err);
+                    return None;
+                }
+            }
+        }
+        if mount {
             self.mount_count = self.mount_count.saturating_add(1);
             if self.mounts.len() < SAMPLE_LIMIT {
                 self.mounts.push(path.to_string_lossy().into_owned());
@@ -218,24 +271,29 @@ impl Walker {
 
 /// Reports whether a directory is a mount point, including a bind mount on
 /// the scanned root's own device. A kernel older than Linux 5.8 omits the
-/// mount-root attribute, and the device comparison alone then bounds the scan.
+/// mount-root attribute, and a kernel older than Linux 4.11 lacks `statx`.
+/// On either kernel, the device comparison alone bounds the scan.
 #[cfg(target_os = "linux")]
-fn is_mount_root(path: &Path) -> bool {
+fn is_mount_root(path: &Path) -> io::Result<bool> {
     use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags, statx};
+    use rustix::io::Errno;
 
     let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
-    statx(CWD, path, flags, StatxFlags::empty()).is_ok_and(|stat| {
-        stat.stx_attributes_mask
+    match statx(CWD, path, flags, StatxFlags::empty()) {
+        Ok(stat) => Ok(stat
+            .stx_attributes_mask
             .contains(StatxAttributes::MOUNT_ROOT)
-            && stat.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
-    })
+            && stat.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)),
+        Err(Errno::NOSYS) => Ok(false),
+        Err(errno) => Err(errno.into()),
+    }
 }
 
 /// macOS has no bind mount, so a mount point always lies on a different device
 /// from its parent directory.
 #[cfg(target_os = "macos")]
-fn is_mount_root(_path: &Path) -> bool {
-    false
+fn is_mount_root(_path: &Path) -> io::Result<bool> {
+    Ok(false)
 }
 
 fn entry_kind(file_type: FileType) -> EntryKind {
@@ -332,7 +390,8 @@ mod tests {
     #[test]
     fn detects_mount_roots_by_attribute() {
         let dir = TempDir::new().unwrap();
-        assert!(!is_mount_root(dir.path()));
+        assert!(!is_mount_root(dir.path()).unwrap());
+        assert!(is_mount_root(&dir.path().join("missing")).is_err());
 
         let root = Path::new("/");
         let stat = statx(CWD, root, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::empty()).unwrap();
@@ -343,6 +402,6 @@ mod tests {
             eprintln!("skipped: the kernel omits the mount-root attribute");
             return;
         }
-        assert!(is_mount_root(root));
+        assert!(is_mount_root(root).unwrap());
     }
 }

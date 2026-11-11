@@ -37,7 +37,7 @@ pub fn write(out: &mut impl Write, report: &Report, top: usize) -> io::Result<()
             continue;
         }
         writeln!(out)?;
-        writeln!(out, "{}  {}", root.id, root.path)?;
+        writeln!(out, "{}  {}", root.id, escape(&root.path))?;
         if measured {
             write_children(out, root, top)?;
         }
@@ -79,7 +79,7 @@ fn write_children(out: &mut impl Write, root: &RootResult, top: usize) -> io::Re
     ])];
     rows.extend(root.children.iter().take(top).map(|child| {
         vec![
-            child.name.clone(),
+            escape(&child.name),
             entry_label(child.kind).to_owned(),
             format_bytes(child.measure.allocated_bytes),
             format_bytes(child.measure.logical_bytes),
@@ -106,13 +106,18 @@ fn write_problems(out: &mut impl Write, root: &RootResult) -> io::Result<()> {
             root.skipped_mount_count
         )?;
         for path in &root.skipped_mounts {
-            writeln!(out, "    {path}")?;
+            writeln!(out, "    {}", escape(path))?;
         }
     }
     if root.error_count > 0 {
         writeln!(out, "  Traversal errors: {}", root.error_count)?;
         for error in &root.errors {
-            writeln!(out, "    {}: {}", error.path, error.message)?;
+            writeln!(
+                out,
+                "    {}: {}",
+                escape(&error.path),
+                escape(&error.message)
+            )?;
         }
     }
     Ok(())
@@ -125,6 +130,21 @@ fn entry_label(kind: EntryKind) -> &'static str {
         EntryKind::Symlink => "symlink",
         EntryKind::Other => "other",
     }
+}
+
+/// Escapes each control character in a filesystem name or message, so that
+/// a name cannot move the cursor, clear the terminal, or begin a new row. The
+/// JSON report keeps the original text.
+fn escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 fn row(cells: &[&str]) -> Vec<String> {
@@ -192,7 +212,14 @@ fn format_elapsed(milliseconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use super::{escape, format_bytes};
+
+    #[test]
+    fn escapes_control_characters() {
+        assert_eq!(escape("plain name"), "plain name");
+        assert_eq!(escape("a\u{1b}[2J\nb\tc"), "a\\u{1b}[2J\\nb\\tc");
+        assert_eq!(escape("caf\u{e9}"), "caf\u{e9}");
+    }
 
     #[test]
     fn uses_binary_units() {

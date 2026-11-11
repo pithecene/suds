@@ -90,7 +90,9 @@ The table lists each root's allocated and logical sizes in binary units
 (KiB, MiB, GiB), its counts of files, directories, and symbolic links, its
 status, and the duration of its scan. Each root's largest direct
 children follow, ranked by allocated size, then by logical size, then by
-name.
+name. The table escapes each control character in a name, a path, or an
+error message, so a file's name cannot rewrite the terminal. The JSON
+document keeps every name unchanged.
 
 ## JSON Output
 
@@ -130,10 +132,16 @@ replacement characters.
   file.
 - **Symbolic links** count as entries, and the scan never follows them. A
   root that is itself a symbolic link, such as `/tmp` on macOS, counts as
-  one link, and the scan reads nothing beyond it.
+  one link, and the scan reads nothing beyond it. A default root whose path
+  beneath the home directory passes through a symbolic link is
+  `unreadable`, and its `errors` name the link. The operating system
+  resolves the directories above an explicit root, because the operator
+  names that path.
 - **Mount points** bound the scan. The scan stays on each root's filesystem
   and reports every mount point it skips. On Linux 5.8 and later, the scan
-  also stops at a bind mount on the root's own device.
+  also stops at a bind mount on the root's own device. When that check fails
+  for a directory, the scan records the error and leaves the directory
+  unmeasured.
 - **Read failures**, such as a permission refusal or a vanished entry, make
   the root `partial` and appear in its `errors`. Suds never suppresses such
   an error.

@@ -272,6 +272,23 @@ fn table_uses_binary_units_and_honors_top() {
 }
 
 #[test]
+fn table_escapes_control_characters_in_names() {
+    let dir = TempDir::new().unwrap();
+    let name = "clear\u{1b}[2J\nforged row";
+    write(&dir.path().join(name), 10);
+
+    let output = suds(&[], &[dir.path()]);
+    assert_eq!(output.status.code(), Some(0));
+    let table = String::from_utf8(output.stdout).unwrap();
+    assert!(!table.contains('\u{1b}'), "{table}");
+    assert!(!table.contains("\nforged row"), "{table}");
+    assert!(table.contains("clear\\u{1b}[2J\\nforged row"), "{table}");
+
+    let (report, _) = inspect(&[dir.path()]);
+    assert_eq!(report["roots"][0]["children"][0]["name"], name);
+}
+
+#[test]
 fn unreadable_directory_yields_partial_report_and_status_one() {
     let dir = TempDir::new().unwrap();
     let locked = dir.path().join("locked");
@@ -444,4 +461,29 @@ fn macos_default_profile_reads_the_home_directory() {
         ]
     );
     assert_eq!(report["roots"][0]["logical_bytes"], 2048);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_default_profile_follows_no_link_beneath_the_home_directory() {
+    let home = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    write(&elsewhere.path().join("Caches/app/blob"), 2048);
+    symlink(elsewhere.path(), home.path().join("Library")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_suds"))
+        .env("HOME", home.path())
+        .args(["inspect", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let caches = &report["roots"][0];
+    assert_eq!(caches["id"], "macos.user-caches");
+    assert_eq!(caches["status"], "unreadable");
+    assert_eq!(caches["files"], 0);
+    assert_eq!(
+        caches["errors"][0]["path"],
+        home.path().join("Library").to_str().unwrap()
+    );
 }

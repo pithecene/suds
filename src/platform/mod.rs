@@ -25,6 +25,9 @@ pub struct RootSpec {
     pub kind: RootKind,
     /// An absolute, lexically normalized path.
     pub path: PathBuf,
+    /// For a default root, the home directory beneath which the scan accepts
+    /// no symbolic link in the root's path. An explicit root has no anchor.
+    pub anchor: Option<PathBuf>,
 }
 
 /// The reason no default profile applies.

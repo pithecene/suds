@@ -33,6 +33,7 @@ pub fn default_roots() -> Result<Vec<RootSpec>, ProfileError> {
             id: id.to_owned(),
             kind,
             path: home.join(relative),
+            anchor: Some(home.clone()),
         })
         .collect())
 }

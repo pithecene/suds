@@ -81,6 +81,7 @@ fn resolve_roots(paths: &[PathBuf]) -> Result<Vec<RootSpec>, String> {
             id: format!("explicit.{}", index + 1),
             kind: RootKind::Unclassified,
             path: normalize(&absolute),
+            anchor: None,
         });
     }
     Ok(roots)

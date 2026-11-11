@@ -336,7 +336,10 @@ mod tests {
 
         let root = Path::new("/");
         let stat = statx(CWD, root, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::empty()).unwrap();
-        if !stat.stx_attributes_mask.contains(StatxAttributes::MOUNT_ROOT) {
+        if !stat
+            .stx_attributes_mask
+            .contains(StatxAttributes::MOUNT_ROOT)
+        {
             eprintln!("skipped: the kernel omits the mount-root attribute");
             return;
         }

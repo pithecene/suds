@@ -1,0 +1,12 @@
+# Cargo build output
+/target/
+
+# Local tool configuration
+mise.local.toml
+.task/
+
+# Agent sessions' local state, and the worktree of each change (bosun.yaml's branches section)
+.claude/
+
+# Bosun's components installed into this repository as a consumer
+.bosun/

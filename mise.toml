@@ -1,0 +1,5 @@
+[tools]
+# Task check runs rustfmt and Clippy, which a minimal toolchain lacks.
+rust = { version = "1.98.1", components = "rustfmt,clippy" }
+"aqua:go-task/task" = "3.48.0"
+"aqua:google/yamlfmt" = "0.21.0"

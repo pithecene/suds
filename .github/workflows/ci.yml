@@ -1,0 +1,60 @@
+name: 🤖 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ✅ Check (${{ matrix.os }})
+    strategy:
+      # Each platform's result separates a platform defect from a general one.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 🧰 Mise
+        uses: jdx/mise-action@v2
+
+      - name: 📦 Cargo Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: ✅ Check
+        run: task check
+
+      # The release binary inspects a fixture that the job generates, never the runner's home directory.
+      - name: 🔍 Inspect a Fixture
+        shell: bash
+        run: |-
+          fixture="$RUNNER_TEMP/suds fixture"
+          mkdir -p "$fixture/nested dir"
+          printf 'data' > "$fixture/nested dir/file"
+          ln -s "$fixture/missing" "$fixture/broken"
+          ./target/release/suds inspect --root "$fixture"
+          ./target/release/suds inspect --root "$fixture" --format json > "$RUNNER_TEMP/report.json"
+          jq -e '.schema == "suds.inspection/v1" and .status == "complete"
+            and .roots[0].files == 1 and .roots[0].symlinks == 1
+            and .roots[0].logical_bytes == 4' "$RUNNER_TEMP/report.json"

@@ -1,0 +1,50 @@
+name: 🧾 Check
+
+# The internal check, Bosun, on the repository and on each pull request's title
+# and body. A change of title or body alone reruns this workflow and no other.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # An edit of the title or body runs in its own group, so it never cancels
+  # the check of a push.
+  group: >-
+    check-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'edited' && '-edit' || '' }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 🧾 Internal Check
+    # A fork's pull request and a Dependabot pull request receive no registry
+    # secret, so neither runs the internal check.
+    if: >-
+      github.event_name != 'pull_request' || (!github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The image of the internal check's current release: the one line in this
+    # repository that names it.
+    container:
+      image: ghcr.io/pithecene/bosun:latest
+      credentials: {username: bosun, password: "${{ secrets.BOSUN_REGISTRY_TOKEN }}"}
+    # Bosun reads the enterprise layer that bosun.yaml extends from the same
+    # registry, with the same read-only token.
+    env:
+      BOSUN_REGISTRY_TOKEN: ${{ secrets.BOSUN_REGISTRY_TOKEN }}
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # On a pull request, the event file holds the pull request, so Bosun
+      # checks its title and body as well as the repository. A push or a run
+      # by hand carries no pull request, so Bosun checks the repository alone.
+      - name: 🧾 Check
+        run: bosun check --pull-request "$GITHUB_EVENT_PATH"

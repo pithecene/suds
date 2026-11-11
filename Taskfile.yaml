@@ -1,0 +1,39 @@
+version: "3"
+
+tasks:
+  default:
+    desc: List repository commands
+    cmd: task --list
+
+  build:
+    desc: Build the release binary
+    cmd: cargo build --locked --release
+
+  test:
+    desc: Run the unit and command-line tests
+    cmd: cargo test --locked
+
+  lint:
+    desc: Check Rust formatting, Clippy lints, and YAML formatting without modifying files
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --locked --all-targets -- -D warnings
+      - yamlfmt -lint .
+
+  format:
+    desc: Format the Rust sources and YAML files
+    aliases: [fmt]
+    cmds:
+      - cargo fmt
+      - yamlfmt .
+
+  check:
+    desc: Build, test, and lint the repository
+    cmds:
+      - task: build
+      - task: test
+      - task: lint
+
+  inspect:
+    desc: Run the debug build of suds inspect with the arguments after --
+    cmd: cargo run --locked --quiet -- inspect {{.CLI_ARGS}}

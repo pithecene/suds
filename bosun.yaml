@@ -1,0 +1,19 @@
+# Suds configures Bosun as a consuming repository (pithecene/bosun, records/contracts/CONFIG.md). Bosun is the
+# maintainers' governance check and never a build dependency, so `task check` runs without it.
+version: 1
+# Pithecene's enterprise layer (pithecene/infrastructure, bosun/bosun.yaml) supplies the process stages and hooks.
+extends: ghcr.io/pithecene/bosun-config:v1
+# The prose check covers the whole repository, so each new document and Rust source joins it when it lands.
+prose:
+  coverage: {}
+# The comment check reads every tracked file, so each comment block stays within the policy's cap.
+comments: {}
+changelog:
+  file: CHANGELOG.md
+review:
+  forge: true
+# Each change starts in its own worktree under Pithecene's convention (records/contracts/CONFIG.md §15).
+branches:
+  pattern: "{user}/{type}/{scope}/{slug}"
+  worktrees: .claude/worktrees
+  stack: routed

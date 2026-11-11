@@ -1,0 +1,8 @@
+grove:
+  intent: >-
+    Local-first maintenance and reconciliation utility for developer workstations, beginning with auditable macOS userland hygiene and extending to Linux.
+  horizon: perennial
+  role: infrastructure
+  phase: expanding
+  steward: Andrew
+  consolidation_interval_days: 60

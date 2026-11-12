@@ -58,6 +58,11 @@ export function RootDetail({ location, outcome, scanning, busy, onInspect }: Pro
           </dl>
 
           {result.status === "absent" && <p className="muted">This location does not exist.</p>}
+          {outcome.cancelled && (
+            <p className="muted">
+              The inspection stopped early, so the figures and the table cover only the entries that it finished.
+            </p>
+          )}
 
           {measured && children.length === 0 && <p className="muted">This location holds no entries.</p>}
           {measured && children.length > 0 && (

@@ -33,6 +33,10 @@ export function App() {
   // Events from a replaced inspection still arrive, so each event names its
   // inspection, and the window keeps only the current one's.
   const current = useRef<number | null>(null);
+  // The backend cancels a run when the next one starts, but the answers to two
+  // overlapping starts can arrive in either order. Each start takes a number,
+  // and only the latest start may claim the window.
+  const latestRequest = useRef(0);
 
   useEffect(() => {
     listLocations()
@@ -69,6 +73,10 @@ export function App() {
   const inspect = useCallback(
     (ids: number[]) => {
       setFailure(null);
+      latestRequest.current += 1;
+      const request = latestRequest.current;
+      // The backend cancels the previous run, so the window drops its events.
+      current.current = null;
       // The backend starts the scan before it answers with the identifier, so
       // a quick scan can report before the answer arrives. The run holds those
       // events and replays them once it knows its identifier.
@@ -83,6 +91,9 @@ export function App() {
       };
       startInspection(ids, receive)
         .then((id) => {
+          if (request !== latestRequest.current) {
+            return;
+          }
           current.current = id;
           setRun({ id, pending: new Set(ids) });
           started = true;
@@ -90,7 +101,14 @@ export function App() {
             onEvent(event);
           }
         })
-        .catch((err: unknown) => setFailure(String(err)));
+        .catch((err: unknown) => {
+          if (request !== latestRequest.current) {
+            return;
+          }
+          // The previous run, if any, no longer owns the window.
+          setRun(null);
+          setFailure(String(err));
+        });
     },
     [onEvent],
   );

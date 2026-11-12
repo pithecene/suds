@@ -130,7 +130,8 @@ pub struct RootResult {
     pub elapsed_ms: u64,
     #[serde(flatten)]
     pub measure: Measure,
-    /// Every direct child, in ranking order.
+    /// Every direct child, in ranking order. A cancelled scan lists only the
+    /// children whose measurement finished.
     pub children: Vec<Child>,
     pub skipped_mount_count: u64,
     /// The first skipped mount points, in traversal order.

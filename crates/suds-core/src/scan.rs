@@ -28,8 +28,9 @@ const BLOCK_UNIT: u64 = 512;
 
 /// Scans one root and returns its result.
 ///
-/// The scan stops early once `cancel` holds `true`, and the result then
-/// records the cancellation and the measurements taken before it.
+/// The scan stops early once `cancel` holds `true`. The result then records
+/// the cancellation and lists only the children whose measurement finished
+/// before it.
 pub fn scan_root(spec: &RootSpec, cancel: &AtomicBool) -> RootScan {
     let started = Instant::now();
     let (status, walker, measure, children) = match &spec.anchor {
@@ -121,7 +122,13 @@ fn walk_root(root: &Path, cancel: &AtomicBool) -> Outcome {
                 break;
             }
             let mut tally = Tally::default();
-            if let Some(kind) = walker.walk(&root.join(&name), &mut tally, cancel) {
+            let kind = walker.walk(&root.join(&name), &mut tally, cancel);
+            // A cancellation during the child's walk leaves its measure short,
+            // so the result omits that child rather than list a wrong figure.
+            if walker.cancelled {
+                break;
+            }
+            if let Some(kind) = kind {
                 totals.add(&tally);
                 children.push(ChildScan {
                     name,

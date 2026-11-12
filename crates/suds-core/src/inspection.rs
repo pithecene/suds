@@ -28,7 +28,8 @@ pub struct RootScan {
     pub cancelled: bool,
     pub elapsed: Duration,
     pub measure: Measure,
-    /// Every direct child, in ranking order.
+    /// Every direct child, in ranking order. A cancelled scan lists only the
+    /// children whose measurement finished.
     pub children: Vec<ChildScan>,
     pub skipped_mount_count: u64,
     /// The first skipped mount points, in traversal order.

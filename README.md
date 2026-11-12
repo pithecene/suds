@@ -63,7 +63,9 @@ On Linux, Suds requires each root as an argument, as in
 The desktop application runs on macOS. Its window lists the default roots
 and each folder that the user adds through the native folder picker. It
 inspects them on a background thread and shows each root's result as soon
-as that root's scan ends, and the user can cancel a scan in progress. For
+as that root's scan ends, and the user can cancel a scan in progress. A
+cancelled root's result lists only the children that the scan finished
+before the cancellation, and its status is `partial`. For
 each root, the window shows the sizes, the counts, the status, the ranked
 direct children, the skipped mount points, and the traversal errors.
 

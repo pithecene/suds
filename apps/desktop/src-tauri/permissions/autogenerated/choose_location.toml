@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-choose-location"
+description = "Enables the choose_location command without any pre-configured scope."
+commands.allow = ["choose_location"]
+
+[[permission]]
+identifier = "deny-choose-location"
+description = "Denies the choose_location command without any pre-configured scope."
+commands.deny = ["choose_location"]

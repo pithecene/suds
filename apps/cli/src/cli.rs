@@ -4,10 +4,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// Local-first maintenance and reconciliation utility for developer
-/// workstations.
+/// Local-first environment manager for developer workstations.
 ///
-/// This release observes storage and changes nothing.
+/// This release measures storage and changes nothing.
 #[derive(Debug, Parser)]
 #[command(name = "suds", version)]
 pub struct Cli {

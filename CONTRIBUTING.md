@@ -3,8 +3,8 @@
 ## Prerequisites
 
 The [mise](https://mise.jdx.dev/) version manager installs the pinned
-versions of Rust, rustfmt, Clippy, [Task](https://taskfile.dev/), and
-yamlfmt. A contributor runs this command from the repository's root:
+versions of Rust, rustfmt, Clippy, Node.js, pnpm,
+[Task](https://taskfile.dev/), and yamlfmt. A contributor runs this command from the repository's root:
 
 ```sh
 mise install
@@ -20,8 +20,11 @@ mise install
 | `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
 | `task check` | Build, test, and lint |
 | `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
+| `task desktop` | Run the desktop application in development mode |
+| `task desktop:check` | Build the desktop frontend, then test and lint the desktop crate |
 
-Each pull request passes `task check` on macOS and on Linux in CI.
+Each pull request passes `task check` on macOS and on Linux in CI, and
+`task desktop:check` on macOS.
 
 ## Tests
 

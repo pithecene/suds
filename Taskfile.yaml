@@ -6,17 +6,17 @@ tasks:
     cmd: task --list
 
   build:
-    desc: Build the release binary
+    desc: Build the release binary of the suds command
     cmd: cargo build --locked --release
 
   test:
-    desc: Run the unit and command-line tests
+    desc: Run the core's and the command line's unit and command-line tests
     cmd: cargo test --locked
 
   lint:
     desc: Check Rust formatting, Clippy lints, and YAML formatting without modifying files
     cmds:
-      - cargo fmt --check
+      - cargo fmt --all --check
       - cargo clippy --locked --all-targets -- -D warnings
       - yamlfmt -lint .
 
@@ -24,11 +24,11 @@ tasks:
     desc: Format the Rust sources and YAML files
     aliases: [fmt]
     cmds:
-      - cargo fmt
+      - cargo fmt --all
       - yamlfmt .
 
   check:
-    desc: Build, test, and lint the repository
+    desc: Build, test, and lint the core and the command line
     cmds:
       - task: build
       - task: test
@@ -36,4 +36,24 @@ tasks:
 
   inspect:
     desc: Run the debug build of suds inspect with the arguments after --
-    cmd: cargo run --locked --quiet -- inspect {{.CLI_ARGS}}
+    cmd: cargo run --locked --quiet -p suds -- inspect {{.CLI_ARGS}}
+
+  desktop:install:
+    desc: Install the desktop frontend's pinned packages
+    dir: apps/desktop
+    cmd: pnpm install --frozen-lockfile
+
+  desktop:
+    desc: Run the desktop application in development mode
+    dir: apps/desktop
+    deps: ['desktop:install']
+    cmd: pnpm tauri dev
+
+  desktop:check:
+    desc: Build the desktop frontend, then test and lint the desktop crate
+    deps: ['desktop:install']
+    cmds:
+      # The desktop crate embeds the frontend's build output, so the build comes first.
+      - pnpm --dir apps/desktop build
+      - cargo test --locked -p suds-desktop
+      - cargo clippy --locked -p suds-desktop --all-targets -- -D warnings

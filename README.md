@@ -1,28 +1,27 @@
 # Suds
 
-Suds is a local-first maintenance and reconciliation utility for developer
-workstations.
+Suds is a local-first desktop and command-line environment manager for
+developer workstations. It treats files, repositories, worktrees,
+toolchains, configuration, and agent activity as parts of one environment.
+People use Suds through its desktop application, and automation calls the
+same `suds-core` crate through the `suds` command.
 
-Suds observes userland storage, through a default profile on macOS and
-explicit roots on macOS and Linux, and performs no cleanup. It measures
-where caches, generated data, downloads, logs, and discarded
-files accumulate, so that any maintenance decision rests on evidence rather
-than on deletion heuristics.
+## Current Release Boundary
 
-## Scope
+This release measures storage and changes nothing. The `suds inspect`
+command and the desktop application read filesystem metadata beneath a set
+of user-owned roots. For each root, they report its storage use, its entry
+counts, and its largest direct children. The command writes a terminal
+table or one JSON document, and the desktop application shows the same
+measurements in a window.
 
-The `suds inspect` command reads filesystem metadata beneath a set of
-user-owned roots and reports, for each root, its storage use, its entry counts,
-and its largest direct children. It writes a terminal table or one JSON
-document.
-
-## Out of Scope
-
-Suds does not delete, move, quarantine, rewrite, install, uninstall, or
-repair anything. It interprets no package manager's state, maintains no state
-between runs, and calls no external program. In Suds, optimization means a
-measured reduction in storage use, structural friction, or operational
-residue. Suds makes no claim about machine performance.
+The release deletes, moves, quarantines, rewrites, installs, and repairs
+nothing. It interprets no package manager's state, records no state
+between runs, and calls no external program. [AGENTS.md](AGENTS.md) states
+the rules that bind any operation that changes a file: an inspectable plan,
+stated preconditions, and a journal entry. In Suds, optimization means a measured
+reduction in storage use, structural friction, or operational residue.
+Suds makes no claim about machine performance.
 
 ## Default Roots on macOS
 
@@ -58,17 +57,41 @@ On Linux, Suds requires each root as an argument, as in
 `suds inspect --root ~/.cache`. Linux has no default profile, so
 `suds inspect` without `--root` exits with status 2.
 
+## Desktop Application
+
+The desktop application runs on macOS. Its window lists the default roots
+and each folder that the user adds through the native folder picker. The
+application inspects them on a background thread and shows each root's result as soon
+as that root's scan ends, and the user can cancel a scan in progress. A
+cancelled root's result lists only the children that the scan finished
+before the cancellation, and its status is `partial`. For
+each root, the window shows the sizes, the counts, the status, the ranked
+direct children, the skipped mount points, and the traversal errors.
+
+The application uses [Tauri](https://tauri.app/). The system's web view
+renders the window, and a Rust process holds every path. The web view may
+call four application commands: list the locations, add a folder, start an
+inspection, and cancel an inspection. It receives no filesystem, shell, or
+network permission, and it names each location by an opaque identifier
+rather than by a path. The file
+`apps/desktop/src-tauri/capabilities/main.json` grants these commands.
+
 ## Installation for Contributors
 
 Contributors build Suds from source. The [mise](https://mise.jdx.dev/)
-version manager installs the pinned
-Rust toolchain, [Task](https://taskfile.dev/), and yamlfmt:
+version manager installs the pinned Rust toolchain, Node.js, pnpm,
+[Task](https://taskfile.dev/), and yamlfmt:
 
 ```sh
 mise install
 task build
 ./target/release/suds inspect
+task desktop            # the desktop application, on macOS
 ```
+
+The repository is a Cargo workspace. The `crates/suds-core` crate holds the
+inspection code, `apps/cli` holds the `suds` command, and `apps/desktop` holds
+the desktop application. Neither interface invokes the other.
 
 ## Usage
 
@@ -118,7 +141,8 @@ The `errors` and `skipped_mounts` lists hold at most ten entries each, and
 the counts beside them cover every occurrence. A root's measurement covers
 every entry beneath the root, and a child's measurement covers the child
 and every entry beneath it. Paths that are not valid UTF-8 appear with
-replacement characters.
+replacement characters. Suds records each native path internally, so the
+replacement affects only the report.
 
 ## Measurements
 
@@ -165,6 +189,9 @@ replacement characters.
   permissions.
 - The report can reveal private file and directory names. Treat it as local
   machine data.
+- The desktop application's web view loads only the application's own
+  files and may call the four application commands and nothing else. It
+  never holds a path that it could pass back to name a file.
 
 ## Development
 
@@ -176,9 +203,12 @@ replacement characters.
 | `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
 | `task check` | Build, test, and lint |
 | `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
+| `task desktop` | Run the desktop application in development mode |
+| `task desktop:check` | Build the desktop frontend, then test and lint the desktop crate |
 
 The `task check` command needs no network service, container, or elevated
-privilege once `mise install` has run. [CONTRIBUTING.md](CONTRIBUTING.md)
+privilege once `mise install` has run. The `task desktop:check` command
+also installs the frontend's pinned packages, and it runs on macOS. [CONTRIBUTING.md](CONTRIBUTING.md)
 describes the conventions of the repository.
 
 ## License

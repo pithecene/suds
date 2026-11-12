@@ -5,7 +5,7 @@
 
 use std::io::{self, Write};
 
-use crate::model::{EntryKind, Report, RootResult, RootStatus};
+use suds_core::model::{EntryKind, Report, RootResult, RootStatus};
 
 const NOTE: &str = "Each allocated size estimates the disk space of an entry's blocks. \
 On APFS, clones, compression, snapshots, and purgeable storage can make the recoverable space \

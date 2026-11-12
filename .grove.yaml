@@ -1,6 +1,6 @@
 grove:
   intent: >-
-    Local-first maintenance and reconciliation utility for developer workstations, beginning with auditable macOS userland hygiene and extending to Linux.
+    Local-first desktop and command-line system for organizing, maintaining, and understanding developer workstations across files, repositories, worktrees, toolchains, configuration, and agent activity.
   horizon: perennial
   role: infrastructure
   phase: expanding

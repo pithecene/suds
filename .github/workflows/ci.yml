@@ -39,11 +39,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'Cargo.lock', 'apps/desktop/pnpm-lock.yaml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
 
       - name: ✅ Check
         run: task check
+
+      # The desktop application targets macOS first, and its Linux build needs WebKitGTK.
+      - name: 🖥️ Check the Desktop Application
+        if: runner.os == 'macOS'
+        run: task desktop:check
 
       # The release binary inspects a fixture that the job generates, never the runner's home directory.
       - name: 🔍 Inspect a Fixture

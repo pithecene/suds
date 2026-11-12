@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window may list locations, add a folder through the native picker, and start or cancel an inspection. It receives no filesystem, shell, or network permission.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-list-locations",
+    "allow-choose-location",
+    "allow-start-inspection",
+    "allow-cancel-inspection"
+  ]
+}

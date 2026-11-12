@@ -10,3 +10,9 @@ mise.local.toml
 
 # Bosun's components installed into this repository as a consumer
 .bosun/
+
+# The desktop frontend's dependencies and build output, and the schemas that
+# the Tauri build step generates
+node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/gen/

@@ -1,24 +1,28 @@
-[package]
-name = "suds"
+[workspace]
+resolver = "3"
+members = ["crates/suds-core", "apps/cli", "apps/desktop/src-tauri"]
+# The desktop crate needs the frontend's build output and, on Linux, the
+# WebKitGTK libraries, so a plain cargo command builds the core and the CLI.
+default-members = ["crates/suds-core", "apps/cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 publish = false
 license = "Apache-2.0"
-description = "Local-first maintenance and reconciliation utility for developer workstations"
 repository = "https://github.com/pithecene/suds"
 
-[dependencies]
+[workspace.dependencies]
+suds-core = { path = "crates/suds-core" }
 clap = { version = "=4.6.7", features = ["derive"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-
-# A bind mount keeps its device, so only statx's mount-root attribute marks it.
-[target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "=1.1.6", features = ["fs"] }
-
-[dev-dependencies]
 tempfile = "=3.27.0"
+tauri = "=2.12.5"
+tauri-build = "=2.7.4"
+tauri-plugin-dialog = "=2.8.4"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"

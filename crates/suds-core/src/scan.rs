@@ -9,10 +9,12 @@ use std::ffi::OsString;
 use std::fs::{self, FileType, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::model::{Child, EntryKind, ErrorKind, Measure, RootResult, RootStatus, TraversalError};
+use crate::inspection::{ChildScan, RootScan, ScanError};
+use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
 use crate::timestamp;
 
@@ -25,19 +27,21 @@ const SAMPLE_LIMIT: usize = 10;
 const BLOCK_UNIT: u64 = 512;
 
 /// Scans one root and returns its result.
-pub fn scan_root(spec: &RootSpec) -> RootResult {
+///
+/// The scan stops early once `cancel` holds `true`, and the result then
+/// records the cancellation and the measurements taken before it.
+pub fn scan_root(spec: &RootSpec, cancel: &AtomicBool) -> RootScan {
     let started = Instant::now();
     let (status, walker, measure, children) = match &spec.anchor {
         Some(anchor) => check_ancestors(anchor, &spec.path),
         None => None,
     }
-    .unwrap_or_else(|| walk_root(&spec.path));
-    RootResult {
-        id: spec.id.clone(),
-        kind: spec.kind,
-        path: spec.path.to_string_lossy().into_owned(),
+    .unwrap_or_else(|| walk_root(&spec.path, cancel));
+    RootScan {
+        spec: spec.clone(),
         status,
-        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        cancelled: walker.cancelled,
+        elapsed: started.elapsed(),
         measure,
         children,
         skipped_mount_count: walker.mount_count,
@@ -47,7 +51,7 @@ pub fn scan_root(spec: &RootSpec) -> RootResult {
     }
 }
 
-type Outcome = (RootStatus, Walker, Measure, Vec<Child>);
+type Outcome = (RootStatus, Walker, Measure, Vec<ChildScan>);
 
 /// Examines each directory between a default root's anchor and the root
 /// without following links. The function returns an outcome when a directory
@@ -84,7 +88,7 @@ fn check_ancestors(anchor: &Path, root: &Path) -> Option<Outcome> {
     None
 }
 
-fn walk_root(root: &Path) -> Outcome {
+fn walk_root(root: &Path, cancel: &AtomicBool) -> Outcome {
     let meta = match fs::symlink_metadata(root) {
         Ok(meta) => meta,
         Err(err) => {
@@ -112,11 +116,15 @@ fn walk_root(root: &Path) -> Outcome {
             );
         };
         for name in names {
+            if cancel.load(Ordering::Relaxed) {
+                walker.cancelled = true;
+                break;
+            }
             let mut tally = Tally::default();
-            if let Some(kind) = walker.walk(&root.join(&name), &mut tally) {
+            if let Some(kind) = walker.walk(&root.join(&name), &mut tally, cancel) {
                 totals.add(&tally);
-                children.push(Child {
-                    name: name.to_string_lossy().into_owned(),
+                children.push(ChildScan {
+                    name,
                     kind,
                     measure: tally.into_measure(),
                 });
@@ -130,10 +138,10 @@ fn walk_root(root: &Path) -> Outcome {
                 .then_with(|| a.name.cmp(&b.name))
         });
     } else {
-        walker.walk(root, &mut totals);
+        walker.walk(root, &mut totals, cancel);
     }
 
-    let status = if walker.error_count == 0 {
+    let status = if walker.error_count == 0 && !walker.cancelled {
         RootStatus::Complete
     } else {
         RootStatus::Partial
@@ -149,9 +157,11 @@ struct Walker {
     /// the root.
     linked: HashSet<(u64, u64)>,
     error_count: u64,
-    errors: Vec<TraversalError>,
+    errors: Vec<ScanError>,
     mount_count: u64,
-    mounts: Vec<String>,
+    mounts: Vec<PathBuf>,
+    /// Whether the scan stopped at a cancellation request.
+    cancelled: bool,
 }
 
 impl Walker {
@@ -163,13 +173,14 @@ impl Walker {
             errors: Vec::new(),
             mount_count: 0,
             mounts: Vec::new(),
+            cancelled: false,
         }
     }
 
     /// Adds the sums for the entry at `start` and everything beneath it to
     /// `tally`. The function returns the entry's type, or `None` when the scan
     /// cannot measure the entry or the entry lies on another filesystem.
-    fn walk(&mut self, start: &Path, tally: &mut Tally) -> Option<EntryKind> {
+    fn walk(&mut self, start: &Path, tally: &mut Tally, cancel: &AtomicBool) -> Option<EntryKind> {
         let kind = self.visit(start, tally)?;
         if kind == EntryKind::Directory {
             // The listings arrive sorted, and the traversal pushes subdirectories
@@ -178,6 +189,10 @@ impl Walker {
             // the tree.
             let mut pending = vec![start.to_path_buf()];
             while let Some(dir) = pending.pop() {
+                if cancel.load(Ordering::Relaxed) {
+                    self.cancelled = true;
+                    break;
+                }
                 let Some(names) = self.list(&dir) else {
                     continue;
                 };
@@ -219,7 +234,7 @@ impl Walker {
         if mount {
             self.mount_count = self.mount_count.saturating_add(1);
             if self.mounts.len() < SAMPLE_LIMIT {
-                self.mounts.push(path.to_string_lossy().into_owned());
+                self.mounts.push(path.to_path_buf());
             }
             return None;
         }
@@ -260,8 +275,8 @@ impl Walker {
                 io::ErrorKind::NotFound => ErrorKind::Vanished,
                 _ => ErrorKind::Other,
             };
-            self.errors.push(TraversalError {
-                path: path.to_string_lossy().into_owned(),
+            self.errors.push(ScanError {
+                path: path.to_path_buf(),
                 kind,
                 message: err.to_string(),
             });

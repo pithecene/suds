@@ -16,30 +16,44 @@ constraints, not architecture.
 
 ## Boundary
 
-Suds owns the semantics of workstation maintenance and reconciliation. The
-current release observes filesystem metadata and nothing more.
+Suds owns the semantics of workstation organization and maintenance. The
+current release observes filesystem metadata and modifies nothing. These
+rules hold for every release:
 
-- Add no operation that mutates the filesystem: no cleanup, move,
-  quarantine, rewrite, installation, or repair.
+- Mutate nothing outside an explicit plan that a person can inspect before
+  it applies. Each operation states its preconditions and its evidence, and
+  each writes a journal entry. The current release mutates nothing.
+- Delete nothing permanently by default, and remove nothing because of its
+  age alone.
+- Let no proposal that a model generates apply itself.
 - Request no elevated privilege and never invoke `sudo`.
-- Add no system-owned path to a default profile. When a caller names an
-  explicit root, Suds reads only that root.
-- Make no network request.
-- Invoke no external program. In particular, never call `du`, `find`,
-  `brew`, a package manager, or a cleanup program.
-- Read no file contents and no extended attribute.
-- Follow no symbolic link.
+- Execute no shell string. Call an external program only through a typed
+  adapter for the tool that owns the state. The current release calls none.
+- Read file contents only through an explicit capability or an action of
+  the user. Background inspection reads metadata alone.
+- Make no network request outside a remote connector that the user
+  authorizes separately. The current release makes none.
+- Follow no symbolic link by accident. Add no system-owned path to a
+  default profile, and act on no path outside an operation's declared
+  scope.
 - Suppress no permission error or traversal error. Record each one in the
-  report.
+  result.
 
 ## Crate Structure
 
-- Build no broad provider framework and no plugin interface.
+- The `suds-core` crate holds the model and the inspection that the
+  interfaces share. The command line and the desktop application each call
+  `suds-core`, and neither invokes the other.
+- The core serves this workspace and publishes no crate.
+- Split a crate only when a second consumer exists.
+- Build no provider framework. Add an adapter when an integration arrives.
 - Write concrete types before traits. Introduce a trait only when two
   implementations exist.
-- Retain a single crate until a proposed second crate would serve a
-  consumer independent of the first.
-- Keep the binary free of a public library interface.
+- Keep each file's native path as its identity. A displayed string never
+  names a file in an operation.
+- Grant the desktop web view application commands alone, with no generic
+  filesystem, shell, or network permission. Review the capability file as
+  code.
 
 ## Source Code Conventions
 
@@ -47,7 +61,8 @@ current release observes filesystem metadata and nothing more.
 - Write no `unsafe` code, because the crate forbids it.
 - Pin each dependency to an exact version, and state the reason for each
   new dependency in its pull request.
-- Run `task check` before each commit.
+- Run `task check` before each commit, and `task desktop:check` before a
+  commit that changes the desktop application.
 
 ## Commits
 

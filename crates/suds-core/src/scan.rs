@@ -26,8 +26,6 @@ const SAMPLE_LIMIT: usize = 10;
 /// the filesystem.
 const BLOCK_UNIT: u64 = 512;
 
-/// Scans one root and returns its result.
-///
 /// The scan stops early once `cancel` holds `true`. The result then records
 /// the cancellation and lists only the children whose measurement finished
 /// before it.

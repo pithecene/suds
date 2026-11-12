@@ -69,10 +69,26 @@ export function App() {
   const inspect = useCallback(
     (ids: number[]) => {
       setFailure(null);
-      startInspection(ids, onEvent)
+      // The backend starts the scan before it answers with the identifier, so
+      // a quick scan can report before the answer arrives. The run holds those
+      // events and replays them once it knows its identifier.
+      let started = false;
+      const early: InspectionEvent[] = [];
+      const receive = (event: InspectionEvent) => {
+        if (started) {
+          onEvent(event);
+        } else {
+          early.push(event);
+        }
+      };
+      startInspection(ids, receive)
         .then((id) => {
           current.current = id;
           setRun({ id, pending: new Set(ids) });
+          started = true;
+          for (const event of early) {
+            onEvent(event);
+          }
         })
         .catch((err: unknown) => setFailure(String(err)));
     },

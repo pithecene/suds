@@ -198,6 +198,12 @@ impl Walker {
                 };
                 let mut subdirs = Vec::new();
                 for name in names {
+                    // A single directory can hold many entries, so a
+                    // cancellation request takes effect between entries.
+                    if cancel.load(Ordering::Relaxed) {
+                        self.cancelled = true;
+                        break;
+                    }
                     let path = dir.join(name);
                     if self.visit(&path, tally) == Some(EntryKind::Directory) {
                         subdirs.push(path);

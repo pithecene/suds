@@ -202,7 +202,10 @@ export function App() {
           {selectedLocation === null ? (
             <p className="muted">No location is selected.</p>
           ) : (
+            // The key gives each location its own detail state, so a table that
+            // one location expanded starts collapsed for the next.
             <RootDetail
+              key={selectedLocation.id}
               location={selectedLocation}
               outcome={selectedOutcome}
               scanning={run?.pending.has(selectedLocation.id) ?? false}

@@ -27,7 +27,8 @@ pub enum InspectionEvent {
         cancelled: bool,
         result: Box<RootResult>,
     },
-    /// The run ended, after every root or at a cancellation request.
+    /// The run ended, after the last root's scan or at a cancellation
+    /// request.
     Finished {
         inspection: InspectionId,
         cancelled: bool,
@@ -48,8 +49,8 @@ pub struct Inspections {
 }
 
 impl Inspections {
-    /// Starts an inspection of `roots` and returns its identifier. Each
-    /// event goes to `send`, from the background thread.
+    /// Starts an inspection of `roots` and returns its identifier. The
+    /// background thread passes each event to `send`.
     pub fn start<F>(&self, roots: Vec<(LocationId, RootSpec)>, send: F) -> InspectionId
     where
         F: Fn(InspectionEvent) + Send + 'static,
@@ -105,8 +106,9 @@ fn run(
     });
 }
 
-/// Locks a mutex. A thread that panicked while holding one of these locks
-/// left a plain value behind, so the value stays usable.
+/// Locks a mutex and recovers its value from a poisoned lock. No update to a
+/// guarded value calls code that can panic partway through, so the recovered
+/// value stays whole.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()

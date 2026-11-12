@@ -28,7 +28,7 @@ const BLOCK_UNIT: u64 = 512;
 
 /// The scan stops early once `cancel` holds `true`. The result then records
 /// the cancellation and lists only the children whose measurement finished
-/// before it.
+/// before the cancellation.
 pub fn scan_root(spec: &RootSpec, cancel: &AtomicBool) -> RootScan {
     let started = Instant::now();
     let (status, walker, measure, children) = match &spec.anchor {

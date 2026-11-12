@@ -3,8 +3,8 @@
 Suds is a local-first desktop and command-line environment manager for
 developer workstations. It treats files, repositories, worktrees,
 toolchains, configuration, and agent activity as parts of one environment.
-People use Suds through its desktop application, and automation uses the
-same machinery through the `suds` command.
+People use Suds through its desktop application, and automation calls the
+same `suds-core` crate through the `suds` command.
 
 ## Current Release Boundary
 
@@ -16,11 +16,10 @@ table or one JSON document, and the desktop application shows the same
 measurements in a window.
 
 The release deletes, moves, quarantines, rewrites, installs, and repairs
-nothing. It interprets no package manager's state, keeps no state between
-runs, and calls no external program. A later release may organize and
-maintain the workstation, and each of its operations will follow the
-rules in [AGENTS.md](AGENTS.md): an inspectable plan, stated
-preconditions, and a journal entry. In Suds, optimization means a measured
+nothing. It interprets no package manager's state, records no state
+between runs, and calls no external program. [AGENTS.md](AGENTS.md) states
+the rules that bind any operation that changes a file: an inspectable plan,
+stated preconditions, and a journal entry. In Suds, optimization means a measured
 reduction in storage use, structural friction, or operational residue.
 Suds makes no claim about machine performance.
 
@@ -61,8 +60,8 @@ On Linux, Suds requires each root as an argument, as in
 ## Desktop Application
 
 The desktop application runs on macOS. Its window lists the default roots
-and each folder that the user adds through the native folder picker. It
-inspects them on a background thread and shows each root's result as soon
+and each folder that the user adds through the native folder picker. The
+application inspects them on a background thread and shows each root's result as soon
 as that root's scan ends, and the user can cancel a scan in progress. A
 cancelled root's result lists only the children that the scan finished
 before the cancellation, and its status is `partial`. For
@@ -91,7 +90,7 @@ task desktop            # the desktop application, on macOS
 ```
 
 The repository is a Cargo workspace. The `crates/suds-core` crate holds the
-inspection, `apps/cli` holds the `suds` command, and `apps/desktop` holds
+inspection code, `apps/cli` holds the `suds` command, and `apps/desktop` holds
 the desktop application. Neither interface invokes the other.
 
 ## Usage
@@ -142,7 +141,7 @@ The `errors` and `skipped_mounts` lists hold at most ten entries each, and
 the counts beside them cover every occurrence. A root's measurement covers
 every entry beneath the root, and a child's measurement covers the child
 and every entry beneath it. Paths that are not valid UTF-8 appear with
-replacement characters. Suds keeps each native path internally, so the
+replacement characters. Suds records each native path internally, so the
 replacement affects only the report.
 
 ## Measurements
@@ -191,8 +190,8 @@ replacement affects only the report.
 - The report can reveal private file and directory names. Treat it as local
   machine data.
 - The desktop application's web view loads only the application's own
-  files, receives the four inspection commands alone, and never receives a
-  path that it could pass back to name a file.
+  files and may call the four application commands and nothing else. It
+  never holds a path that it could pass back to name a file.
 
 ## Development
 

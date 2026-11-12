@@ -1,7 +1,7 @@
 //! The lossless result of an inspection, and its conversion to the
 //! `suds.inspection/v1` report.
 //!
-//! The scan keeps each path and name in its native form, because an
+//! The scan records each path and name in its native form, because an
 //! operating-system path need not be valid UTF-8. Only the conversion to a
 //! report replaces invalid sequences, so a displayed name never serves as the
 //! identity of a file.
@@ -101,8 +101,8 @@ impl RootScan {
 
 /// Builds a `suds.inspection/v1` report from the scans of one run.
 ///
-/// The `observed_at` argument counts the seconds since the Unix epoch at the
-/// start of the run.
+/// The `observed_at` argument holds the start time of the run, in seconds
+/// since the Unix epoch.
 pub fn build_report(scans: &[RootScan], observed_at: i64) -> Report {
     let status = if scans
         .iter()
@@ -163,8 +163,8 @@ mod tests {
         assert_eq!(scan.measure.files, 1);
     }
 
-    /// macOS refuses a file name that is not valid UTF-8, so only Linux can
-    /// create one.
+    /// macOS rejects a file name that is not valid UTF-8, so this test runs
+    /// on Linux alone.
     #[cfg(target_os = "linux")]
     #[test]
     fn keeps_a_non_utf8_name_intact_and_replaces_it_only_in_the_report() {

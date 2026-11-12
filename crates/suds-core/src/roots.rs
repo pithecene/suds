@@ -1,4 +1,4 @@
-//! The roots of an inspection that an operator names.
+//! Inspection roots that an operator names.
 
 use std::path::{Component, Path, PathBuf};
 

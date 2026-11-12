@@ -1,6 +1,6 @@
 //! The Suds command-line interface.
 //!
-//! This release observes filesystem metadata and modifies nothing.
+//! This release reads filesystem metadata and modifies no file.
 
 mod cli;
 mod table;
@@ -46,7 +46,8 @@ fn inspect(args: &InspectArgs) -> ExitCode {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         });
-    // The command line offers no cancellation, so the flag never changes.
+    // The `suds` command accepts no cancellation request, so this
+    // cancellation flag stays false.
     let never = AtomicBool::new(false);
     let scans: Vec<RootScan> = roots
         .iter()

@@ -1,7 +1,8 @@
 //! The Suds desktop application.
 //!
-//! The webview presents the inspection, and the commands in this file are
-//! its only access to the workstation. None of them modifies a file.
+//! The webview presents the inspection. The commands in this file are the
+//! webview's only access to the workstation, and none of them modifies a
+//! file.
 
 mod inspection;
 mod locations;
@@ -21,7 +22,8 @@ fn list_locations(locations: State<'_, Mutex<Locations>>) -> LocationList {
 }
 
 /// Opens the native folder picker and adds the chosen folder. An async
-/// command runs off the main thread, so the picker may block it.
+/// command runs off the main thread, so the picker may block this command
+/// without freezing the window.
 #[tauri::command]
 async fn choose_location<R: Runtime>(
     app: AppHandle<R>,
@@ -47,7 +49,8 @@ fn start_inspection(
         .specs(&ids)
         .map_err(|id| format!("no location has the identifier {id}"))?;
     Ok(inspections.start(roots, move |event| {
-        // A closed window drops the channel, and the scan then ends unread.
+        // A closed window drops the channel, and the results of the rest of
+        // the scan then reach no receiver.
         let _ = events.send(event);
     }))
 }
@@ -78,8 +81,9 @@ fn setup<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         ])
 }
 
-/// The application's configuration, assets, and capabilities. The macro
-/// embeds the macOS property list, so the binary may expand it only once.
+/// The application's configuration, assets, and capabilities. Each
+/// expansion of `generate_context!` embeds the macOS property list, so the
+/// crate expands the macro once.
 fn context<R: Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }

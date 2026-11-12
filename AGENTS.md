@@ -20,15 +20,16 @@ Suds owns the semantics of workstation organization and maintenance. The
 current release observes filesystem metadata and modifies nothing. These
 rules hold for every release:
 
-- Mutate nothing outside an explicit plan that a person can inspect before
-  it applies. Each operation states its preconditions and its evidence, and
-  each writes a journal entry. The current release mutates nothing.
+- Mutate nothing outside an explicit plan that a person inspects before
+  Suds applies the plan. Each operation states its preconditions and its
+  evidence, and Suds writes a journal entry for each operation.
 - Delete nothing permanently by default, and remove nothing because of its
   age alone.
 - Let no proposal that a model generates apply itself.
 - Request no elevated privilege and never invoke `sudo`.
 - Execute no shell string. Call an external program only through a typed
-  adapter for the tool that owns the state. The current release calls none.
+  adapter for the program that owns the state. The current release calls
+  none.
 - Read file contents only through an explicit capability or an action of
   the user. Background inspection reads metadata alone.
 - Make no network request outside a remote connector that the user
@@ -41,19 +42,20 @@ rules hold for every release:
 
 ## Crate Structure
 
-- The `suds-core` crate holds the model and the inspection that the
-  interfaces share. The command line and the desktop application each call
+- The `suds-core` crate holds the model and the inspection code that the
+  command line and the desktop application share. Each of the two calls
   `suds-core`, and neither invokes the other.
-- The core serves this workspace and publishes no crate.
+- Publish no crate from this workspace, `suds-core` included.
 - Split a crate only when a second consumer exists.
-- Build no provider framework. Add an adapter when an integration arrives.
+- Build no provider framework. Add an adapter only when a requested
+  change integrates the program that the adapter serves.
 - Write concrete types before traits. Introduce a trait only when two
   implementations exist.
 - Keep each file's native path as its identity. A displayed string never
   names a file in an operation.
-- Grant the desktop web view application commands alone, with no generic
-  filesystem, shell, or network permission. Review the capability file as
-  code.
+- Let the desktop web view call application commands and nothing else: no
+  generic filesystem, shell, or network permission. Review the capability
+  file as code.
 
 ## Source Code Conventions
 

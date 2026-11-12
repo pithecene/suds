@@ -1,9 +1,9 @@
 //! The locations that the window lists: the platform's default roots and
 //! the folders that the user adds.
 //!
-//! Each location keeps its native path here. The webview receives only an
-//! identifier and a display path, so no string that the webview returns can
-//! name a file.
+//! This module records each location's native path. The webview receives
+//! only an identifier and a display path, so no string that the webview
+//! returns can name a file.
 
 use std::path::PathBuf;
 
@@ -21,22 +21,22 @@ pub struct Location {
     pub spec: RootSpec,
 }
 
-/// What the webview receives for one location.
+/// The webview's view of one location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocationView {
     pub id: LocationId,
     pub label: String,
     pub kind: RootKind,
     pub display_path: String,
-    /// Whether the user added the location, rather than the platform.
+    /// Whether the user added the location, as opposed to a default root.
     pub explicit: bool,
 }
 
-/// What the webview receives when it opens.
+/// The location list that the webview requests when the window opens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocationList {
     pub locations: Vec<LocationView>,
-    /// Why the platform offers no default location, if it offers none.
+    /// The reason that the platform offers no default location.
     pub profile_error: Option<String>,
 }
 

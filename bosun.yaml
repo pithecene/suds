@@ -2,7 +2,7 @@
 # maintainers' governance check and never a build dependency, so `task check` runs without it.
 version: 1
 # Pithecene's enterprise layer (pithecene/infrastructure, bosun/bosun.yaml) supplies the process stages and hooks.
-extends: ghcr.io/pithecene/bosun-config:v1
+extends: ghcr.io/pithecene/bosun-config:v2
 # The prose check covers the whole repository, so each new document and Rust source joins it when it lands.
 prose:
   coverage: {}

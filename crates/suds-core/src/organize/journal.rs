@@ -70,6 +70,13 @@ pub enum Event {
         index: usize,
         refusal: Refusal,
     },
+    /// A rename or a reversal succeeded, but Suds cannot establish where the
+    /// planned entry lies. A person must examine both paths.
+    MoveUnresolved {
+        run: String,
+        index: usize,
+        detail: String,
+    },
     /// A later run examined a rename that an interruption left without an
     /// outcome.
     Reconciled {
@@ -501,6 +508,12 @@ impl JournalState {
                 state.status = MoveStatus::Refused;
                 state.refusal = Some(refusal.clone());
             }),
+            Event::MoveUnresolved { run, index, detail } => {
+                self.update_move(run, *index, |state| {
+                    state.status = MoveStatus::Unresolved;
+                    state.refusal = Some(Refusal::new(RefusalCode::Unresolved, detail.clone()));
+                });
+            }
             Event::Reconciled {
                 run,
                 index,

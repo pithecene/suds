@@ -181,8 +181,11 @@ application built and recorded in the journal, unchanged, and each plan
 runs once. Immediately before each move, Suds verifies the entry's
 recorded identity, the identity and canonical path of both directories,
 and that the destination is free. It then renames the entry with the
-kernel's no-replace flag, so the move is atomic and overwrites nothing. A
-refused move leaves the other moves to proceed. The `undo` command
+kernel's no-replace flag, so the move is atomic and overwrites nothing.
+After the rename, Suds confirms that the destination holds the planned
+entry. When another process swapped the source in the meantime, Suds
+returns the swapped entry and refuses the move. A refused move leaves the
+other moves to proceed. The `undo` command
 reverses each move that remains applied, in reverse order. It refuses a move
 whose entry changed after the move and a move whose original path now holds
 another entry. Suds never merges, renames to avoid a conflict, copies, or

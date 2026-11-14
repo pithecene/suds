@@ -229,19 +229,7 @@ fn apply_move(
         prepared.name,
         planned,
     ) {
-        Ok(()) => {
-            // The rename succeeded whether or not this read does. Without the
-            // revision, an undo refuses, because it cannot prove identity.
-            let revision = fs::symlink_metadata(planned.destination.as_path())
-                .ok()
-                .map(|meta| EntryRevision::from_metadata(&meta));
-            journal.append(Event::MoveApplied {
-                run: run.to_owned(),
-                index,
-                revision,
-            })?;
-            Ok(outcome(MoveStatus::Applied, None))
-        }
+        Ok(()) => settle_move(journal, run, index, planned, &prepared),
         Err(refusal) => {
             journal.append(Event::MoveRefused {
                 run: run.to_owned(),
@@ -251,6 +239,88 @@ fn apply_move(
             Ok(outcome(MoveStatus::Refused, Some(refusal)))
         }
     }
+}
+
+/// Records a forward rename's outcome after it verifies the entry that
+/// arrived. No system call renames an entry by its inode, so another process
+/// can swap the source between the check and the rename. Suds then returns
+/// the swapped entry and refuses the move.
+fn settle_move(
+    journal: &mut Journal,
+    run: &str,
+    index: usize,
+    planned: &PlannedMove,
+    prepared: &Prepared<'_>,
+) -> Result<MoveOutcome, OperationError> {
+    let source = planned.source.as_path();
+    let destination = planned.destination.as_path();
+    let outcome = |status, refusal| MoveOutcome {
+        index,
+        source: planned.source.clone(),
+        destination: planned.destination.clone(),
+        status,
+        refusal,
+    };
+    let arrived = Presence::at(destination, &planned.expected);
+    if let Presence::Expected(revision) = arrived {
+        journal.append(Event::MoveApplied {
+            run: run.to_owned(),
+            index,
+            revision: Some(revision),
+        })?;
+        return Ok(outcome(MoveStatus::Applied, None));
+    }
+    let detail = if matches!(arrived, Presence::Other) {
+        let returned = renameat_with(
+            &prepared.destination,
+            prepared.name,
+            &prepared.source,
+            prepared.name,
+            RenameFlags::NOREPLACE,
+        );
+        match returned {
+            Ok(()) => {
+                let refusal = Refusal::new(
+                    RefusalCode::SourceChanged,
+                    format!(
+                        "another entry took the place of {} during the move, so Suds returned that entry and moved nothing",
+                        source.display()
+                    ),
+                );
+                journal.append(Event::MoveRefused {
+                    run: run.to_owned(),
+                    index,
+                    refusal: refusal.clone(),
+                })?;
+                return Ok(outcome(MoveStatus::Refused, Some(refusal)));
+            }
+            Err(errno) => format!(
+                "the rename moved an entry that the plan does not name to {}, and Suds could not return it to {}: {}",
+                destination.display(),
+                source.display(),
+                io::Error::from(errno)
+            ),
+        }
+    } else {
+        format!("after the rename, {}", arrived.describe(destination))
+    };
+    unresolved(journal, run, index, detail)
+        .map(|refusal| outcome(MoveStatus::Unresolved, Some(refusal)))
+}
+
+/// Records that Suds cannot establish where a renamed entry lies.
+fn unresolved(
+    journal: &mut Journal,
+    run: &str,
+    index: usize,
+    detail: String,
+) -> Result<Refusal, OperationError> {
+    journal.append(Event::MoveUnresolved {
+        run: run.to_owned(),
+        index,
+        detail: detail.clone(),
+    })?;
+    Ok(Refusal::new(RefusalCode::Unresolved, detail))
 }
 
 /// The directories of a move, opened and verified, and the entry's name.
@@ -496,8 +566,8 @@ fn reverse_move(
         })?;
         Ok(outcome(MoveStatus::Applied, Some(refusal)))
     };
-    let prepared = match check_reverse(plan, planned, revision) {
-        Ok(prepared) => prepared,
+    let (prepared, moved) = match check_reverse(plan, planned, revision) {
+        Ok(checked) => checked,
         Err(refusal) => return refuse(journal, refusal),
     };
     journal.append(Event::ReverseStarted {
@@ -511,13 +581,7 @@ fn reverse_move(
         planned,
     );
     match reversed {
-        Ok(()) => {
-            journal.append(Event::MoveReversed {
-                run: run.to_owned(),
-                index,
-            })?;
-            Ok(outcome(MoveStatus::Reversed, None))
-        }
+        Ok(()) => settle_reverse(journal, run, index, planned, &prepared, &moved),
         Err(mut refusal) => {
             if refusal.code == RefusalCode::DestinationExists {
                 refusal.code = RefusalCode::SourceOccupied;
@@ -527,13 +591,78 @@ fn reverse_move(
     }
 }
 
+/// Records a reversal's outcome after it verifies the entry that returned,
+/// and returns a swapped entry to the destination, as `settle_move` does.
+fn settle_reverse(
+    journal: &mut Journal,
+    run: &str,
+    index: usize,
+    planned: &PlannedMove,
+    prepared: &Prepared<'_>,
+    moved: &EntryRevision,
+) -> Result<MoveOutcome, OperationError> {
+    let source = planned.source.as_path();
+    let destination = planned.destination.as_path();
+    let outcome = |status, refusal| MoveOutcome {
+        index,
+        source: planned.source.clone(),
+        destination: planned.destination.clone(),
+        status,
+        refusal,
+    };
+    let returned = Presence::at(source, moved);
+    if matches!(returned, Presence::Expected(_)) {
+        journal.append(Event::MoveReversed {
+            run: run.to_owned(),
+            index,
+        })?;
+        return Ok(outcome(MoveStatus::Reversed, None));
+    }
+    let detail = if matches!(returned, Presence::Other) {
+        let restored = renameat_with(
+            &prepared.source,
+            prepared.name,
+            &prepared.destination,
+            prepared.name,
+            RenameFlags::NOREPLACE,
+        );
+        match restored {
+            Ok(()) => {
+                let refusal = Refusal::new(
+                    RefusalCode::DestinationChanged,
+                    format!(
+                        "another entry took the place of {} during the undo, so Suds returned that entry and reversed nothing",
+                        destination.display()
+                    ),
+                );
+                journal.append(Event::ReverseRefused {
+                    run: run.to_owned(),
+                    index,
+                    refusal: refusal.clone(),
+                })?;
+                return Ok(outcome(MoveStatus::Applied, Some(refusal)));
+            }
+            Err(errno) => format!(
+                "the undo moved an entry that Suds did not move to {}, and Suds could not return it to {}: {}",
+                source.display(),
+                destination.display(),
+                io::Error::from(errno)
+            ),
+        }
+    } else {
+        format!("after the undo's rename, {}", returned.describe(source))
+    };
+    unresolved(journal, run, index, detail)
+        .map(|refusal| outcome(MoveStatus::Unresolved, Some(refusal)))
+}
+
 /// Verifies every precondition of a reversal: the destination still holds
 /// the entry that Suds moved, and the source path is free.
 fn check_reverse<'a>(
     plan: &MovePlan,
     planned: &'a PlannedMove,
     revision: Option<EntryRevision>,
-) -> Result<Prepared<'a>, Refusal> {
+) -> Result<(Prepared<'a>, EntryRevision), Refusal> {
     let name = check_scope(plan, planned)?;
     let destination_path = planned.destination.as_path();
     let Some(moved) = revision else {
@@ -574,11 +703,12 @@ fn check_reverse<'a>(
         }
         refusal
     })?;
-    Ok(Prepared {
+    let prepared = Prepared {
         source,
         destination,
         name,
-    })
+    };
+    Ok((prepared, moved))
 }
 
 /// Examines each rename that the journal started without an outcome, and
@@ -751,4 +881,62 @@ fn close_interrupted(journal: &mut Journal) -> Result<(), OperationError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{check_move, record_plan, rename_without_replacing, settle_move};
+    use crate::organize::journal::{Event, Journal, JournalState, MoveStatus};
+    use crate::organize::plan::{MoveRequest, RefusalCode, plan_move};
+
+    /// The test swaps the source between the precondition check and the
+    /// rename, as a concurrent process could.
+    #[test]
+    fn returns_an_entry_that_took_the_source_path_before_the_rename() {
+        let dir = TempDir::new().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let (from, to) = (root.join("from"), root.join("to"));
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(from.join("file"), b"planned").unwrap();
+        let request = MoveRequest {
+            name: OsString::from("file"),
+            expected: None,
+        };
+        let plan = plan_move(&from, &[request], &to, 0).unwrap();
+        let mut journal = Journal::open(&root.join("journal")).unwrap();
+        record_plan(&mut journal, &plan).unwrap();
+        journal
+            .append(Event::RunStarted {
+                run: "run-race".to_owned(),
+                plan: plan.id.clone(),
+            })
+            .unwrap();
+
+        let planned = &plan.moves[0];
+        let prepared = check_move(&plan, planned).unwrap();
+        fs::rename(from.join("file"), root.join("aside")).unwrap();
+        fs::write(from.join("file"), b"swapped").unwrap();
+        rename_without_replacing(
+            &prepared.source,
+            &prepared.destination,
+            prepared.name,
+            planned,
+        )
+        .unwrap();
+        let outcome = settle_move(&mut journal, "run-race", 0, planned, &prepared).unwrap();
+
+        assert_eq!(outcome.status, MoveStatus::Refused);
+        assert_eq!(outcome.refusal.unwrap().code, RefusalCode::SourceChanged);
+        assert_eq!(fs::read(from.join("file")).unwrap(), b"swapped");
+        assert!(!to.join("file").exists());
+        assert_eq!(fs::read(root.join("aside")).unwrap(), b"planned");
+        let state = JournalState::from_records(journal.records());
+        assert_eq!(state.runs[0].moves[0].status, MoveStatus::Refused);
+    }
 }

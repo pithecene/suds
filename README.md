@@ -8,18 +8,21 @@ same `suds-core` crate through the `suds` command.
 
 ## Current Release Boundary
 
-This release measures storage and changes nothing. The `suds inspect`
+This release measures storage and makes one change. It moves a
+directory's direct children into another directory on the same
+filesystem, and only through a plan that a person reviews. The `suds inspect`
 command and the desktop application read filesystem metadata beneath a set
 of user-owned roots. For each root, they report its storage use, its entry
 counts, and its largest direct children. The command writes a terminal
 table or one JSON document, and the desktop application shows the same
 measurements in a window.
 
-The release deletes, moves, quarantines, rewrites, installs, and repairs
-nothing. It interprets no package manager's state, records no state
-between runs, and calls no external program. [AGENTS.md](AGENTS.md) states
-the rules that bind any operation that changes a file: an inspectable plan,
-stated preconditions, and a journal entry. In Suds, optimization means a measured
+The release deletes, quarantines, copies, rewrites, installs, and repairs
+nothing. It interprets no package manager's state and calls no external
+program. Its only state between runs is the operation journal that
+[Moves](#moves) describes. [AGENTS.md](AGENTS.md) states the rules that
+bind any operation that changes a file: an inspectable plan, stated
+preconditions, and a journal entry. In Suds, optimization means a measured
 reduction in storage use, structural friction, or operational residue.
 Suds makes no claim about machine performance.
 
@@ -68,13 +71,22 @@ before the cancellation, and its status is `partial`. For
 each root, the window shows the sizes, the counts, the status, the ranked
 direct children, the skipped mount points, and the traversal errors.
 
+In the Downloads location, the user can select direct children and choose
+**Move…**. The native folder picker asks for the destination, and a sheet
+shows the exact plan before anything moves. The sheet lists each move's
+outcome after the user applies the plan and offers to undo the run. The
+**History** sheet lists every run in the journal, with an undo for each run
+whose moves remain applied.
+
 The application uses [Tauri](https://tauri.app/). The system's web view
 renders the window, and a Rust process holds every path. The web view may
-call four application commands: list the locations, add a folder, start an
-inspection, and cancel an inspection. It receives no filesystem, shell, or
-network permission, and it names each location by an opaque identifier
-rather than by a path. The file
-`apps/desktop/src-tauri/capabilities/main.json` grants these commands.
+call eight application commands: list the locations, add a folder, start an
+inspection, cancel an inspection, build a move plan, apply a plan, list the
+journal, and undo a run. It receives no filesystem, shell, or network
+permission. The web view names each location, plan, and run by an opaque
+identifier, and each selected entry by its position in an inspection's
+result, rather than by a path. The file `apps/desktop/src-tauri/capabilities/main.json`
+grants these commands.
 
 ## Installation for Contributors
 
@@ -90,7 +102,7 @@ task desktop            # the desktop application, on macOS
 ```
 
 The repository is a Cargo workspace. The `crates/suds-core` crate holds the
-inspection code, `apps/cli` holds the `suds` command, and `apps/desktop` holds
+inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/desktop` holds
 the desktop application. Neither interface invokes the other.
 
 ## Usage
@@ -144,6 +156,52 @@ and every entry beneath it. Paths that are not valid UTF-8 appear with
 replacement characters. Suds records each native path internally, so the
 replacement affects only the report.
 
+## Moves
+
+```sh
+suds plan move --from ~/Downloads/report.pdf --to ~/Documents/Research --output plan.json
+suds apply plan.json        # one suds.run/v1 JSON document on standard output
+suds journal                # every run, most recent first (--format json for JSON)
+suds undo RUN               # return each moved entry to its original path
+```
+
+The `plan` command reads metadata and moves nothing. It writes one
+`suds.plan/v1` document, which names every source and destination by its
+path's bytes in hexadecimal beside a display string, and records each
+entry's device, inode, type, size, and modification time. Every `--from`
+entry must lie in one directory. Planning resolves both directories to
+their canonical paths, and the preview shows them. The command refuses a
+symbolic link or a special file, a destination that exists, a destination
+inside the source, a directory that contains a mount point, and a
+destination on another filesystem. It also refuses to replace an existing
+output file.
+
+The `apply` command accepts only a plan that `suds plan` or the desktop
+application built and recorded in the journal, unchanged, and each plan
+runs once. Immediately before each move, Suds verifies the entry's
+recorded identity, the identity and canonical path of both directories,
+and that the destination is free. It then renames the entry with the
+kernel's no-replace flag, so the move is atomic and overwrites nothing. A
+refused move leaves the other moves to proceed. The `undo` command
+reverses each move that remains applied, in reverse order. It refuses a move
+whose entry changed after the move and a move whose original path now holds
+another entry. Suds never merges, renames to avoid a conflict, copies, or
+deletes.
+
+The journal is an append-only file of JSON records, `suds.journal/v1`, in
+`~/Library/Application Support/Suds/journal` on macOS. Linux has no default
+journal, so each command there takes `--journal DIR`. Suds records each
+move before and after its rename. When a run stops between those records,
+the next `apply` or `undo` examines both paths. If the entry lies at
+exactly one of them, Suds records which, and otherwise it records the move as
+`unresolved` and changes nothing.
+
+| Status | Meaning for `plan`, `apply`, and `undo` |
+| :--- | :--- |
+| `0` | Suds wrote the plan, or every move succeeded. |
+| `1` | Suds refused the plan, or it refused one or more moves. |
+| `2` | The invocation failed, or Suds refused the plan file, the run, or the journal before any move. |
+
 ## Measurements
 
 - **Logical bytes** sum the sizes of regular files.
@@ -184,13 +242,15 @@ replacement affects only the report.
 - Suds reads metadata and directory listings. It never opens a regular file
   and reads no extended attribute.
 - Suds never requests elevated privileges.
+- Suds moves an entry only through a recorded plan, and it deletes,
+  copies, and overwrites nothing.
 - The default profile holds no system-owned path. For an explicit root,
   Suds reads only the path that the caller names, with the caller's own
   permissions.
 - The report can reveal private file and directory names. Treat it as local
   machine data.
 - The desktop application's web view loads only the application's own
-  files and may call the four application commands and nothing else. It
+  files and may call the eight application commands and nothing else. It
   never holds a path that it could pass back to name a file.
 
 ## Development

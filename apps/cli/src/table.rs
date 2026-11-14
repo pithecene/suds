@@ -123,7 +123,7 @@ fn write_problems(out: &mut impl Write, root: &RootResult) -> io::Result<()> {
     Ok(())
 }
 
-fn entry_label(kind: EntryKind) -> &'static str {
+pub fn entry_label(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Directory => "directory",
         EntryKind::File => "file",
@@ -135,7 +135,7 @@ fn entry_label(kind: EntryKind) -> &'static str {
 /// Escapes each control character in a filesystem name or message, so that
 /// a name cannot move the cursor, clear the terminal, or begin a new row. The
 /// JSON report keeps the original text.
-fn escape(text: &str) -> String {
+pub fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         if character.is_control() {

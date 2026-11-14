@@ -248,6 +248,34 @@ fn json_output_is_one_versioned_document() {
     assert!(positions.is_sorted(), "{text}");
 }
 
+/// The scan records each child's revision for move plans, and the report
+/// keeps exactly its earlier fields.
+#[test]
+fn json_children_carry_only_the_report_fields() {
+    let dir = TempDir::new().unwrap();
+    write(&dir.path().join("file"), 1);
+
+    let (report, _) = inspect(&[dir.path()]);
+    let child = report["roots"][0]["children"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = child.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "allocated_bytes",
+            "directories",
+            "files",
+            "kind",
+            "logical_bytes",
+            "name",
+            "newest_modified",
+            "oldest_modified",
+            "others",
+            "symlinks",
+        ]
+    );
+}
+
 #[test]
 fn table_uses_binary_units_and_honors_top() {
     let dir = TempDir::new().unwrap();

@@ -8,14 +8,19 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::model::{
     Child, EntryKind, ErrorKind, Measure, Platform, Report, ReportStatus, RootResult, RootStatus,
     SCHEMA, TraversalError,
 };
 use crate::platform::RootSpec;
+use crate::scan::entry_kind;
 use crate::timestamp;
 
 /// One root's scan.
@@ -44,7 +49,46 @@ pub struct RootScan {
 pub struct ChildScan {
     pub name: OsString,
     pub kind: EntryKind,
+    /// The child's own metadata at the time of the scan. A move plan compares
+    /// it with the child's metadata at planning, so the plan acts only on the
+    /// entry that the inspection showed. The report omits it.
+    pub revision: EntryRevision,
     pub measure: Measure,
+}
+
+/// The metadata that distinguishes one version of an entry from another.
+/// The device and the inode name the entry whatever its path. The size and
+/// the modification time change with its content, and a directory's
+/// modification time changes when an entry enters or leaves the directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryRevision {
+    pub device: u64,
+    pub inode: u64,
+    pub kind: EntryKind,
+    pub logical_size: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+}
+
+impl EntryRevision {
+    /// The revision of the entry that `meta` describes. The caller obtains
+    /// `meta` without following a symbolic link.
+    pub fn from_metadata(meta: &Metadata) -> Self {
+        EntryRevision {
+            device: meta.dev(),
+            inode: meta.ino(),
+            kind: entry_kind(meta.file_type()),
+            logical_size: meta.len(),
+            modified_seconds: meta.mtime(),
+            modified_nanoseconds: meta.mtime_nsec(),
+        }
+    }
+
+    /// Whether both revisions describe the same entry, whether or not its
+    /// content changed.
+    pub fn is_same_entry(&self, other: &EntryRevision) -> bool {
+        self.device == other.device && self.inode == other.inode && self.kind == other.kind
+    }
 }
 
 /// A path that the scan could not measure, with the reason.

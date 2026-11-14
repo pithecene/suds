@@ -1,12 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The main window may list locations, add a folder through the native picker, and start or cancel an inspection. It receives no filesystem, shell, or network permission.",
+  "description": "The main window may list locations, add a folder through the native picker, start or cancel an inspection, build a move plan for entries that an inspection listed, apply a plan that it built, list the journal, and undo a run. It names each plan, run, and entry by an identifier and receives no filesystem, shell, or network permission.",
   "windows": ["main"],
   "permissions": [
     "allow-list-locations",
     "allow-choose-location",
     "allow-start-inspection",
-    "allow-cancel-inspection"
+    "allow-cancel-inspection",
+    "allow-create-move-plan",
+    "allow-apply-plan",
+    "allow-list-journal",
+    "allow-undo-run"
   ]
 }

@@ -133,6 +133,9 @@ pub enum RefusalCode {
     Unreadable,
     /// The operating system refused the rename.
     RenameFailed,
+    /// Reconciliation could not establish whether an interrupted rename
+    /// happened.
+    Unresolved,
 }
 
 /// The reason that Suds declined to plan, apply, or reverse one move.

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::inspection::EntryRevision;
 use crate::organize::native::NativePath;
-use crate::organize::plan::{MovePlan, Refusal};
+use crate::organize::plan::{MovePlan, Refusal, RefusalCode};
 use crate::timestamp;
 
 /// The schema tag of every journal record.
@@ -77,6 +77,8 @@ pub enum Event {
         index: usize,
         finding: Finding,
         revision: Option<EntryRevision>,
+        /// For an unresolved finding, what Suds found at each path.
+        detail: Option<String>,
     },
     RunCompleted {
         run: String,
@@ -504,6 +506,7 @@ impl JournalState {
                 index,
                 finding,
                 revision,
+                detail,
             } => self.update_move(run, *index, |state| {
                 state.status = match finding {
                     Finding::Applied | Finding::NotReversed => MoveStatus::Applied,
@@ -513,6 +516,9 @@ impl JournalState {
                 };
                 if revision.is_some() {
                     state.revision = *revision;
+                }
+                if let Some(detail) = detail {
+                    state.refusal = Some(Refusal::new(RefusalCode::Unresolved, detail.clone()));
                 }
             }),
             Event::RunCompleted {

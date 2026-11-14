@@ -64,6 +64,8 @@ pub struct Reconciliation {
     pub source: NativePath,
     pub destination: NativePath,
     pub finding: Finding,
+    /// For an unresolved finding, what Suds found at each path.
+    pub detail: Option<String>,
 }
 
 /// The reason that Suds applied or undid nothing.
@@ -600,7 +602,7 @@ pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, Operation
             let Some(planned) = plan.moves.get(index) else {
                 continue;
             };
-            let (finding, revision) = match move_state.status {
+            let (finding, revision, detail) = match move_state.status {
                 MoveStatus::Started => probe(
                     planned.source.as_path(),
                     planned.destination.as_path(),
@@ -616,7 +618,14 @@ pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, Operation
                         Finding::NotReversed,
                         Finding::Reversed,
                     ),
-                    None => (Finding::Unresolved, None),
+                    None => (
+                        Finding::Unresolved,
+                        None,
+                        Some(
+                            "Suds recorded no identity for the moved entry, so it cannot tell where the entry lies"
+                                .to_owned(),
+                        ),
+                    ),
                 },
                 _ => continue,
             };
@@ -632,6 +641,7 @@ pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, Operation
                 index,
                 finding,
                 revision,
+                detail: detail.clone(),
             })?;
             findings.push(Reconciliation {
                 run: run.run.clone(),
@@ -639,6 +649,7 @@ pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, Operation
                 source: planned.source.clone(),
                 destination: planned.destination.clone(),
                 finding,
+                detail,
             });
         }
     }
@@ -646,32 +657,70 @@ pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, Operation
     Ok(findings)
 }
 
+/// What reconciliation found at one path of an interrupted rename.
+enum Presence {
+    Expected(EntryRevision),
+    Other,
+    Absent,
+    Unreadable(io::Error),
+}
+
+impl Presence {
+    fn at(path: &Path, expected: &EntryRevision) -> Self {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                let revision = EntryRevision::from_metadata(&meta);
+                if revision.is_same_entry(expected) {
+                    Presence::Expected(revision)
+                } else {
+                    Presence::Other
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Presence::Absent,
+            Err(err) => Presence::Unreadable(err),
+        }
+    }
+
+    fn describe(&self, path: &Path) -> String {
+        match self {
+            Presence::Expected(_) => format!("{} holds the planned entry", path.display()),
+            Presence::Other => format!("{} holds another entry", path.display()),
+            Presence::Absent => format!("{} holds no entry", path.display()),
+            Presence::Unreadable(err) => {
+                format!(
+                    "Suds could not read the metadata of {}: {err}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
 /// Classifies an interrupted rename from `from` to `to` of the entry that
-/// `expected` identifies, and returns the entry's revision at `to` when it
-/// lies there.
+/// `expected` identifies. The result carries the entry's revision at `to`
+/// when it lies there, and a description of both paths when it is
+/// unresolved.
 fn probe(
     from: &Path,
     to: &Path,
     expected: &EntryRevision,
     stayed: Finding,
     arrived: Finding,
-) -> (Finding, Option<EntryRevision>) {
-    let at_from = fs::symlink_metadata(from);
-    let at_to = fs::symlink_metadata(to);
-    match (at_from, at_to) {
-        (Ok(meta), Err(err))
-            if err.kind() == io::ErrorKind::NotFound
-                && EntryRevision::from_metadata(&meta).is_same_entry(expected) =>
-        {
-            (stayed, None)
-        }
-        (Err(err), Ok(meta))
-            if err.kind() == io::ErrorKind::NotFound
-                && EntryRevision::from_metadata(&meta).is_same_entry(expected) =>
-        {
-            (arrived, Some(EntryRevision::from_metadata(&meta)))
-        }
-        _ => (Finding::Unresolved, None),
+) -> (Finding, Option<EntryRevision>, Option<String>) {
+    let at_from = Presence::at(from, expected);
+    let at_to = Presence::at(to, expected);
+    match (&at_from, &at_to) {
+        (Presence::Expected(_), Presence::Absent) => (stayed, None, None),
+        (Presence::Absent, Presence::Expected(revision)) => (arrived, Some(*revision), None),
+        _ => (
+            Finding::Unresolved,
+            None,
+            Some(format!(
+                "{}, and {}, which matches neither outcome",
+                at_from.describe(from),
+                at_to.describe(to)
+            )),
+        ),
     }
 }
 

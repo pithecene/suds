@@ -53,10 +53,10 @@ fn plan_and_write(args: &PlanMoveArgs) -> Result<ExitCode, String> {
             return Ok(ExitCode::from(EXIT_REFUSED));
         }
     };
+    // The journal opens first, so that a busy or unwritable journal stops
+    // the command before it writes a file. The plan file precedes the plan's
+    // record, so the journal records only a plan that a file holds.
     let mut journal = Journal::open(&journal_dir).map_err(|err| err.to_string())?;
-    execute::record_plan(&mut journal, &plan).map_err(|err| err.to_string())?;
-    drop(journal);
-
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -65,7 +65,15 @@ fn plan_and_write(args: &PlanMoveArgs) -> Result<ExitCode, String> {
     serde_json::to_writer_pretty(&mut file, &plan)
         .map_err(io::Error::from)
         .and_then(|()| writeln!(file))
+        .and_then(|()| file.sync_all())
         .map_err(|err| format!("could not write {}: {err}", args.output.display()))?;
+    execute::record_plan(&mut journal, &plan).map_err(|err| {
+        format!(
+            "{err}. The journal does not record the plan in {}, so suds apply refuses it.",
+            args.output.display()
+        )
+    })?;
+    drop(journal);
 
     let mut out = io::stdout().lock();
     write_preview(&mut out, &plan, &args.output)

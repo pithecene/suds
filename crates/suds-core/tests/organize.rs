@@ -486,10 +486,13 @@ fn leaves_an_ambiguous_interrupted_move_unresolved() {
 
     let found = reconcile(&mut fixture.open()).unwrap();
     assert_eq!(found[0].finding, Finding::Unresolved);
-    assert_eq!(
-        fixture.state().runs[0].moves[0].status,
-        MoveStatus::Unresolved
-    );
+    let detail = found[0].detail.as_deref().unwrap();
+    assert!(detail.contains("holds the planned entry"), "{detail}");
+    assert!(detail.contains("holds another entry"), "{detail}");
+    let state = fixture.state();
+    assert_eq!(state.runs[0].moves[0].status, MoveStatus::Unresolved);
+    let refusal = state.runs[0].moves[0].refusal.as_ref().unwrap();
+    assert_eq!(refusal.code, RefusalCode::Unresolved);
     assert!(fixture.from.join("file").exists());
     assert_eq!(fs::read(fixture.to.join("file")).unwrap(), b"other");
 }

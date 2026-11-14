@@ -13,9 +13,8 @@ interface Props {
 type Phase = "review" | "applying" | "applied" | "undoing" | "undone";
 
 /**
- * The confirmation sheet: it shows the exact plan, applies it only on the
- * person's request, lists each move's outcome as it arrives, and offers to
- * undo the run.
+ * The confirmation sheet. It applies the plan only on request, lists each
+ * outcome as it arrives, and offers to undo the run.
  */
 export function MoveSheet({ plan, onChanged, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);

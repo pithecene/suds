@@ -182,13 +182,10 @@ impl fmt::Display for PlanRefused {
     }
 }
 
-/// Builds a plan to move the requested entries of `source_directory` into
-/// `destination_directory`. The `created_at` argument holds the time of
-/// planning, in seconds since the Unix epoch.
-///
-/// Planning resolves each directory to its canonical path, because the
-/// person who chose the directory named it, and the plan shows the resolved
-/// path. It follows no symbolic link beneath the source directory.
+/// Plans to move entries of `source_directory` into `destination_directory`
+/// at `created_at`, in seconds since the Unix epoch. A person named each
+/// directory, so planning resolves both to canonical paths, which the plan
+/// shows. Planning follows no symbolic link beneath the source directory.
 pub fn plan_move(
     source_directory: &Path,
     requests: &[MoveRequest],

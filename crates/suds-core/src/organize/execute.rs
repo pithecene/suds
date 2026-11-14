@@ -136,12 +136,9 @@ pub fn recorded_plan(journal: &Journal, plan: &str) -> Option<MovePlan> {
     journal.state().plans.remove(plan)
 }
 
-/// Applies `plan` and returns each move's outcome. The function calls
-/// `on_move` after each move, so a caller can show progress.
-///
-/// A refusal of one move leaves the other moves to proceed, because each move
-/// verifies its own preconditions. A journal failure stops the run at once,
-/// and the next invocation reconciles any rename that lacks an outcome.
+/// Applies `plan`, calling `on_move` after each move. Each move verifies its
+/// own preconditions, so one refusal leaves the others to proceed. A journal
+/// failure stops the run, and the next invocation reconciles its rename.
 pub fn apply(
     journal: &mut Journal,
     plan: &MovePlan,
@@ -584,13 +581,9 @@ fn check_reverse<'a>(
     })
 }
 
-/// Examines every rename that the journal started without an outcome, and
-/// closes every run and undo that an interruption left open.
-///
-/// A forward move happened when the source is absent and the destination
-/// holds the planned entry, and it did not happen when the source holds the
-/// planned entry and the destination is absent. A reversal is the mirror
-/// case. Any other state is unresolved, and Suds changes nothing there.
+/// Examines each rename that the journal started without an outcome, and
+/// closes each run and undo that an interruption left open. Only an entry at
+/// exactly one of its two paths settles a rename. Suds changes no path here.
 pub fn reconcile(journal: &mut Journal) -> Result<Vec<Reconciliation>, OperationError> {
     let state = journal.state();
     let mut findings = Vec::new();

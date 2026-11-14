@@ -62,17 +62,24 @@ fn plan_and_write(args: &PlanMoveArgs) -> Result<ExitCode, String> {
         .create_new(true)
         .open(&args.output)
         .map_err(|err| format!("could not create {}: {err}", args.output.display()))?;
-    serde_json::to_writer_pretty(&mut file, &plan)
+    let written = serde_json::to_writer_pretty(&mut file, &plan)
         .map_err(io::Error::from)
         .and_then(|()| writeln!(file))
         .and_then(|()| file.sync_all())
-        .map_err(|err| format!("could not write {}: {err}", args.output.display()))?;
-    execute::record_plan(&mut journal, &plan).map_err(|err| {
-        format!(
-            "{err}. The journal does not record the plan in {}, so suds apply refuses it.",
-            args.output.display()
-        )
-    })?;
+        .map_err(|err| format!("could not write {}: {err}", args.output.display()))
+        .and_then(|()| execute::record_plan(&mut journal, &plan).map_err(|err| err.to_string()));
+    if let Err(message) = written {
+        // This invocation created the file, and no journal record makes it
+        // usable, so removing it frees the path for a retry.
+        drop(file);
+        return Err(match fs::remove_file(&args.output) {
+            Ok(()) => message,
+            Err(err) => format!(
+                "{message}. Suds also could not remove the unusable file {}: {err}",
+                args.output.display()
+            ),
+        });
+    }
     drop(journal);
 
     let mut out = io::stdout().lock();

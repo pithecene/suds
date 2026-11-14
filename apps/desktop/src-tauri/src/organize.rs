@@ -141,6 +141,20 @@ impl Operations {
                 "this window built no plan {plan} that awaits application"
             ));
         }
+        let result = self.apply_recorded(plan, on_move);
+        // A failure leaves the plan eligible, so the window may try again.
+        // The journal refuses a second run of a plan that already started.
+        if result.is_err() {
+            lock(&self.created).insert(plan.to_owned());
+        }
+        result
+    }
+
+    fn apply_recorded(
+        &self,
+        plan: &str,
+        on_move: &mut dyn FnMut(MoveView),
+    ) -> Result<RunView, String> {
         let mut journal =
             Journal::open(self.journal_directory()?).map_err(|err| err.to_string())?;
         let recorded = execute::recorded_plan(&journal, plan)
@@ -303,6 +317,30 @@ mod tests {
             RunStatus::Complete
         );
         assert!(from.join("a.pdf").exists());
+    }
+
+    #[test]
+    fn a_plan_stays_eligible_after_an_application_that_failed() {
+        let dir = TempDir::new().unwrap();
+        let from = dir.path().join("Downloads");
+        let to = dir.path().join("Documents");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(from.join("a.pdf"), b"a").unwrap();
+        let journal = dir.path().join("journal");
+        let operations = Operations::new(Ok(journal.clone()));
+        let PlanResponse::Planned { plan } = operations
+            .create_plan(&from, &[request("a.pdf")], &to)
+            .unwrap()
+        else {
+            panic!("expected a plan");
+        };
+
+        let holder = suds_core::organize::journal::Journal::open(&journal).unwrap();
+        assert!(operations.apply(&plan.id, &mut |_| {}).is_err());
+        drop(holder);
+        let run = operations.apply(&plan.id, &mut |_| {}).unwrap();
+        assert_eq!(run.status, RunStatus::Complete);
     }
 
     #[test]

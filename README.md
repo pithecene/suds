@@ -205,6 +205,15 @@ exactly one of them, Suds records which, and otherwise it records the move as
 | `1` | Suds refused the plan, or it refused one or more moves. |
 | `2` | The invocation failed, or Suds refused the plan file, the run, or the journal before any move. |
 
+### Known Limitation
+
+No system call renames an entry on the condition of its inode. Another
+process can therefore swap a source between Suds's last check and the
+rename. Suds detects the swap and returns the swapped entry. When yet
+another entry has taken the source path by then, Suds overwrites nothing,
+leaves both entries in place, and records the move as `unresolved` with
+what it found at each path.
+
 ## Measurements
 
 - **Logical bytes** sum the sizes of regular files.

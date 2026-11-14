@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import type { Location, RootResult } from "./api";
 import { StatusBadge } from "./StatusBadge";
@@ -13,11 +13,28 @@ interface Props {
   scanning: boolean;
   busy: boolean;
   onInspect: () => void;
+  /** Whether the person may select children to move, which holds for Downloads alone. */
+  selectable: boolean;
+  /** Asks for a plan to move the children at these positions in the result. */
+  onMove: (entries: number[]) => void;
 }
 
-export function RootDetail({ location, outcome, scanning, busy, onInspect }: Props) {
+export function RootDetail({ location, outcome, scanning, busy, onInspect, selectable, onMove }: Props) {
   const [showAll, setShowAll] = useState(false);
+  const [chosen, setChosen] = useState<Set<number>>(new Set());
   const result = outcome?.result;
+  // Positions name children of one result, so a new result clears them.
+  useEffect(() => setChosen(new Set()), [result]);
+  const toggle = (index: number) =>
+    setChosen((previous) => {
+      const next = new Set(previous);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
   const measured = result !== undefined && (result.status === "complete" || result.status === "partial");
   const children = result?.children ?? [];
   const shown = showAll ? children : children.slice(0, INITIAL_ROWS);
@@ -65,10 +82,29 @@ export function RootDetail({ location, outcome, scanning, busy, onInspect }: Pro
           )}
 
           {measured && children.length === 0 && <p className="muted">This location holds no entries.</p>}
+          {selectable && measured && children.length > 0 && (
+            <div className="selection-bar">
+              <span className="muted">
+                {chosen.size === 0 ? "Select items to move." : `${formatCount(chosen.size)} selected`}
+              </span>
+              <button
+                type="button"
+                disabled={chosen.size === 0 || busy}
+                onClick={() => onMove([...chosen].sort((a, b) => a - b))}
+              >
+                Move…
+              </button>
+            </div>
+          )}
           {measured && children.length > 0 && (
             <table className="children">
               <thead>
                 <tr>
+                  {selectable && (
+                    <th scope="col" className="check">
+                      <span className="visually-hidden">Selected</span>
+                    </th>
+                  )}
                   <th scope="col">Name</th>
                   <th scope="col">Type</th>
                   <th scope="col" className="number">
@@ -87,7 +123,18 @@ export function RootDetail({ location, outcome, scanning, busy, onInspect }: Pro
               </thead>
               <tbody>
                 {shown.map((child, index) => (
-                  <tr key={`${index}:${child.name}`}>
+                  <tr key={`${index}:${child.name}`} className={chosen.has(index) ? "chosen" : undefined}>
+                    {selectable && (
+                      <td className="check">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${child.name}`}
+                          checked={chosen.has(index)}
+                          disabled={child.kind !== "file" && child.kind !== "directory"}
+                          onChange={() => toggle(index)}
+                        />
+                      </td>
+                    )}
                     <td className="name">
                       <span className="share">
                         <meter min={0} max={largest || 1} value={child.allocated_bytes} />

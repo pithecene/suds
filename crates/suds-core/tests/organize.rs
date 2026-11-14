@@ -333,7 +333,7 @@ fn undoes_a_completed_run() {
     assert!(fs::read_dir(&fixture.to).unwrap().next().is_none());
     assert!(matches!(
         undo(&mut fixture.open(), &run, &mut |_| {}),
-        Err(OperationError::NothingToUndo(_))
+        Err(OperationError::NothingToUndo { .. })
     ));
     assert_eq!(
         fixture.state().summaries()[0].undo,
@@ -495,6 +495,61 @@ fn leaves_an_ambiguous_interrupted_move_unresolved() {
     assert_eq!(refusal.code, RefusalCode::Unresolved);
     assert!(fixture.from.join("file").exists());
     assert_eq!(fs::read(fixture.to.join("file")).unwrap(), b"other");
+}
+
+#[test]
+fn an_undo_reports_each_unresolved_move_and_never_reads_as_complete() {
+    let fixture = Fixture::new();
+    write(&fixture.from.join("lost"), b"1");
+    write(&fixture.from.join("kept"), b"2");
+    let plan = fixture.plan(&["lost", "kept"]);
+    let run = "run-mixed".to_owned();
+    let mut journal = fixture.open();
+    journal
+        .append(Event::RunStarted {
+            run: run.clone(),
+            plan: plan.id.clone(),
+        })
+        .unwrap();
+    // The first move stops after move_started, and its entry then lies at
+    // neither path. The second move completes.
+    journal
+        .append(Event::MoveStarted {
+            run: run.clone(),
+            index: 0,
+        })
+        .unwrap();
+    fs::remove_file(fixture.from.join("lost")).unwrap();
+    journal
+        .append(Event::MoveStarted {
+            run: run.clone(),
+            index: 1,
+        })
+        .unwrap();
+    fs::rename(fixture.from.join("kept"), fixture.to.join("kept")).unwrap();
+    let meta = fs::symlink_metadata(fixture.to.join("kept")).unwrap();
+    journal
+        .append(Event::MoveApplied {
+            run: run.clone(),
+            index: 1,
+            revision: Some(suds_core::inspection::EntryRevision::from_metadata(&meta)),
+        })
+        .unwrap();
+    drop(journal);
+
+    let report = fixture.undo(&run);
+    assert_eq!(report.status, RunStatus::Partial);
+    let statuses: Vec<MoveStatus> = report.moves.iter().map(|outcome| outcome.status).collect();
+    assert_eq!(statuses, [MoveStatus::Reversed, MoveStatus::Unresolved]);
+    let detail = &report.moves[1].refusal.as_ref().unwrap().message;
+    assert!(detail.contains("holds no entry"), "{detail}");
+    assert!(fixture.from.join("kept").exists());
+
+    let again = undo(&mut fixture.open(), &run, &mut |_| {});
+    let Err(OperationError::NothingToUndo { unresolved, .. }) = again else {
+        panic!("expected nothing to undo: {again:?}");
+    };
+    assert_eq!(unresolved.len(), 1);
 }
 
 #[test]

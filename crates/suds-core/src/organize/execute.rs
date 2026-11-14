@@ -85,8 +85,12 @@ pub enum OperationError {
         run: String,
     },
     UnknownRun(String),
-    /// The run holds no move that remains applied.
-    NothingToUndo(String),
+    /// The run holds no move that remains applied. The list holds what Suds
+    /// found for each of the run's unresolved moves.
+    NothingToUndo {
+        run: String,
+        unresolved: Vec<String>,
+    },
 }
 
 impl fmt::Display for OperationError {
@@ -109,8 +113,12 @@ impl fmt::Display for OperationError {
                 write!(f, "the plan {plan} already ran as {run}")
             }
             OperationError::UnknownRun(run) => write!(f, "the journal records no run {run}"),
-            OperationError::NothingToUndo(run) => {
-                write!(f, "the run {run} holds no move that remains applied")
+            OperationError::NothingToUndo { run, unresolved } => {
+                write!(f, "the run {run} holds no move that remains applied")?;
+                for detail in unresolved {
+                    write!(f, ". One move is unresolved: {detail}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -507,8 +515,33 @@ pub fn undo(
         .filter(|(_, state)| state.status == MoveStatus::Applied)
         .map(|(index, state)| (index, state.revision))
         .collect();
+    // An undo acts on no unresolved move, and it reports each one, so that
+    // no undo of such a run reads as complete.
+    let unresolved: Vec<MoveOutcome> = run_state
+        .moves
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| state.status == MoveStatus::Unresolved)
+        .filter_map(|(index, state)| {
+            let planned = plan.moves.get(index)?;
+            Some(MoveOutcome {
+                index,
+                source: planned.source.clone(),
+                destination: planned.destination.clone(),
+                status: MoveStatus::Unresolved,
+                refusal: state.refusal.clone(),
+            })
+        })
+        .collect();
     if applied.is_empty() {
-        return Err(OperationError::NothingToUndo(run.to_owned()));
+        return Err(OperationError::NothingToUndo {
+            run: run.to_owned(),
+            unresolved: unresolved
+                .iter()
+                .filter_map(|outcome| outcome.refusal.as_ref())
+                .map(|refusal| refusal.message.clone())
+                .collect(),
+        });
     }
 
     journal.append(Event::UndoStarted {
@@ -523,6 +556,7 @@ pub fn undo(
         on_move(&outcome);
         moves.push(outcome);
     }
+    moves.extend(unresolved);
     let reversed = moves
         .iter()
         .filter(|outcome| outcome.status == MoveStatus::Reversed)

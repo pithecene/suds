@@ -107,8 +107,8 @@ fn run(
 }
 
 /// Locks a mutex and recovers its value from a poisoned lock. No update to a
-/// guarded value calls code that can panic partway through, so the recovered
-/// value stays whole.
+/// guarded value calls code that can panic partway through the update, so the
+/// recovered value stays whole.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()

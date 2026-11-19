@@ -14,6 +14,7 @@ pub mod inspection;
 pub mod model;
 pub mod organize;
 pub mod platform;
+pub mod reclaim;
 pub mod roots;
 pub mod scan;
 pub mod timestamp;

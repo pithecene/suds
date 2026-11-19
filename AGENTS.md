@@ -17,8 +17,7 @@ constraints, not architecture.
 ## Boundary
 
 Suds owns the semantics of workstation organization and maintenance, and
-it allocates and reclaims the workstation's development storage. The
-current release observes filesystem metadata and modifies nothing. These
+it allocates and reclaims the workstation's development storage. These
 rules hold for every release:
 
 - Mutate nothing outside an explicit plan. Each operation states its
@@ -40,7 +39,8 @@ rules hold for every release:
   its execution to a person.
 - Execute no shell string. Call an external program only through a typed
   adapter for the program that owns the state. The current release calls
-  none.
+  Git, which owns each checkout, and on macOS `lsof`, which reads the
+  process table.
 - Read file contents only through an explicit capability or an action of
   the user. Background inspection reads metadata alone.
 - Make no network request outside a remote connector that the user

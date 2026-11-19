@@ -6,6 +6,7 @@
 
 mod cli;
 mod organize;
+mod reclaim;
 mod table;
 
 use std::env;
@@ -25,10 +26,10 @@ use suds_core::{roots, scan};
 use crate::cli::{Cli, Command, Format, InspectArgs, PlanCommand, Profile};
 
 /// An existing root yielded a partial measurement or no measurement.
-const EXIT_PARTIAL: u8 = 1;
+pub(crate) const EXIT_PARTIAL: u8 = 1;
 /// The invocation failed before any report existed. Clap uses the same status
 /// for a usage error.
-const EXIT_INVOCATION: u8 = 2;
+pub(crate) const EXIT_INVOCATION: u8 = 2;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -38,6 +39,7 @@ fn main() -> ExitCode {
         Command::Apply(args) => organize::apply_command(&args),
         Command::Journal(args) => organize::journal_command(&args),
         Command::Undo(args) => organize::undo_command(&args),
+        Command::Reclaim(args) => reclaim::reclaim_command(&args),
     }
 }
 
@@ -109,7 +111,7 @@ fn finish(written: io::Result<()>, status: ReportStatus) -> ExitCode {
     }
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -117,7 +119,7 @@ fn now_seconds() -> i64 {
         })
 }
 
-fn resolve_roots(paths: &[PathBuf]) -> Result<Vec<RootSpec>, String> {
+pub(crate) fn resolve_roots(paths: &[PathBuf]) -> Result<Vec<RootSpec>, String> {
     if paths.is_empty() {
         return platform::default_roots().map_err(|err| err.to_string());
     }

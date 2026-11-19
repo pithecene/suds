@@ -288,7 +288,7 @@ fn write_summaries(out: &mut impl Write, summaries: &[RunSummary]) -> io::Result
     Ok(())
 }
 
-fn journal_directory(option: &JournalOption) -> Result<PathBuf, String> {
+pub(crate) fn journal_directory(option: &JournalOption) -> Result<PathBuf, String> {
     match &option.directory {
         Some(dir) => {
             let cwd = working_directory([dir])?;

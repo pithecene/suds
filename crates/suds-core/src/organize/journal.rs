@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::inspection::EntryRevision;
 use crate::organize::native::NativePath;
 use crate::organize::plan::{MovePlan, Refusal, RefusalCode};
+use crate::reclaim::execute::Authority;
+use crate::reclaim::plan::ReclaimPlan;
 use crate::timestamp;
 
 /// The schema tag of every journal record.
@@ -115,6 +117,36 @@ pub enum Event {
         run: String,
         status: RunStatus,
         interrupted: bool,
+    },
+    /// Suds built this reclaim plan and is about to apply it.
+    ReclaimPlanned {
+        plan: ReclaimPlan,
+    },
+    ReclaimStarted {
+        run: String,
+        plan: String,
+        authority: Authority,
+    },
+    /// Suds verified the removal's preconditions and is about to remove the
+    /// directory that `index` names in the run's plan.
+    RemovalStarted {
+        run: String,
+        index: usize,
+    },
+    Removed {
+        run: String,
+        index: usize,
+        freed_bytes: u64,
+    },
+    RemovalRefused {
+        run: String,
+        index: usize,
+        reason: String,
+    },
+    ReclaimCompleted {
+        run: String,
+        status: RunStatus,
+        freed_bytes: u64,
     },
 }
 
@@ -638,6 +670,14 @@ impl JournalState {
                     state.undo = Some(*status);
                 }
             }
+            // A removal has no undo, so a reclaim run changes no move's
+            // state.
+            Event::ReclaimPlanned { .. }
+            | Event::ReclaimStarted { .. }
+            | Event::RemovalStarted { .. }
+            | Event::Removed { .. }
+            | Event::RemovalRefused { .. }
+            | Event::ReclaimCompleted { .. } => {}
         }
     }
 

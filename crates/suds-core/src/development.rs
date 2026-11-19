@@ -367,6 +367,15 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
     Some(Claim::Build(ecosystem))
 }
 
+/// The ecosystem whose layout proves that `dir` is build state beneath a
+/// checkout.
+pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
+    match claim(dir, true) {
+        Some(Claim::Build(ecosystem)) => Some(ecosystem),
+        _ => None,
+    }
+}
+
 /// The main checkout that the `.git` file of `dir` names, when the file
 /// names an entry of that checkout's `worktrees` directory.
 fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {

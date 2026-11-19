@@ -243,7 +243,7 @@ fn row(cells: &[&str]) -> Vec<String> {
 }
 
 /// Writes rows as aligned columns. The first row is the header.
-fn write_rows(
+pub fn write_rows(
     out: &mut impl Write,
     indent: &str,
     rows: &[Vec<String>],

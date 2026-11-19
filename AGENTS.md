@@ -16,17 +16,28 @@ constraints, not architecture.
 
 ## Boundary
 
-Suds owns the semantics of workstation organization and maintenance. The
+Suds owns the semantics of workstation organization and maintenance, and
+it allocates and reclaims the workstation's development storage. The
 current release observes filesystem metadata and modifies nothing. These
 rules hold for every release:
 
-- Mutate nothing outside an explicit plan that a person inspects before
-  Suds applies the plan. Each operation states its preconditions and its
-  evidence, and Suds writes a journal entry for each operation.
-- Delete nothing permanently by default, and remove nothing because of its
-  age alone.
+- Mutate nothing outside an explicit plan. Each operation states its
+  preconditions and its evidence, and Suds writes a journal entry for each
+  operation.
+- Apply a plan only after a person inspects it. The one exception is a plan
+  that removes derived state inside the development arena, which the
+  owner's standing approval admits
+  ([0002](docs/decisions/0002-development-storage-allocation.md)).
+- Treat state as derived only on proof from its ecosystem's own layout.
+  An uncommitted change, an unpushed commit, and a main checkout never
+  count as derived state.
+- Delete nothing permanently by default. Derived state inside the arena is
+  the exception, because a build regenerates it.
+- Remove nothing because of its age alone.
 - Let no proposal that a model generates apply itself.
-- Request no elevated privilege and never invoke `sudo`.
+- Request no elevated privilege and never invoke `sudo`. Where a
+  filesystem limit needs a privileged command, plan the command and leave
+  its execution to a person.
 - Execute no shell string. Call an external program only through a typed
   adapter for the program that owns the state. The current release calls
   none.

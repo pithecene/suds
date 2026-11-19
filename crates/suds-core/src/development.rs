@@ -350,7 +350,16 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
         Some("target") if is_file(&dir.join("CACHEDIR.TAG")) && beside("Cargo.toml") => {
             Ecosystem::Cargo
         }
-        Some("node_modules") if beside("package.json") => Ecosystem::Node,
+        // A workspace's root may hold no manifest of its own, and each
+        // package manager writes a state file into the directory.
+        Some("node_modules")
+            if beside("package.json")
+                || beside("pnpm-workspace.yaml")
+                || is_file(&dir.join(".modules.yaml"))
+                || is_file(&dir.join(".package-lock.json")) =>
+        {
+            Ecosystem::Node
+        }
         Some("vcpkg_installed") if beside("vcpkg.json") => Ecosystem::Vcpkg,
         _ if is_file(&dir.join("CMakeCache.txt")) => Ecosystem::Cmake,
         _ => return None,

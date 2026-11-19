@@ -155,7 +155,7 @@ proves none:
 | Main checkout | A directory whose `.git` is a directory |
 | Linked checkout | A directory whose `.git` file names an entry of a main checkout's `worktrees` directory |
 | Cargo build state | A `target` directory that holds `CACHEDIR.TAG`, beside a `Cargo.toml` |
-| Node build state | A `node_modules` directory beside a `package.json` |
+| Node build state | A `node_modules` directory beside a `package.json` or a `pnpm-workspace.yaml`, or one that holds the state file of pnpm or npm |
 | CMake build state | A directory that holds `CMakeCache.txt` |
 | vcpkg build state | A `vcpkg_installed` directory beside a `vcpkg.json` |
 | vcpkg checkout | A directory that holds `.vcpkg-root` |

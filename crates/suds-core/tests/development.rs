@@ -41,6 +41,14 @@ impl Fixture {
         write(&repo.join("target/debug/app"), 5000);
         write(&repo.join("web/package.json"), 30);
         write(&repo.join("web/node_modules/pkg/index.js"), 700);
+        // A package manager's directory at a root without a manifest, with
+        // a nested directory that belongs to it.
+        write(&repo.join("tools/node_modules/.modules.yaml"), 8);
+        write(&repo.join("tools/node_modules/dep/package.json"), 12);
+        write(
+            &repo.join("tools/node_modules/dep/node_modules/inner/index.js"),
+            50,
+        );
         // A directory named `target` that Cargo did not write.
         write(&repo.join("docs/target/notes.md"), 60);
         // A submodule, whose `.git` file names a `modules` directory.
@@ -128,6 +136,7 @@ fn classifies_checkouts_and_their_build_state_by_layout() {
         built,
         [
             (repo.join("target"), Ecosystem::Cargo, 5043),
+            (repo.join("tools/node_modules"), Ecosystem::Node, 70),
             (repo.join("web/node_modules"), Ecosystem::Node, 700),
         ]
     );
@@ -220,10 +229,10 @@ fn the_report_sums_each_class_and_round_trips() {
     assert_eq!(report.status, ReportStatus::Complete);
     assert_eq!(report.totals.main_checkouts.count, 1);
     assert_eq!(report.totals.linked_checkouts.count, 1);
-    assert_eq!(report.totals.build_state.count, 4);
+    assert_eq!(report.totals.build_state.count, 5);
     assert_eq!(
         report.totals.build_state.logical_bytes,
-        5043 + 700 + 315 + 9043
+        5043 + 70 + 700 + 315 + 9043
     );
     assert_eq!(report.totals.shared_stores.count, 2);
     assert_eq!(report.totals.toolchains.logical_bytes, 2000);

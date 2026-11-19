@@ -110,6 +110,12 @@ export interface PlannedMove {
   allocated_bytes: number;
   newest_modified: string | null;
   measure_error_count: number;
+  measure_errors: MeasureError[];
+}
+
+export interface MeasureError {
+  path: string;
+  message: string;
 }
 
 export interface Plan {

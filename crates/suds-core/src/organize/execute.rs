@@ -216,7 +216,9 @@ fn apply_move(
         status,
         refusal,
     };
-    let prepared = match check_move(plan, planned) {
+    let checked = check_journal_outside(journal.directory(), planned.source.as_path())
+        .and_then(|()| check_move(plan, planned));
+    let prepared = match checked {
         Ok(prepared) => prepared,
         Err(refusal) => {
             journal.append(Event::MoveRefused {
@@ -387,6 +389,25 @@ fn check_move<'a>(plan: &MovePlan, planned: &'a PlannedMove) -> Result<Prepared<
         destination,
         name,
     })
+}
+
+/// Refuses to rename `entry` when the journal directory is that entry or lies
+/// beneath it. An append changes the journal file and never its directory's
+/// revision, so such a rename would pass every other precondition. The next
+/// command would then find an empty journal at the old path and no record of
+/// the move.
+fn check_journal_outside(journal: &Path, entry: &Path) -> Result<(), Refusal> {
+    if !journal.starts_with(entry) {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        RefusalCode::ContainsJournal,
+        format!(
+            "{} holds the journal at {}, and Suds moves no entry that holds its own journal",
+            entry.display(),
+            journal.display()
+        ),
+    ))
 }
 
 /// Verifies that a move's two paths are the plan's directories joined with
@@ -600,7 +621,9 @@ fn reverse_move(
         })?;
         Ok(outcome(MoveStatus::Applied, Some(refusal)))
     };
-    let (prepared, moved) = match check_reverse(plan, planned, revision) {
+    let checked = check_journal_outside(journal.directory(), planned.destination.as_path())
+        .and_then(|()| check_reverse(plan, planned, revision));
+    let (prepared, moved) = match checked {
         Ok(checked) => checked,
         Err(refusal) => return refuse(journal, refusal),
     };
@@ -902,10 +925,15 @@ fn close_interrupted(journal: &mut Journal) -> Result<(), OperationError> {
                 .iter()
                 .filter(|state| state.status == MoveStatus::Reversed)
                 .count();
+            // An unresolved move counts toward the total, as it does in an
+            // undo that ran to its end, so no undo with an unknown outcome
+            // closes as complete.
             let remaining = run
                 .moves
                 .iter()
-                .filter(|state| state.status == MoveStatus::Applied)
+                .filter(|state| {
+                    matches!(state.status, MoveStatus::Applied | MoveStatus::Unresolved)
+                })
                 .count();
             journal.append(Event::UndoCompleted {
                 run: run.run.clone(),

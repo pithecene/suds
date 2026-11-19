@@ -553,6 +553,98 @@ fn an_undo_reports_each_unresolved_move_and_never_reads_as_complete() {
 }
 
 #[test]
+fn an_interrupted_undo_with_an_unresolved_reversal_never_closes_as_complete() {
+    let fixture = Fixture::new();
+    write(&fixture.from.join("lost"), b"1");
+    write(&fixture.from.join("kept"), b"2");
+    let plan = fixture.plan(&["lost", "kept"]);
+    let run = fixture.apply(&plan).run;
+
+    // The undo reverses the second move, starts the first reversal, and
+    // stops. The first entry then lies at neither path.
+    let mut journal = fixture.open();
+    journal
+        .append(Event::UndoStarted { run: run.clone() })
+        .unwrap();
+    fs::rename(fixture.to.join("kept"), fixture.from.join("kept")).unwrap();
+    journal
+        .append(Event::MoveReversed {
+            run: run.clone(),
+            index: 1,
+        })
+        .unwrap();
+    journal
+        .append(Event::ReverseStarted {
+            run: run.clone(),
+            index: 0,
+        })
+        .unwrap();
+    fs::remove_file(fixture.to.join("lost")).unwrap();
+    drop(journal);
+
+    let findings = reconcile(&mut fixture.open()).unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].finding, Finding::Unresolved);
+    let state = fixture.state();
+    let closed = state.run(&run).unwrap();
+    assert!(!closed.undo_open);
+    assert_eq!(closed.undo, Some(RunStatus::Partial));
+}
+
+#[test]
+fn refuses_to_move_a_directory_that_holds_the_journal() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let (from, to) = (root.join("Downloads"), root.join("Documents"));
+    let journal_dir = from.join("box/journal");
+    fs::create_dir_all(&journal_dir).unwrap();
+    fs::create_dir(&to).unwrap();
+    let mut journal = Journal::open(&journal_dir).unwrap();
+    let request = MoveRequest {
+        name: OsString::from("box"),
+        expected: None,
+    };
+    let plan = plan_move(&from, &[request], &to, 0).unwrap();
+    record_plan(&mut journal, &plan).unwrap();
+
+    let report = apply(&mut journal, &plan, &mut |_| {}).unwrap();
+    assert_eq!(report.status, RunStatus::Refused);
+    assert_eq!(refusal_codes(&report), [Some(RefusalCode::ContainsJournal)]);
+    assert!(journal_dir.join("journal.jsonl").exists());
+    assert!(!to.join("box").exists());
+    drop(journal);
+    let state = JournalState::from_records(&read(&journal_dir).unwrap());
+    assert_eq!(state.runs[0].moves[0].status, MoveStatus::Refused);
+}
+
+#[test]
+fn a_plan_names_each_entry_that_its_measurement_could_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let locked = fixture.from.join("dir/locked");
+    fs::create_dir_all(&locked).unwrap();
+    write(&fixture.from.join("dir/open.txt"), b"1");
+    // The superuser reads every directory, so the test holds only for an
+    // ordinary user.
+    if fs::symlink_metadata(&locked).unwrap().uid() == 0 {
+        return;
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let plan = fixture.plan(&["dir"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let planned = &plan.moves[0];
+    assert_eq!(planned.measure_error_count, 1);
+    assert_eq!(planned.measure_errors.len(), 1);
+    assert_eq!(planned.measure_errors[0].path.as_path(), locked);
+    assert!(!planned.measure_errors[0].message.is_empty());
+    let text = serde_json::to_string(&plan).unwrap();
+    let parsed: MovePlan = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed, plan);
+}
+
+#[test]
 fn a_rejected_plan_file_cannot_apply_through_an_edited_path() {
     let fixture = Fixture::new();
     write(&fixture.from.join("file"), b"data");

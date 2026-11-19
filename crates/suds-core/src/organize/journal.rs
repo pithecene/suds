@@ -6,15 +6,21 @@
 //! after it, so the next run can tell whether an interrupted rename happened.
 //! An exclusive lock on `journal.lock` keeps two processes from writing at
 //! once.
+//!
+//! A record ends with a line feed, and one write holds the whole line. Bytes
+//! after the last line feed are therefore the remains of an append that an
+//! interruption or a full disk cut short. They form no record, so a reader
+//! sets them aside and a writer removes them before its first append.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::inspection::EntryRevision;
@@ -180,6 +186,11 @@ pub enum JournalError {
         path: PathBuf,
         source: io::Error,
     },
+    /// A file of the journal is a symbolic link or no regular file. Suds
+    /// follows no link, so it reads and writes no such file.
+    NotAFile {
+        path: PathBuf,
+    },
     /// A line of the journal is not a record that this release reads.
     Corrupt {
         line: usize,
@@ -211,6 +222,11 @@ impl fmt::Display for JournalError {
                     path.display()
                 )
             }
+            JournalError::NotAFile { path } => write!(
+                f,
+                "{} is a symbolic link or no regular file, so Suds neither reads nor writes it",
+                path.display()
+            ),
             JournalError::Corrupt { line, message } => write!(
                 f,
                 "line {line} of the journal is not a record that this release reads: {message}"
@@ -239,6 +255,8 @@ pub fn default_directory() -> Result<PathBuf, JournalError> {
 
 /// The journal, opened for writing under its exclusive lock.
 pub struct Journal {
+    /// The journal directory's canonical path.
+    directory: PathBuf,
     path: PathBuf,
     file: File,
     records: Vec<Record>,
@@ -262,16 +280,25 @@ impl Journal {
             Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
             Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
         }
+        let directory = fs::canonicalize(dir).map_err(|source| io_error(dir, source))?;
         let path = dir.join(JOURNAL_FILE);
-        let file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|source| io_error(&path, source))?;
-        let records = read_records(&file, &path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).append(true).create(true).mode(0o600);
+        let mut file = open_regular(&mut options, &path)?;
+        let (records, committed) = read_records(&mut file, &path)?;
+        let length = file
+            .metadata()
+            .map_err(|source| io_error(&path, source))?
+            .len();
+        if committed < length {
+            // The bytes after the last line feed form no record, and the next
+            // append must start on a line of its own.
+            file.set_len(committed)
+                .and_then(|()| file.sync_data())
+                .map_err(|source| io_error(&path, source))?;
+        }
         Ok(Journal {
+            directory,
             path,
             file,
             records,
@@ -281,6 +308,11 @@ impl Journal {
 
     pub fn records(&self) -> &[Record] {
         &self.records
+    }
+
+    /// The journal directory's canonical path, which no move may relocate.
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     /// Appends one record and waits until the storage device holds it, so
@@ -318,10 +350,14 @@ impl Journal {
 /// A directory without a journal holds no record.
 pub fn read(dir: &Path) -> Result<Vec<Record>, JournalError> {
     let path = dir.join(JOURNAL_FILE);
-    let file = match File::open(&path) {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let mut file = match open_regular(&mut options, &path) {
         Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(io_error(&path, source)),
+        Err(JournalError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(err) => return Err(err),
     };
     let lock = open_lock(dir)?;
     match lock.try_lock_shared() {
@@ -329,26 +365,61 @@ pub fn read(dir: &Path) -> Result<Vec<Record>, JournalError> {
         Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
         Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
     }
-    read_records(&file, &path)
+    read_records(&mut file, &path).map(|(records, _)| records)
 }
 
 fn open_lock(dir: &Path) -> Result<File, JournalError> {
     let path = dir.join(LOCK_FILE);
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|source| io_error(&path, source))
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false).mode(0o600);
+    open_regular(&mut options, &path)
 }
 
-fn read_records(file: &File, path: &Path) -> Result<Vec<Record>, JournalError> {
+/// Opens a file of the journal without following a symbolic link at its
+/// final component, and refuses anything that is no regular file. A link
+/// there would make Suds read or append to a file outside the journal
+/// directory, which no plan names.
+fn open_regular(options: &mut OpenOptions, path: &Path) -> Result<File, JournalError> {
+    let not_a_file = || JournalError::NotAFile {
+        path: path.to_path_buf(),
+    };
+    let file = options
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+        .open(path)
+        .map_err(|source| {
+            // The kernel reports a link at the final component as a loop.
+            if source.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                not_a_file()
+            } else {
+                io_error(path, source)
+            }
+        })?;
+    let meta = file.metadata().map_err(|source| io_error(path, source))?;
+    if meta.is_file() {
+        Ok(file)
+    } else {
+        Err(not_a_file())
+    }
+}
+
+/// Reads every committed record, and returns them with the length in bytes
+/// that they occupy. The bytes beyond that length hold no line feed, so they
+/// are the remains of an append that did not finish.
+fn read_records(file: &mut File, path: &Path) -> Result<(Vec<Record>, u64), JournalError> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    let committed = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |last| last + 1);
     let mut records = Vec::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
+    for (index, line) in bytes[..committed]
+        .split_inclusive(|byte| *byte == b'\n')
+        .enumerate()
+    {
         let number = index + 1;
-        let line = line.map_err(|source| io_error(path, source))?;
-        let record: Record = serde_json::from_str(&line).map_err(|err| JournalError::Corrupt {
+        let record: Record = serde_json::from_slice(line).map_err(|err| JournalError::Corrupt {
             line: number,
             message: err.to_string(),
         })?;
@@ -366,7 +437,7 @@ fn read_records(file: &File, path: &Path) -> Result<Vec<Record>, JournalError> {
         }
         records.push(record);
     }
-    Ok(records)
+    Ok((records, u64::try_from(committed).unwrap_or(u64::MAX)))
 }
 
 fn io_error(path: &Path, source: io::Error) -> JournalError {
@@ -698,6 +769,62 @@ mod tests {
         assert!(matches!(Journal::open(dir.path()), Err(JournalError::Busy)));
         drop(first);
         assert!(Journal::open(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_journal_file_that_is_a_symbolic_link() {
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, b"").unwrap();
+        let journal_dir = dir.path().join("journal");
+        fs::create_dir(&journal_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, journal_dir.join("journal.jsonl")).unwrap();
+
+        assert!(matches!(
+            Journal::open(&journal_dir),
+            Err(JournalError::NotAFile { .. })
+        ));
+        assert!(matches!(
+            read(&journal_dir),
+            Err(JournalError::NotAFile { .. })
+        ));
+        assert_eq!(fs::read(&outside).unwrap(), b"");
+    }
+
+    #[test]
+    fn sets_aside_an_append_that_an_interruption_cut_short() {
+        let dir = TempDir::new().unwrap();
+        let mut journal = Journal::open(dir.path()).unwrap();
+        journal
+            .append(Event::UndoStarted {
+                run: "run-1".to_owned(),
+            })
+            .unwrap();
+        drop(journal);
+        let path = dir.path().join("journal.jsonl");
+        let committed = fs::read(&path).unwrap();
+        let mut cut = committed.clone();
+        cut.extend_from_slice(b"{\"schema\":\"suds.journal/v1\",\"seq");
+        fs::write(&path, &cut).unwrap();
+
+        // A reader sees the committed record and changes nothing.
+        assert_eq!(read(dir.path()).unwrap().len(), 1);
+        assert_eq!(fs::read(&path).unwrap(), cut);
+
+        // A writer removes the remains, so its next record starts a line.
+        let mut journal = Journal::open(dir.path()).unwrap();
+        assert_eq!(journal.records().len(), 1);
+        journal
+            .append(Event::MoveReversed {
+                run: "run-1".to_owned(),
+                index: 0,
+            })
+            .unwrap();
+        drop(journal);
+        let records = read(dir.path()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].sequence, 2);
+        assert!(fs::read(&path).unwrap().starts_with(&committed));
     }
 
     #[test]

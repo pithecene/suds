@@ -115,6 +115,15 @@ export function MoveSheet({ plan, onChanged, onClose }: Props) {
                         ({formatCount(planned.measure_error_count)} entries unreadable; sizes are lower bounds)
                       </span>
                     )}
+                    {planned.measure_errors.length > 0 && (
+                      <ul className="muted">
+                        {planned.measure_errors.map((error) => (
+                          <li key={error.path}>
+                            {error.path}: {error.message}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </td>
                   <td>{planned.kind}</td>
                   <td className="number">{formatBytes(planned.allocated_bytes)}</td>

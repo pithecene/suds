@@ -61,6 +61,14 @@ pub struct PlannedMoveView {
     pub allocated_bytes: u64,
     pub newest_modified: Option<String>,
     pub measure_error_count: u64,
+    pub measure_errors: Vec<MeasureErrorView>,
+}
+
+/// One entry beneath a planned source that the measurement could not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MeasureErrorView {
+    pub path: String,
+    pub message: String,
 }
 
 /// A run's or an undo's result.
@@ -174,13 +182,30 @@ impl Operations {
         Ok(run_view(&report))
     }
 
+    /// Lists the runs after it settles each rename that an interruption left
+    /// without an outcome. A move that the journal shows as started offers no
+    /// undo, so a history that only read the journal would strand the entry
+    /// that such a move left at its destination.
     pub fn list(&self) -> Result<Vec<RunSummaryView>, String> {
-        let records = journal::read(self.journal_directory()?).map_err(|err| err.to_string())?;
-        Ok(JournalState::from_records(&records)
-            .summaries()
-            .iter()
-            .map(summary_view)
-            .collect())
+        let directory = self.journal_directory()?;
+        let records = journal::read(directory).map_err(|err| err.to_string())?;
+        // A directory without a record needs no reconciliation, and viewing
+        // the history creates no journal.
+        let state = if records.is_empty() {
+            JournalState::from_records(&records)
+        } else {
+            match Journal::open(directory) {
+                Ok(mut journal) => {
+                    execute::reconcile(&mut journal).map_err(|err| err.to_string())?;
+                    journal.state()
+                }
+                // Another operation holds the journal and reconciles as it
+                // starts, so the history shows the records as they stand.
+                Err(journal::JournalError::Busy) => JournalState::from_records(&records),
+                Err(err) => return Err(err.to_string()),
+            }
+        };
+        Ok(state.summaries().iter().map(summary_view).collect())
     }
 }
 
@@ -204,6 +229,14 @@ fn plan_view(plan: &MovePlan) -> PlanView {
                 allocated_bytes: planned.measure.allocated_bytes,
                 newest_modified: planned.measure.newest_modified.clone(),
                 measure_error_count: planned.measure_error_count,
+                measure_errors: planned
+                    .measure_errors
+                    .iter()
+                    .map(|error| MeasureErrorView {
+                        path: error.path.display(),
+                        message: error.message.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
         preconditions: PRECONDITIONS.to_vec(),
@@ -316,6 +349,52 @@ mod tests {
             operations.undo(&run.run).unwrap().status,
             RunStatus::Complete
         );
+        assert!(from.join("a.pdf").exists());
+    }
+
+    #[test]
+    fn the_history_settles_an_interrupted_move_and_offers_its_undo() {
+        use suds_core::organize::journal::{Event, Journal};
+
+        let dir = TempDir::new().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let from = root.join("Downloads");
+        let to = root.join("Documents");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(from.join("a.pdf"), b"a").unwrap();
+        let journal = root.join("journal");
+        let operations = Operations::new(Ok(journal.clone()));
+        let PlanResponse::Planned { plan } = operations
+            .create_plan(&from, &[request("a.pdf")], &to)
+            .unwrap()
+        else {
+            panic!("expected a plan");
+        };
+
+        // The application exits after the rename and before its record.
+        let mut writer = Journal::open(&journal).unwrap();
+        writer
+            .append(Event::RunStarted {
+                run: "run-cut".to_owned(),
+                plan: plan.id.clone(),
+            })
+            .unwrap();
+        writer
+            .append(Event::MoveStarted {
+                run: "run-cut".to_owned(),
+                index: 0,
+            })
+            .unwrap();
+        fs::rename(from.join("a.pdf"), to.join("a.pdf")).unwrap();
+        drop(writer);
+
+        let history = operations.list().unwrap();
+        assert_eq!(history[0].run, "run-cut");
+        assert!(history[0].interrupted);
+        assert_eq!(history[0].moves[0].status, MoveStatus::Applied);
+        assert!(history[0].undoable);
+        operations.undo("run-cut").unwrap();
         assert!(from.join("a.pdf").exists());
     }
 

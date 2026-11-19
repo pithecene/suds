@@ -160,6 +160,14 @@ fn write_preview(out: &mut impl Write, plan: &MovePlan, output: &Path) -> io::Re
                 "             Suds could not read {} entries beneath it, so its sizes are lower bounds",
                 planned.measure_error_count
             )?;
+            for error in &planned.measure_errors {
+                writeln!(
+                    out,
+                    "               {}: {}",
+                    escape(&error.path.display()),
+                    escape(&error.message)
+                )?;
+            }
         }
     }
     writeln!(out)?;

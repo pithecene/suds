@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::inspection::EntryRevision;
-use crate::model::{EntryKind, Measure};
+use crate::model::{EntryKind, ErrorKind, Measure};
 use crate::organize::native::NativePath;
 use crate::scan;
 use crate::timestamp;
@@ -73,6 +73,18 @@ pub struct PlannedMove {
     /// The number of entries beneath the source that the measurement could
     /// not read. A positive count makes the measure a lower bound.
     pub measure_error_count: u64,
+    /// The first of those entries in traversal order, each with its reason.
+    /// The count includes the entries beyond this list, as an inspection's
+    /// count does.
+    pub measure_errors: Vec<MeasureError>,
+}
+
+/// One entry beneath a planned source that the measurement could not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeasureError {
+    pub path: NativePath,
+    pub kind: ErrorKind,
+    pub message: String,
 }
 
 impl PlannedMove {
@@ -120,6 +132,8 @@ pub enum RefusalCode {
     CrossFilesystem,
     /// A mount point lies beneath the source.
     ContainsMountPoint,
+    /// The entry is the journal directory or holds it.
+    ContainsJournal,
     /// The entry that Suds moved is no longer at the destination.
     DestinationMissing,
     /// The entry at the destination differs from the entry that Suds moved.
@@ -331,6 +345,15 @@ fn plan_entry(
         expected: revision,
         measure: measured.measure,
         measure_error_count: measured.error_count,
+        measure_errors: measured
+            .errors
+            .into_iter()
+            .map(|error| MeasureError {
+                path: NativePath::new(error.path),
+                kind: error.kind,
+                message: error.message,
+            })
+            .collect(),
     })
 }
 

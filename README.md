@@ -76,7 +76,8 @@ In the Downloads location, the user can select direct children and choose
 shows the exact plan before anything moves. The sheet lists each move's
 outcome after the user applies the plan and offers to undo the run. The
 **History** sheet lists every run in the journal, with an undo for each run
-whose moves remain applied.
+whose moves remain applied. The sheet first settles each move that an
+interruption left without an outcome.
 
 The application uses [Tauri](https://tauri.app/). The system's web view
 renders the window, and a Rust process holds every path. The web view may
@@ -174,13 +175,15 @@ their canonical paths, and the preview shows them. The command refuses a
 symbolic link or a special file, a destination that exists, a destination
 inside the source, a directory that contains a mount point, and a
 destination on another filesystem. It also refuses to replace an existing
-output file.
+output file. Where the measurement of a selected directory cannot read an
+entry, the plan and its preview name that entry with the reason.
 
 The `apply` command accepts only a plan that `suds plan` or the desktop
 application built and recorded in the journal, unchanged, and each plan
 runs once. Immediately before each move, Suds verifies the entry's
 recorded identity, the identity and canonical path of both directories,
-and that the destination is free. It then renames the entry with the
+and that the destination is free. It refuses an entry that holds the
+journal directory. It then renames the entry with the
 kernel's no-replace flag, so the move is atomic and overwrites nothing.
 After the rename, Suds confirms that the destination holds the planned
 entry. When another process swapped the source in the meantime, Suds
@@ -197,7 +200,10 @@ journal, so each command there takes `--journal DIR`. Suds records each
 move before and after its rename. When a run stops between those records,
 the next `apply` or `undo` examines both paths. If the entry lies at
 exactly one of them, Suds records which, and otherwise it records the move as
-`unresolved` and changes nothing.
+`unresolved` and changes nothing. Suds opens no journal file through a
+symbolic link. A full disk or an interruption can cut an append short, and
+the bytes that remain form no record, so a reader sets them aside and the
+next writer removes them.
 
 | Status | Meaning for `plan`, `apply`, and `undo` |
 | :--- | :--- |

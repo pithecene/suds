@@ -161,8 +161,8 @@ proves none:
 | vcpkg checkout | A directory that holds `.vcpkg-root` |
 
 Suds claims build state only beneath a checkout, so build output that no
-checkout owns stays unclassified. A submodule stays a part of the checkout
-that holds it. A checkout's own size leaves out its build state and each
+checkout owns stays unclassified. A submodule stays a part of its parent
+checkout. A checkout's own size leaves out its build state and each
 checkout beneath it.
 
 The profile then measures each shared store and toolchain directory at the
@@ -190,8 +190,9 @@ A file with several links counts once, toward the first class that reaches
 it. The checkouts come before the stores, so the checkouts' sizes sum to
 the figure that `du` reports for the same directories.
 
-The profile reads one kind of file content. A linked checkout's `.git`
-file holds one line that names its repository, and Suds reads that line.
+The profile reads the content of one file in each linked checkout. The
+checkout's `.git` file holds one line that names its repository, and Suds
+reads that line.
 
 ## JSON Output
 
@@ -321,9 +322,8 @@ what it found at each path.
 
 - Suds sends no telemetry and makes no network request.
 - Suds reads metadata and directory listings, and it reads no extended
-  attribute. The development profile opens one kind of regular file, the
-  `.git` file of a linked checkout. No other inspection opens a regular
-  file.
+  attribute. The development profile opens the `.git` file of each linked
+  checkout, and no other inspection opens a regular file.
 - Suds never requests elevated privileges.
 - Suds moves an entry only through a recorded plan, and it deletes,
   copies, and overwrites nothing.

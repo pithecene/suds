@@ -325,7 +325,7 @@ fn is_file(path: &Path) -> bool {
 /// has an owner, so the profile claims it only beneath a checkout.
 fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
     // A vcpkg checkout holds a repository of its own, so its marker decides
-    // before the `.git` entry does.
+    // before the `.git` entry.
     if is_file(&dir.join(".vcpkg-root")) {
         return Some(Claim::Toolchain(Ecosystem::Vcpkg));
     }
@@ -334,7 +334,7 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
         Ok(meta) if meta.is_dir() => return Some(Claim::Checkout(CheckoutKind::Main, None)),
         Ok(meta) if meta.is_file() => {
             // A submodule's file names a `modules` directory, so the
-            // submodule stays a part of the checkout that holds it.
+            // submodule stays a part of its parent checkout.
             if let Some(repository) = linked_repository(dir, &git) {
                 return Some(Claim::Checkout(CheckoutKind::Linked, Some(repository)));
             }

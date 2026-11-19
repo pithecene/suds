@@ -35,6 +35,45 @@ pub enum Command {
 
     /// Return each entry that a run moved to its original path.
     Undo(UndoArgs),
+
+    /// Plan the removal of build state that no process uses, and remove it
+    /// with `--apply`. A build regenerates build state, so its removal is
+    /// permanent.
+    Reclaim(ReclaimArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ReclaimArgs {
+    /// A directory beneath which Suds looks for checkouts. Repeat the option
+    /// for several directories.
+    #[arg(long = "root", value_name = "DIR", required = true)]
+    pub roots: Vec<PathBuf>,
+
+    /// The time for which a directory must have stood unchanged.
+    #[arg(long, value_name = "MINUTES", default_value_t = 60)]
+    pub idle_minutes: u64,
+
+    /// Consider each linked checkout too. Suds has Git remove one only when
+    /// its tree is clean and a remote holds every commit of its head.
+    #[arg(long)]
+    pub checkouts: bool,
+
+    /// Remove what the plan names. Without the option, Suds prints the plan
+    /// and changes nothing.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Proceed while the system hides the working directory of a process of
+    /// this user. Without the option, such a process keeps every directory.
+    #[arg(long)]
+    pub tolerate_unreadable_processes: bool,
+
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
+
+    #[command(flatten)]
+    pub journal: JournalOption,
 }
 
 #[derive(Debug, Subcommand)]

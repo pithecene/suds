@@ -76,7 +76,29 @@ pub enum CheckoutKind {
 pub struct BuildState {
     pub path: PathBuf,
     pub ecosystem: Ecosystem,
+    /// The directory without any checkout beneath it.
     pub measure: Measure,
+    /// What the directory holds besides derived state.
+    pub survey: Survey,
+}
+
+/// What a directory of build state holds that a build does not regenerate,
+/// and what the measurement could not see. A directory counts as derived
+/// state as a whole only when every count is zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Survey {
+    /// The directories beneath it that hold a `.git` entry.
+    pub checkouts_beneath: u64,
+    /// The mount points beneath it, which the measurement did not enter.
+    pub skipped_mount_count: u64,
+    /// The entries beneath it that the measurement could not read.
+    pub error_count: u64,
+}
+
+impl Survey {
+    pub fn is_clear(&self) -> bool {
+        *self == Survey::default()
+    }
 }
 
 /// One checkout with the build state beneath it.
@@ -375,6 +397,15 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
     Some(Claim::Build(ecosystem))
 }
 
+/// The ecosystem whose layout proves that `dir` is build state beneath a
+/// checkout.
+pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
+    match claim(dir, true) {
+        Some(Claim::Build(ecosystem)) => Some(ecosystem),
+        _ => None,
+    }
+}
+
 /// The main checkout that the `.git` file of `dir` names, when the file
 /// names an entry of that checkout's `worktrees` directory.
 fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
@@ -428,11 +459,19 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             for dir in bounded.set_aside {
                 match claim(&dir, true) {
                     Some(Claim::Build(ecosystem)) => {
-                        let measure = measure_whole(&mut scan, &dir);
+                        let (measure, survey, nested) = measure_build(&mut scan, &dir);
+                        // A checkout inside build state is a checkout, and
+                        // the report lists it as one.
+                        for path in nested {
+                            if let Some(claimed) = claim(&path, false) {
+                                found.take(&mut scan, path, claimed);
+                            }
+                        }
                         checkout.build_state.push(BuildState {
                             path: dir,
                             ecosystem,
                             measure,
+                            survey,
                         });
                     }
                     Some(claimed) => found.take(&mut scan, dir, claimed),
@@ -528,6 +567,44 @@ fn examine_store(path: &Path, home: Option<&Path>) -> io::Result<bool> {
         }
     }
     fs::symlink_metadata(path).map(|meta| meta.is_dir())
+}
+
+/// Measures one directory of build state and surveys it. The measurement
+/// sets aside each directory with a `.git` entry and returns its path.
+fn measure_build(scan: &mut SharedScan, path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
+    let (mounts, errors) = (scan.skipped_mount_count(), scan.error_count());
+    let bounded = scan.measure(path, &mut |dir| {
+        fs::symlink_metadata(dir.join(".git")).is_ok()
+    });
+    let (measure, nested) = bounded.map_or_else(Default::default, |bounded| {
+        (bounded.measure, bounded.set_aside)
+    });
+    let survey = Survey {
+        checkouts_beneath: u64::try_from(nested.len()).unwrap_or(u64::MAX),
+        skipped_mount_count: scan.skipped_mount_count().saturating_sub(mounts),
+        error_count: scan.error_count().saturating_sub(errors),
+    };
+    (measure, survey, nested)
+}
+
+/// Measures and surveys the build state at `path` in a scan of its own, so
+/// that a removal can verify the directory as it stands.
+pub(crate) fn survey_build_state(path: &Path) -> (Measure, Survey) {
+    let (measure, survey, _) = measure_build(&mut SharedScan::default(), path);
+    (measure, survey)
+}
+
+/// Measures the tree at `path` in a scan of its own, and counts the mount
+/// points and the unreadable entries beneath it.
+pub(crate) fn survey_tree(path: &Path) -> (Measure, Survey) {
+    let mut scan = SharedScan::default();
+    let measure = measure_whole(&mut scan, path);
+    let survey = Survey {
+        checkouts_beneath: 0,
+        skipped_mount_count: scan.skipped_mount_count(),
+        error_count: scan.error_count(),
+    };
+    (measure, survey)
 }
 
 fn measure_whole(scan: &mut SharedScan, path: &Path) -> Measure {
@@ -647,6 +724,8 @@ pub struct BuildStateResult {
     pub ecosystem: Ecosystem,
     #[serde(flatten)]
     pub measure: Measure,
+    #[serde(flatten)]
+    pub survey: Survey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +803,7 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
                         path: display(&build.path),
                         ecosystem: build.ecosystem,
                         measure: build.measure.clone(),
+                        survey: build.survey,
                     })
                     .collect(),
             })

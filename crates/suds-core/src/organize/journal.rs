@@ -13,7 +13,8 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::inspection::EntryRevision;
 use crate::organize::native::NativePath;
 use crate::organize::plan::{MovePlan, Refusal, RefusalCode};
+use crate::reclaim::execute::Authority;
+use crate::reclaim::plan::ReclaimPlan;
 use crate::timestamp;
 
 /// The schema tag of every journal record.
@@ -115,6 +118,36 @@ pub enum Event {
         run: String,
         status: RunStatus,
         interrupted: bool,
+    },
+    /// Suds built this reclaim plan and is about to apply it.
+    ReclaimPlanned {
+        plan: ReclaimPlan,
+    },
+    ReclaimStarted {
+        run: String,
+        plan: String,
+        authority: Authority,
+    },
+    /// Suds verified the removal's preconditions and is about to remove the
+    /// directory that `index` names in the run's plan.
+    RemovalStarted {
+        run: String,
+        index: usize,
+    },
+    Removed {
+        run: String,
+        index: usize,
+        freed_bytes: u64,
+    },
+    RemovalRefused {
+        run: String,
+        index: usize,
+        reason: String,
+    },
+    ReclaimCompleted {
+        run: String,
+        status: RunStatus,
+        freed_bytes: u64,
     },
 }
 
@@ -261,8 +294,8 @@ pub struct Journal {
 
 impl Journal {
     /// Opens the journal in `dir`, creating the directory and the journal
-    /// when they do not exist. The call fails at once, rather than waiting,
-    /// when another process holds the lock.
+    /// when they do not exist. The call fails after a short wait when
+    /// another process holds the lock.
     pub fn open(dir: &Path) -> Result<Journal, JournalError> {
         fs::DirBuilder::new()
             .recursive(true)
@@ -270,11 +303,7 @@ impl Journal {
             .create(dir)
             .map_err(|source| io_error(dir, source))?;
         let lock = open_lock(dir)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
-            Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
-        }
+        acquire(dir, || lock.try_lock())?;
         let directory = fs::canonicalize(dir).map_err(|source| io_error(dir, source))?;
         let path = dir.join(JOURNAL_FILE);
         let mut options = OpenOptions::new();
@@ -355,12 +384,33 @@ pub fn read(dir: &Path) -> Result<Vec<Record>, JournalError> {
         Err(err) => return Err(err),
     };
     let lock = open_lock(dir)?;
-    match lock.try_lock_shared() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
-        Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
-    }
+    acquire(dir, || lock.try_lock_shared())?;
     read_records(&mut file, &path).map(|(records, _)| records)
+}
+
+/// The time for which a caller waits for the journal's lock.
+const LOCK_PATIENCE: Duration = Duration::from_millis(250);
+
+/// Takes the journal's lock, and reports a busy journal only after a short
+/// wait. A process that this one starts holds a copy of the lock until it
+/// runs its own program, so a released lock can read as held for an instant.
+fn acquire(
+    dir: &Path,
+    mut attempt: impl FnMut() -> Result<(), TryLockError>,
+) -> Result<(), JournalError> {
+    let started = Instant::now();
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_PATIENCE => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
+            Err(TryLockError::Error(source)) => {
+                return Err(io_error(&dir.join(LOCK_FILE), source));
+            }
+        }
+    }
 }
 
 fn open_lock(dir: &Path) -> Result<File, JournalError> {
@@ -499,6 +549,8 @@ pub struct MoveState {
 pub struct RunState {
     pub run: String,
     pub plan: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
     pub started_at: String,
     pub moves: Vec<MoveState>,
     pub completed: Option<RunStatus>,
@@ -515,6 +567,36 @@ pub struct JournalState {
     pub plans: HashMap<String, MovePlan>,
     /// The runs in the order in which they started.
     pub runs: Vec<RunState>,
+    pub reclaim_plans: HashMap<String, ReclaimPlan>,
+    /// The reclaim runs in the order in which they started.
+    pub reclaims: Vec<ReclaimState>,
+}
+
+/// One reclaim run's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimState {
+    pub run: String,
+    pub plan: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
+    pub started_at: String,
+    pub authority: Authority,
+    /// Each candidate that the run reached, by its position in the plan.
+    pub removals: Vec<(usize, RemovalState)>,
+    pub completed: Option<RunStatus>,
+}
+
+/// What the journal records of one removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalState {
+    /// The removal started, and no record states its outcome.
+    Started,
+    Removed {
+        freed_bytes: u64,
+    },
+    Refused {
+        reason: String,
+    },
 }
 
 impl JournalState {
@@ -540,6 +622,7 @@ impl JournalState {
                 self.runs.push(RunState {
                     run: run.clone(),
                     plan: plan.clone(),
+                    sequence: record.sequence,
                     started_at: record.at.clone(),
                     moves: vec![
                         MoveState {
@@ -638,6 +721,53 @@ impl JournalState {
                     state.undo = Some(*status);
                 }
             }
+            Event::ReclaimPlanned { plan } => {
+                self.reclaim_plans.insert(plan.id.clone(), plan.clone());
+            }
+            Event::ReclaimStarted {
+                run,
+                plan,
+                authority,
+            } => self.reclaims.push(ReclaimState {
+                run: run.clone(),
+                plan: plan.clone(),
+                sequence: record.sequence,
+                started_at: record.at.clone(),
+                authority: *authority,
+                removals: Vec::new(),
+                completed: None,
+            }),
+            Event::RemovalStarted { run, index } => {
+                self.set_removal(run, *index, RemovalState::Started);
+            }
+            Event::Removed {
+                run,
+                index,
+                freed_bytes,
+            } => {
+                let freed_bytes = *freed_bytes;
+                self.set_removal(run, *index, RemovalState::Removed { freed_bytes });
+            }
+            Event::RemovalRefused { run, index, reason } => {
+                let reason = reason.clone();
+                self.set_removal(run, *index, RemovalState::Refused { reason });
+            }
+            Event::ReclaimCompleted { run, status, .. } => {
+                if let Some(state) = self.reclaims.iter_mut().find(|state| state.run == *run) {
+                    state.completed = Some(*status);
+                }
+            }
+        }
+    }
+
+    /// Records the latest state of one removal of a reclaim run.
+    fn set_removal(&mut self, run: &str, index: usize, removal: RemovalState) {
+        let Some(state) = self.reclaims.iter_mut().find(|state| state.run == run) else {
+            return;
+        };
+        match state.removals.iter_mut().find(|(at, _)| *at == index) {
+            Some(entry) => entry.1 = removal,
+            None => state.removals.push((index, removal)),
         }
     }
 
@@ -653,48 +783,94 @@ impl JournalState {
         }
     }
 
-    /// Each run with its plan's paths, most recent first.
+    /// Each run with its plan's paths, most recent first. A reclaim run
+    /// lists its removals and offers no undo.
     pub fn summaries(&self) -> Vec<RunSummary> {
-        self.runs
+        let mut summaries: Vec<(u64, RunSummary)> = self
+            .reclaims
             .iter()
-            .rev()
-            .map(|run| {
-                let plan = self.plans.get(&run.plan);
-                let moves = run
+            .map(|run| (run.sequence, self.reclaim_summary(run)))
+            .chain(self.move_summaries())
+            .collect();
+        summaries.sort_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
+        summaries.into_iter().map(|(_, summary)| summary).collect()
+    }
+
+    fn reclaim_summary(&self, run: &ReclaimState) -> RunSummary {
+        let plan = self.reclaim_plans.get(&run.plan);
+        let removals = run
+            .removals
+            .iter()
+            .filter_map(|(index, state)| {
+                let candidate = plan?.candidates.get(*index)?;
+                let (removed, freed_bytes, reason) = match state {
+                    RemovalState::Started => (false, 0, None),
+                    RemovalState::Removed { freed_bytes } => (true, *freed_bytes, None),
+                    RemovalState::Refused { reason } => (false, 0, Some(reason.clone())),
+                };
+                Some(RemovalSummary {
+                    path: candidate.path.clone(),
+                    removed,
+                    freed_bytes,
+                    reason,
+                })
+            })
+            .collect();
+        RunSummary {
+            kind: RunKind::Reclaim,
+            run: run.run.clone(),
+            plan: run.plan.clone(),
+            started_at: run.started_at.clone(),
+            status: run.completed,
+            interrupted: false,
+            undo: None,
+            undoable: false,
+            moves: Vec::new(),
+            removals,
+        }
+    }
+
+    fn move_summaries(&self) -> impl Iterator<Item = (u64, RunSummary)> {
+        self.runs.iter().map(|run| {
+            let plan = self.plans.get(&run.plan);
+            let moves = run
+                .moves
+                .iter()
+                .enumerate()
+                .filter_map(|(index, state)| {
+                    let planned = plan?.moves.get(index)?;
+                    Some(MoveSummary {
+                        source: planned.source.clone(),
+                        destination: planned.destination.clone(),
+                        status: state.status,
+                        refusal: state.refusal.clone(),
+                    })
+                })
+                .collect();
+            let summary = RunSummary {
+                kind: RunKind::Move,
+                run: run.run.clone(),
+                plan: run.plan.clone(),
+                started_at: run.started_at.clone(),
+                status: run.completed,
+                interrupted: run.interrupted,
+                undo: run.undo,
+                undoable: run
                     .moves
                     .iter()
-                    .enumerate()
-                    .filter_map(|(index, state)| {
-                        let planned = plan?.moves.get(index)?;
-                        Some(MoveSummary {
-                            source: planned.source.clone(),
-                            destination: planned.destination.clone(),
-                            status: state.status,
-                            refusal: state.refusal.clone(),
-                        })
-                    })
-                    .collect();
-                RunSummary {
-                    run: run.run.clone(),
-                    plan: run.plan.clone(),
-                    started_at: run.started_at.clone(),
-                    status: run.completed,
-                    interrupted: run.interrupted,
-                    undo: run.undo,
-                    undoable: run
-                        .moves
-                        .iter()
-                        .any(|state| state.status == MoveStatus::Applied),
-                    moves,
-                }
-            })
-            .collect()
+                    .any(|state| state.status == MoveStatus::Applied),
+                moves,
+                removals: Vec::new(),
+            };
+            (run.sequence, summary)
+        })
     }
 }
 
 /// One run as `suds journal` and the desktop application list it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunSummary {
+    pub kind: RunKind,
     pub run: String,
     pub plan: String,
     pub started_at: String,
@@ -707,6 +883,26 @@ pub struct RunSummary {
     /// Whether any move remains applied, so that an undo could reverse it.
     pub undoable: bool,
     pub moves: Vec<MoveSummary>,
+    /// For a reclaim run, each candidate that the run reached.
+    pub removals: Vec<RemovalSummary>,
+}
+
+/// Whether a run moved entries or removed derived state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    Move,
+    Reclaim,
+}
+
+/// One removal of a reclaim run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemovalSummary {
+    pub path: NativePath,
+    pub removed: bool,
+    pub freed_bytes: u64,
+    /// The reason that the run removed nothing at the path.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

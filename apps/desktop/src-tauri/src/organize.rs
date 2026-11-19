@@ -13,7 +13,7 @@ use serde::Serialize;
 use suds_core::model::EntryKind;
 use suds_core::organize::execute::{self, MoveOutcome, RunReport};
 use suds_core::organize::journal::{
-    self, Journal, JournalState, MoveStatus, RunStatus, RunSummary,
+    self, Journal, JournalState, MoveStatus, RunKind, RunStatus, RunSummary,
 };
 use suds_core::organize::plan::{MovePlan, MoveRequest, PRECONDITIONS, Refusal, plan_move};
 
@@ -205,7 +205,14 @@ impl Operations {
                 Err(err) => return Err(err.to_string()),
             }
         };
-        Ok(state.summaries().iter().map(summary_view).collect())
+        // The window lists the runs that it can undo, and a reclaim run
+        // offers no undo.
+        Ok(state
+            .summaries()
+            .iter()
+            .filter(|summary| summary.kind == RunKind::Move)
+            .map(summary_view)
+            .collect())
     }
 }
 

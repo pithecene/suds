@@ -7,8 +7,8 @@ use suds_core::development::{self, Environment};
 use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::Authority;
 use suds_core::stores::{
-    self, Budgets, Decision, Entry, Inputs, Programs, StoresPlan, StoresReport, engine_usage,
-    measure_after, parse_budget, plan_stores,
+    self, Budgets, Decision, Entry, Inputs, Programs, StoresPlan, StoresReport,
+    builder_budget_option, engine_usage, measure_after, parse_budget, plan_stores,
 };
 
 use crate::cli::StoresArgs;
@@ -35,6 +35,7 @@ fn run(args: &StoresArgs) -> Result<ExitCode, String> {
         budgets: &budgets,
         programs: &programs,
         engine: &engine,
+        builder_budget_option: builder_budget_option(&programs.docker),
         idle_seconds: args.idle_minutes.saturating_mul(60),
         now: now_seconds(),
     };

@@ -276,12 +276,20 @@ would run, and changes nothing.
 | :--- | :--- | :--- | :--- |
 | `go.build-cache` | 10 GiB | `go clean -cache` | Every cached build output |
 | `go.module-cache` | 10 GiB | `go clean -modcache` | Every downloaded module |
-| `pnpm.store` | 10 GiB | `pnpm store prune` | Each package that no project references |
-| `ccache.cache` | 5 GiB | `ccache --trim-dir DIR --trim-max-size BYTES` | The least recently used results beyond the budget |
+| `pnpm.store` | 10 GiB | `pnpm store prune --store-dir DIR` | Each package that no project references |
+| `ccache.cache` | 5 GiB | `ccache --trim-dir DIR --trim-max-size SIZE` | The least recently used results beyond the budget |
 | `mise.installs` | 20 GiB | `mise prune --yes` | Each tool version that no tracked configuration names |
 | `docker.images` | 20 GiB | `docker image prune --all --force` | Each image that no container uses |
-| `docker.build-cache` | 10 GiB | `docker builder prune --force --max-used-space BYTES` | The build cache beyond the budget |
+| `docker.build-cache` | 10 GiB | `docker builder prune --force` with the builder's size option | The build cache beyond the budget |
 | `docker.anonymous-volumes` | 1 GiB | `docker volume prune --force` | Each anonymous volume that no container uses |
+
+Each command names the store that Suds measured. The commands of Go and
+mise receive it in `GOCACHE`, `GOMODCACHE`, or `MISE_DATA_DIR`, and the
+commands of pnpm and ccache receive it as an argument. Each command runs in
+the root directory, so no project's configuration redirects it to another
+store. Docker's own builder bounds its cache with `--keep-storage`, and the
+buildx builder bounds it with `--max-used-space`, so Suds reads the
+command's help to choose.
 
 A program's trim decides what leaves. Go offers no partial trim, so a cache
 beyond its budget leaves whole, and the next build fills it again. The

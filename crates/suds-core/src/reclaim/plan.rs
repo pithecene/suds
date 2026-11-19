@@ -18,7 +18,7 @@ use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
-use crate::registry::{self, Standings};
+use crate::registry::{self, Reading};
 use crate::timestamp;
 
 /// The schema tag of every reclaim plan.
@@ -134,7 +134,7 @@ pub enum Kept {
 /// registry's standing of each checkout.
 pub struct Observed<'a> {
     pub liveness: &'a Result<Liveness, String>,
-    pub registry: &'a Standings,
+    pub registry: &'a Reading,
 }
 
 /// Plans the removal of the derived state that `scan` found. A failure to
@@ -156,10 +156,11 @@ pub fn plan_reclaim(
         tolerate_unreadable_processes: policy.tolerate_unreadable_processes,
     };
     let released = |checkout: &Checkout| {
-        observed
-            .registry
-            .get(&checkout.path)
-            .is_some_and(|standing| standing.event == registry::Event::Released)
+        observed.registry.as_ref().is_ok_and(|standings| {
+            standings
+                .get(&checkout.path)
+                .is_some_and(|standing| standing.event == registry::Event::Released)
+        })
     };
     let mut ordered: Vec<&Checkout> = scan.checkouts.iter().collect();
     ordered.sort_by_key(|checkout| !released(checkout));
@@ -255,7 +256,7 @@ fn judge_linked(
 /// through the same functions, so a removal holds to the plan's own rules.
 pub(crate) struct Judge<'a> {
     pub(crate) liveness: &'a Result<Liveness, String>,
-    pub(crate) registry: &'a Standings,
+    pub(crate) registry: &'a Reading,
     pub(crate) git: &'a Git,
     pub(crate) idle_since: String,
     pub(crate) tolerate_unreadable_processes: bool,
@@ -302,19 +303,29 @@ impl Judge<'_> {
     /// Keeps a candidate when a process works in its checkout, or when Suds
     /// cannot tell where each of this user's processes works.
     fn in_use(&self, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
-        match self.registry.get(checkout) {
-            Some(standing) if standing.event == registry::Event::Registered => {
+        let standings = match self.registry {
+            Ok(standings) => standings,
+            Err(reason) => {
                 evidence.push(format!(
-                    "the client {} registered the checkout at {} and has not released it",
-                    standing.client, standing.at
+                    "Suds could not read the registry, so a client may hold the checkout: {reason}"
                 ));
-                return Some(Kept::Registered);
+                return Some(Kept::Unverified);
             }
-            Some(standing) => evidence.push(format!(
+        };
+        if let Some((held, standing)) = registry::holder(standings, checkout) {
+            evidence.push(format!(
+                "the client {} registered {} at {} and has not released it",
+                standing.client,
+                held.display(),
+                standing.at
+            ));
+            return Some(Kept::Registered);
+        }
+        if let Some(standing) = standings.get(checkout) {
+            evidence.push(format!(
                 "the client {} released the checkout at {}",
                 standing.client, standing.at
-            )),
-            None => {}
+            ));
         }
         let liveness = match self.liveness {
             Ok(liveness) => liveness,

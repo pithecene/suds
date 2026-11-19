@@ -13,7 +13,7 @@ use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{
     Candidate, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
 };
-use suds_core::registry::{self, Standings};
+use suds_core::registry::{self, Reading, Standings};
 use tempfile::TempDir;
 
 /// The plan's idle time in these tests.
@@ -132,8 +132,8 @@ impl Fixture {
     }
 
     /// The registry's standings in this fixture's state directory.
-    fn standings(&self) -> Standings {
-        registry::standings(&registry::read(&self.registry()).unwrap())
+    fn standings(&self) -> Reading {
+        registry::reading(&self.registry())
     }
 
     fn registry(&self) -> PathBuf {
@@ -451,7 +451,7 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
         &scan,
         &Observed {
             liveness: &hidden,
-            registry: &Standings::new(),
+            registry: &Ok(Standings::new()),
         },
         &Git::default(),
         tolerant,
@@ -534,7 +534,7 @@ fn names_each_directory_once_when_roots_overlap() {
         &scan,
         &Observed {
             liveness: &nobody(),
-            registry: &Standings::new(),
+            registry: &Ok(Standings::new()),
         },
         &Git::default(),
         policy,
@@ -583,4 +583,39 @@ fn a_registration_during_the_run_keeps_the_checkout() {
     assert!(fixture.linked.exists());
     assert!(!fixture.repo.join("target").exists());
     assert_eq!(report.status, RunStatus::Partial);
+}
+
+#[test]
+fn keeps_everything_while_the_registry_cannot_be_read() {
+    let fixture = Fixture::new();
+    fs::write(fixture.registry(), b"damaged\n").unwrap();
+    let plan = fixture.plan(&nobody(), true);
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| candidate.kept == Some(Kept::Unverified))
+    );
+
+    // A registry that breaks after planning stops each removal as well.
+    fs::remove_file(fixture.registry()).unwrap();
+    let plan = fixture.plan(&nobody(), false);
+    fs::write(fixture.registry(), b"damaged\n").unwrap();
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Refused);
+    assert!(fixture.repo.join("target").exists());
+}
+
+#[test]
+fn a_registration_keeps_each_checkout_beneath_its_own() {
+    let fixture = Fixture::new();
+    // The linked checkout lies beneath the main checkout that a client
+    // registered.
+    fixture.record(&fixture.repo, registry::Event::Registered);
+    let plan = fixture.plan(&nobody(), true);
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| candidate.kept == Some(Kept::Registered))
+    );
+    assert_eq!(plan.candidates.len(), 3);
 }

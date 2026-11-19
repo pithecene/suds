@@ -53,6 +53,26 @@ pub struct Standing {
 /// The latest standing of each checkout that the registry names.
 pub type Standings = HashMap<PathBuf, Standing>;
 
+/// The standings, or the reason that Suds could not read the registry. A
+/// registry that Suds cannot read protects nothing, so a removal treats the
+/// failure as a fact that it could not verify.
+pub type Reading = Result<Standings, String>;
+
+/// Reads the registry at `path` and returns each checkout's standing.
+pub fn reading(path: &Path) -> Reading {
+    read(path).map(|records| standings(&records))
+}
+
+/// The registration that holds `checkout`: its own, or that of a checkout
+/// above it, because a registration covers everything beneath its checkout.
+pub fn holder<'a>(standings: &'a Standings, checkout: &Path) -> Option<(&'a Path, &'a Standing)> {
+    standings
+        .iter()
+        .filter(|(_, standing)| standing.event == Event::Registered)
+        .map(|(path, standing)| (path.as_path(), standing))
+        .find(|(path, _)| checkout.starts_with(path))
+}
+
 /// Appends one record to the registry at `path`, and creates the file and
 /// its directory when they do not exist. The file opens without following a
 /// symbolic link, and one write holds the whole line.
@@ -83,12 +103,26 @@ pub fn append(
     let mut line = serde_json::to_vec(&record).map_err(|err| failed(err.into()))?;
     line.push(b'\n');
     let mut file = OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
         .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
         .open(path)
         .map_err(failed)?;
+    // Two clients can register at once, so each append holds the file's
+    // lock from its check of the tail to its write.
+    file.lock().map_err(failed)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(failed)?;
+    let committed = committed_length(&bytes);
+    if committed < bytes.len() {
+        // An interrupted append left a part of a line. The next record
+        // must start a line of its own, or the two would form one line
+        // that no reader accepts.
+        let length = u64::try_from(committed).unwrap_or(u64::MAX);
+        file.set_len(length).map_err(failed)?;
+    }
     file.write_all(&line)
         .and_then(|()| file.sync_data())
         .map_err(failed)?;
@@ -111,10 +145,7 @@ pub fn read(path: &Path) -> Result<Vec<Record>, String> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(format!("could not read {}: {err}", path.display())),
     };
-    let committed = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |last| last + 1);
+    let committed = committed_length(&bytes);
     bytes[..committed]
         .split_inclusive(|byte| *byte == b'\n')
         .enumerate()
@@ -131,6 +162,14 @@ pub fn read(path: &Path) -> Result<Vec<Record>, String> {
                 })
         })
         .collect()
+}
+
+/// The length of the complete lines at the start of `bytes`.
+fn committed_length(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |last| last + 1)
 }
 
 /// The latest standing of each checkout, from records in their order.
@@ -156,7 +195,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Event, append, read, standings};
+    use super::{Event, append, holder, read, reading, standings};
 
     #[test]
     fn the_latest_record_of_a_checkout_decides_its_standing() {
@@ -195,6 +234,21 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         assert_eq!(read(&path).unwrap().len(), 1);
 
+        // The next append removes the cut line, so every record stays
+        // readable.
+        append(
+            &path,
+            Path::new("/work/b"),
+            "bosun",
+            None,
+            Event::Registered,
+            20,
+        )
+        .unwrap();
+        let records = read(&path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].checkout.as_path(), Path::new("/work/b"));
+
         fs::write(&path, b"{\"schema\":\"other\"}\n").unwrap();
         assert!(read(&path).is_err());
 
@@ -202,5 +256,40 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read(&link).is_err());
         assert!(append(&link, Path::new("/work/a"), "x", None, Event::Released, 1).is_err());
+    }
+
+    #[test]
+    fn a_registration_holds_every_checkout_beneath_its_own() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("registry.jsonl");
+        append(
+            &path,
+            Path::new("/work/repo"),
+            "bosun",
+            None,
+            Event::Registered,
+            10,
+        )
+        .unwrap();
+        append(
+            &path,
+            Path::new("/work/old"),
+            "bosun",
+            None,
+            Event::Released,
+            20,
+        )
+        .unwrap();
+        let standings = reading(&path).unwrap();
+        let nested = Path::new("/work/repo/.worktrees/feature");
+        assert_eq!(
+            holder(&standings, nested).unwrap().0,
+            Path::new("/work/repo")
+        );
+        assert!(holder(&standings, Path::new("/work/repository")).is_none());
+        assert!(holder(&standings, Path::new("/work/old/x")).is_none());
+
+        fs::write(&path, b"damaged\n").unwrap();
+        assert!(reading(&path).is_err());
     }
 }

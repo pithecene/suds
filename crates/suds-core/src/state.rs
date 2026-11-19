@@ -117,14 +117,12 @@ pub fn load_settings(path: &Path) -> Result<Settings, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
 
-    use super::{Directories, Settings, load_settings};
-    use crate::development::Environment;
+    use super::{Settings, load_settings};
 
     #[test]
     fn a_missing_file_yields_the_defaults_and_a_damaged_file_fails() {
@@ -148,6 +146,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn follows_the_xdg_variables_on_linux() {
+        use std::collections::HashMap;
+
+        use super::Directories;
+        use crate::development::Environment;
+
         let mut environment = Environment {
             home: Some(PathBuf::from("/home/a")),
             variables: HashMap::new(),

@@ -20,7 +20,7 @@ use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
-use crate::registry::Standings;
+use crate::registry::Reading;
 
 /// The schema tag of a reclaim run's result.
 pub const RECLAIM_RUN_SCHEMA: &str = "suds.reclaim-run/v1";
@@ -71,7 +71,7 @@ pub struct Conditions<'a> {
     /// The registry's standing of each checkout, read anew before each
     /// removal, so a client that registers during the run keeps its
     /// checkout.
-    pub registry: &'a mut dyn FnMut() -> Standings,
+    pub registry: &'a mut dyn FnMut() -> Reading,
     pub git: &'a Git,
     pub now: i64,
 }

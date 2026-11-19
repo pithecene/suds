@@ -67,6 +67,9 @@ pub struct Pressure {
     pub enforced: bool,
     /// The free bytes of the filesystem that holds the first root.
     pub filesystem_available_bytes: Option<u64>,
+    /// Whether the inspection read every entry. Without that, the usage is
+    /// a lower bound, and the level never falls on such a reading.
+    pub complete: bool,
 }
 
 /// The default ceiling for a disk of `capacity` bytes: the greater of half
@@ -116,6 +119,9 @@ pub struct Measurement {
     pub ceiling_bytes: u64,
     pub enforced: bool,
     pub filesystem_available_bytes: Option<u64>,
+    /// Whether the inspection read every entry. A partial inspection
+    /// measures a lower bound, which proves no fall of the usage.
+    pub complete: bool,
     /// The time of the measurement, in seconds since the Unix epoch.
     pub now: i64,
 }
@@ -138,6 +144,12 @@ pub fn next(
     };
     let now = timestamp::format_utc(measurement.now);
     let held = previous.map_or(Level::Normal, |previous| previous.level);
+    // A lower bound can raise the level and never lower it.
+    let measured = if measurement.complete {
+        measured
+    } else {
+        measured.max(held)
+    };
     let (level, lower_since) = if measured >= held {
         (measured, None)
     } else {
@@ -165,6 +177,7 @@ pub fn next(
         ceiling_bytes: measurement.ceiling_bytes,
         enforced: measurement.enforced,
         filesystem_available_bytes: measurement.filesystem_available_bytes,
+        complete: measurement.complete,
     }
 }
 
@@ -178,6 +191,7 @@ mod tests {
             ceiling_bytes: 100 * GIB,
             enforced: false,
             filesystem_available_bytes: None,
+            complete: true,
             now,
         }
     }
@@ -229,5 +243,24 @@ mod tests {
             next(Some(&waiting), measure(70, 660), thresholds).level,
             Level::Normal
         );
+    }
+
+    #[test]
+    fn a_partial_measurement_never_lowers_the_level() {
+        let thresholds = Thresholds::default();
+        let hard = next(None, measure(96, 0), thresholds);
+        let partial = Measurement {
+            complete: false,
+            ..measure(10, 1000)
+        };
+        let reading = next(Some(&hard), partial, thresholds);
+        assert_eq!(reading.level, Level::Hard);
+        assert!(!reading.complete);
+        // A partial measurement still raises the level.
+        let raised = Measurement {
+            complete: false,
+            ..measure(96, 10)
+        };
+        assert_eq!(next(None, raised, thresholds).level, Level::Hard);
     }
 }

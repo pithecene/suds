@@ -10,7 +10,7 @@ use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
-use suds_core::registry::{self, Standings};
+use suds_core::registry::{self, Reading, Standings};
 use suds_core::state::Directories;
 
 use crate::cli::ReclaimArgs;
@@ -62,14 +62,14 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     ran(written, refused)
 }
 
-/// The registry's standing of each checkout. A registry that Suds cannot
-/// read keeps nothing by itself, and the other rules still judge each
-/// removal.
-fn standings() -> Standings {
-    Directories::of(&Environment::of_process())
-        .and_then(|directories| registry::read(&directories.registry()).ok())
-        .map(|records| registry::standings(&records))
-        .unwrap_or_default()
+/// The registry's standing of each checkout. A process without a home
+/// directory has no registry, and a registry that Suds cannot read is an
+/// error, which keeps every candidate.
+fn standings() -> Reading {
+    match Directories::of(&Environment::of_process()) {
+        Some(directories) => registry::reading(&directories.registry()),
+        None => Ok(Standings::new()),
+    }
 }
 
 fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {

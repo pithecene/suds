@@ -10,7 +10,8 @@ use suds_core::organize::journal::{Journal, JournalState, RunKind, RunStatus, re
 use suds_core::reclaim::execute::Authority;
 use suds_core::stores::{
     Budgets, DOCKER_ANONYMOUS_VOLUMES, DOCKER_BUILD_CACHE, DOCKER_IMAGES, DOCKER_NAMED_VOLUMES,
-    Decision, EngineUsage, Inputs, Programs, StoresPlan, apply, plan_stores,
+    Decision, EngineUsage, Inputs, Programs, StoresPlan, apply, builder_budget_option,
+    measure_after, plan_stores,
 };
 use tempfile::TempDir;
 
@@ -29,8 +30,10 @@ impl Stubs {
         let dir = TempDir::new().unwrap();
         for name in ["go", "pnpm", "ccache", "mise", "docker"] {
             let status = if name == "pnpm" { 1 } else { 0 };
+            // Each line holds the stub's arguments, the variables that bind
+            // it to a fixture store, and its working directory.
             let script = format!(
-                "#!/bin/sh\necho \"{name} $*\" >> \"{}\"\necho refused >&2\nexit {status}\n",
+                "#!/bin/sh\nvars=$(env | grep -E '^(GOCACHE|GOMODCACHE|MISE_DATA_DIR)=/stores' | sort | tr '\\n' ' ')\necho \"{name} $* | $vars| $(pwd)\" >> \"{}\"\necho refused >&2\nexit {status}\n",
                 dir.path().join("log").display()
             );
             let path = dir.path().join(name);
@@ -123,6 +126,7 @@ fn plan(scan: &DevelopmentScan, programs: &Programs, now: i64) -> StoresPlan {
             budgets: &budgets,
             programs,
             engine: &engine,
+            builder_budget_option: "--keep-storage",
             idle_seconds: 3600,
             now,
         },
@@ -208,19 +212,20 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
     .unwrap();
     drop(journal);
 
-    let ccache_budget = (5 * GIB).to_string();
-    let cache_budget = (10 * GIB).to_string();
+    // Each command names the store that the plan measured, through an
+    // argument or a variable, and runs in the root directory.
+    let cache_budget = 10 * GIB;
     assert_eq!(
         stubs.log(),
         [
-            "go clean -cache".to_owned(),
-            "go clean -modcache".to_owned(),
-            "pnpm store prune".to_owned(),
-            format!("ccache --trim-dir /stores/ccache.cache --trim-max-size {ccache_budget}"),
-            "mise prune --yes".to_owned(),
-            "docker image prune --all --force".to_owned(),
-            format!("docker builder prune --force --max-used-space {cache_budget}"),
-            "docker volume prune --force".to_owned(),
+            "go clean -cache | GOCACHE=/stores/go.build-cache | /".to_owned(),
+            "go clean -modcache | GOMODCACHE=/stores/go.module-cache | /".to_owned(),
+            "pnpm store prune --store-dir /stores/pnpm.store | | /".to_owned(),
+            "ccache --trim-dir /stores/ccache.cache --trim-max-size 5242880Ki | | /".to_owned(),
+            "mise prune --yes | MISE_DATA_DIR=/stores | /".to_owned(),
+            "docker image prune --all --force | | /".to_owned(),
+            format!("docker builder prune --force --keep-storage {cache_budget} | | /"),
+            "docker volume prune --force | | /".to_owned(),
         ]
     );
 
@@ -241,7 +246,10 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
     assert_eq!(summaries[0].trims.len(), 8);
     assert_eq!(summaries[0].trims[0].command, {
         let go: &Path = &stubs.programs().go;
-        format!("{} clean -cache", go.display())
+        format!(
+            "GOCACHE=/stores/go.build-cache {} clean -cache",
+            go.display()
+        )
     });
     assert!(
         summaries[0].trims[2]
@@ -263,10 +271,106 @@ fn audits_the_engine_when_it_does_not_answer() {
             budgets: &budgets,
             programs: &stubs.programs(),
             engine: &engine,
+            builder_budget_option: "--keep-storage",
             idle_seconds: 3600,
             now: NOW,
         },
     );
     assert_eq!(plan.entries.len(), 1);
     assert!(matches!(plan.entries[0].decision, Decision::Audit { .. }));
+}
+
+#[test]
+fn reads_the_build_cache_option_from_the_engine_help() {
+    let dir = TempDir::new().unwrap();
+    let stub = |name: &str, help: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, format!("#!/bin/sh\necho '{help}'\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let buildx = stub("buildx", "      --max-used-space bytes   Maximum amount");
+    let classic = stub(
+        "classic",
+        "      --keep-storage bytes   Amount of disk space",
+    );
+    assert_eq!(builder_budget_option(&buildx), "--max-used-space");
+    assert_eq!(builder_budget_option(&classic), "--keep-storage");
+    assert_eq!(
+        builder_budget_option(&dir.path().join("missing")),
+        "--keep-storage"
+    );
+}
+
+#[test]
+fn a_measurement_that_cannot_read_the_store_states_no_size() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let cache = root.join("cache");
+    fs::create_dir_all(cache.join("hidden")).unwrap();
+    fs::write(cache.join("entry"), b"data").unwrap();
+    let mut scanned = scan(vec![store(
+        "go.build-cache",
+        Ecosystem::Go,
+        82,
+        StoreStatus::Present,
+    )]);
+    scanned.stores[0].path.clone_from(&cache);
+    let stubs = Stubs::new();
+    let plan = plan(&scanned, &stubs.programs(), NOW);
+    let entry = &plan.entries[0];
+    assert!(measure_after(entry, &stubs.programs().docker).unwrap() > 0);
+
+    // The superuser reads every directory, so the rest holds only for an
+    // ordinary user.
+    if fs::symlink_metadata(&cache).unwrap().uid() == 0 {
+        return;
+    }
+    fs::set_permissions(cache.join("hidden"), fs::Permissions::from_mode(0o000)).unwrap();
+    let measured = measure_after(entry, &stubs.programs().docker);
+    fs::set_permissions(cache.join("hidden"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(measured.unwrap_err().contains("could not measure"));
+}
+
+/// macOS rejects a file name that is not valid UTF-8, so this test runs on
+/// Linux alone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_command_receives_the_bytes_of_a_path_that_is_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let store_path = root.join(OsStr::from_bytes(b"caf\xe9"));
+    fs::create_dir(&store_path).unwrap();
+    let log = root.join("received");
+    let ccache = root.join("ccache");
+    fs::write(
+        &ccache,
+        format!(
+            "#!/bin/sh\ntest -d \"$2\" && echo found > \"{}\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ccache, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut scanned = scan(vec![store(
+        "ccache.cache",
+        Ecosystem::Ccache,
+        6,
+        StoreStatus::Present,
+    )]);
+    scanned.stores[0].path.clone_from(&store_path);
+    let programs = Programs {
+        ccache,
+        ..Stubs::new().programs()
+    };
+    let plan = plan(&scanned, &programs, NOW);
+    assert_eq!(plan.entries[0].path.as_ref().unwrap().as_path(), store_path);
+    let mut journal = Journal::open(&root.join("journal")).unwrap();
+    apply(&mut journal, &plan, Authority::Person, &mut |_| Ok(0)).unwrap();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "found\n");
 }

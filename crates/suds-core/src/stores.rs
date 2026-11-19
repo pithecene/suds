@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::development::{self, DevelopmentScan, StoreStatus};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
+use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::execute::Authority;
 use crate::timestamp;
@@ -94,34 +95,83 @@ impl Default for Programs {
     }
 }
 
-/// One program's trim of its own store, as the list of its arguments.
+/// One word of a program's command: plain text, or a native path, whose
+/// bytes the command receives unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Argument {
+    Word(String),
+    Path(NativePath),
+}
+
+fn word(text: &str) -> Argument {
+    Argument::Word(text.to_owned())
+}
+
+fn native(path: &Path) -> Argument {
+    Argument::Path(NativePath::new(path.to_path_buf()))
+}
+
+/// One program's trim of its own store. The command names the store that
+/// Suds inspected, through an argument or a variable, and it runs in the
+/// root directory, so no project's configuration redirects it to another
+/// store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trim {
     pub program: PathBuf,
-    pub arguments: Vec<String>,
+    pub arguments: Vec<Argument>,
+    /// Each variable that binds the command to the inspected store.
+    pub environment: Vec<(String, NativePath)>,
     /// What the program's command removes.
     pub removes: String,
 }
 
 impl Trim {
-    fn new(program: &Path, arguments: &[&str], removes: &str) -> Self {
+    fn new(program: &Path, arguments: Vec<Argument>, removes: &str) -> Self {
         Trim {
             program: program.to_path_buf(),
-            arguments: arguments.iter().map(|&word| word.to_owned()).collect(),
+            arguments,
+            environment: Vec::new(),
             removes: removes.to_owned(),
         }
     }
 
+    fn with(mut self, variable: &str, path: &Path) -> Self {
+        self.environment
+            .push((variable.to_owned(), NativePath::new(path.to_path_buf())));
+        self
+    }
+
     /// The command as a person would type it, for display alone.
     pub fn display(&self) -> String {
-        let mut words = vec![self.program.display().to_string()];
-        words.extend(self.arguments.iter().cloned());
-        words.join(" ")
+        let variables = self
+            .environment
+            .iter()
+            .map(|(name, path)| format!("{name}={}", path.display()));
+        let arguments = self.arguments.iter().map(|argument| match argument {
+            Argument::Word(text) => text.clone(),
+            Argument::Path(path) => path.display(),
+        });
+        variables
+            .chain([self.program.display().to_string()])
+            .chain(arguments)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn run(&self) -> Result<(), String> {
-        let output = Command::new(&self.program)
-            .args(&self.arguments)
+        let mut command = Command::new(&self.program);
+        for argument in &self.arguments {
+            match argument {
+                Argument::Word(text) => command.arg(text),
+                Argument::Path(path) => command.arg(path.as_path()),
+            };
+        }
+        for (name, path) in &self.environment {
+            command.env(name, path.as_path());
+        }
+        let output = command
+            .current_dir("/")
             .output()
             .map_err(|err| format!("could not run {}: {err}", self.program.display()))?;
         if output.status.success() {
@@ -136,53 +186,85 @@ impl Trim {
     }
 }
 
+/// The option of `docker builder prune` that bounds the build cache. The
+/// engine's own builder names it `--keep-storage`, and the buildx builder
+/// names it `--max-used-space`, so the adapter reads the command's help.
+pub fn builder_budget_option(docker: &Path) -> &'static str {
+    let help = Command::new(docker)
+        .args(["builder", "prune", "--help"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    if help.contains("--max-used-space") {
+        "--max-used-space"
+    } else {
+        "--keep-storage"
+    }
+}
+
 /// The trim that a store's own program offers, or none.
-fn trim_of(id: &str, path: Option<&Path>, budget: u64, programs: &Programs) -> Option<Trim> {
-    let budget = budget.to_string();
+fn trim_of(id: &str, path: Option<&Path>, budget: u64, inputs: &Inputs<'_>) -> Option<Trim> {
+    let programs = inputs.programs;
     let trim = match id {
         "go.build-cache" => Trim::new(
             &programs.go,
-            &["clean", "-cache"],
+            vec![word("clean"), word("-cache")],
             "every cached build output, which the next build regenerates",
-        ),
+        )
+        .with("GOCACHE", path?),
         "go.module-cache" => Trim::new(
             &programs.go,
-            &["clean", "-modcache"],
+            vec![word("clean"), word("-modcache")],
             "every downloaded module, which the next build downloads again",
-        ),
+        )
+        .with("GOMODCACHE", path?),
         "pnpm.store" => Trim::new(
             &programs.pnpm,
-            &["store", "prune"],
+            vec![
+                word("store"),
+                word("prune"),
+                word("--store-dir"),
+                native(path?),
+            ],
             "each package that no project references",
         ),
+        // The program reads a size without a unit in gibibytes, so the
+        // adapter states the budget in kibibytes.
         "ccache.cache" => Trim::new(
             &programs.ccache,
-            &[
-                "--trim-dir",
-                &path?.to_string_lossy(),
-                "--trim-max-size",
-                &budget,
+            vec![
+                word("--trim-dir"),
+                native(path?),
+                word("--trim-max-size"),
+                word(&format!("{}Ki", budget / 1024)),
             ],
             "the least recently used results beyond the budget",
         ),
         "mise.installs" => Trim::new(
             &programs.mise,
-            &["prune", "--yes"],
+            vec![word("prune"), word("--yes")],
             "each tool version that no tracked configuration names",
-        ),
+        )
+        .with("MISE_DATA_DIR", path?.parent()?),
         DOCKER_BUILD_CACHE => Trim::new(
             &programs.docker,
-            &["builder", "prune", "--force", "--max-used-space", &budget],
+            vec![
+                word("builder"),
+                word("prune"),
+                word("--force"),
+                word(inputs.builder_budget_option),
+                word(&budget.to_string()),
+            ],
             "the build cache beyond the budget",
         ),
         DOCKER_IMAGES => Trim::new(
             &programs.docker,
-            &["image", "prune", "--all", "--force"],
+            vec![word("image"), word("prune"), word("--all"), word("--force")],
             "each image that no container uses",
         ),
         DOCKER_ANONYMOUS_VOLUMES => Trim::new(
             &programs.docker,
-            &["volume", "prune", "--force"],
+            vec![word("volume"), word("prune"), word("--force")],
             "each anonymous volume that no container uses",
         ),
         _ => return None,
@@ -213,7 +295,7 @@ pub enum Decision {
 pub struct Entry {
     pub id: String,
     /// The store's directory, or none for a store of the container engine.
-    pub path: Option<String>,
+    pub path: Option<NativePath>,
     pub measured_bytes: u64,
     pub budget_bytes: Option<u64>,
     #[serde(flatten)]
@@ -337,6 +419,9 @@ pub struct Inputs<'a> {
     pub programs: &'a Programs,
     /// The engine's usage, or the reason that Suds could not read it.
     pub engine: &'a Result<EngineUsage, String>,
+    /// The option that bounds the engine's build cache
+    /// (`builder_budget_option`).
+    pub builder_budget_option: &'a str,
     /// The time for which a store must have stood unchanged before its
     /// program trims it, in seconds. A build in progress writes its store.
     pub idle_seconds: u64,
@@ -372,7 +457,7 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
                     .filter(|newest| *newest > idle_since.as_str());
                 match (
                     recent,
-                    trim_of(&store.id, Some(&store.path), budget, inputs.programs),
+                    trim_of(&store.id, Some(&store.path), budget, inputs),
                 ) {
                     (Some(newest), _) => Decision::Keep {
                         reason: format!(
@@ -388,7 +473,7 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
         };
         entries.push(Entry {
             id: store.id.clone(),
-            path: Some(store.path.to_string_lossy().into_owned()),
+            path: Some(NativePath::new(store.path.clone())),
             measured_bytes: measured,
             budget_bytes: budget,
             decision,
@@ -427,7 +512,7 @@ fn engine_entries(usage: &EngineUsage, inputs: &Inputs<'_>) -> Vec<Entry> {
                 reason: "the store has no budget".to_owned(),
             },
             Some(budget) if measured <= budget => Decision::Within,
-            Some(budget) => match trim_of(id, None, budget, inputs.programs) {
+            Some(budget) => match trim_of(id, None, budget, inputs) {
                 Some(trim) => Decision::Trim { trim },
                 None => Decision::Audit {
                     reason: "the store's program offers no trim".to_owned(),
@@ -560,7 +645,17 @@ pub fn apply(
 /// engine's own figure for one of its stores.
 pub fn measure_after(entry: &Entry, docker: &Path) -> Result<u64, String> {
     if let Some(path) = &entry.path {
-        let (measure, _) = development::survey_tree(Path::new(path));
+        let (measure, survey) = development::survey_tree(path.as_path());
+        // A measurement that could not read an entry states no size, so the
+        // run records a failure and claims no freed space.
+        if !survey.is_clear() {
+            return Err(format!(
+                "Suds could not measure {} after the trim: {} entries were unreadable and {} mount points lie beneath it",
+                path.display(),
+                survey.error_count,
+                survey.skipped_mount_count
+            ));
+        }
         return Ok(measure.allocated_bytes);
     }
     let usage = engine_usage(docker)?;

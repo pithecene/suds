@@ -13,7 +13,8 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
@@ -321,8 +322,8 @@ pub struct Journal {
 
 impl Journal {
     /// Opens the journal in `dir`, creating the directory and the journal
-    /// when they do not exist. The call fails at once, rather than waiting,
-    /// when another process holds the lock.
+    /// when they do not exist. The call fails after a short wait when
+    /// another process holds the lock.
     pub fn open(dir: &Path) -> Result<Journal, JournalError> {
         fs::DirBuilder::new()
             .recursive(true)
@@ -330,11 +331,7 @@ impl Journal {
             .create(dir)
             .map_err(|source| io_error(dir, source))?;
         let lock = open_lock(dir)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
-            Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
-        }
+        acquire(dir, || lock.try_lock())?;
         let directory = fs::canonicalize(dir).map_err(|source| io_error(dir, source))?;
         let path = dir.join(JOURNAL_FILE);
         let mut options = OpenOptions::new();
@@ -415,12 +412,34 @@ pub fn read(dir: &Path) -> Result<Vec<Record>, JournalError> {
         Err(err) => return Err(err),
     };
     let lock = open_lock(dir)?;
-    match lock.try_lock_shared() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
-        Err(TryLockError::Error(source)) => return Err(io_error(&dir.join(LOCK_FILE), source)),
-    }
+    acquire(dir, || lock.try_lock_shared())?;
     read_records(&mut file, &path).map(|(records, _)| records)
+}
+
+/// The time for which a caller waits for the journal's lock.
+const LOCK_PATIENCE: Duration = Duration::from_millis(250);
+
+/// Takes the journal's lock, and reports a busy journal only after a short
+/// wait. A process that this one starts holds a copy of the lock from its
+/// start until it runs its own program, so a lock can read as held for an
+/// instant after its holder released it.
+fn acquire(
+    dir: &Path,
+    mut attempt: impl FnMut() -> Result<(), TryLockError>,
+) -> Result<(), JournalError> {
+    let started = Instant::now();
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_PATIENCE => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(TryLockError::WouldBlock) => return Err(JournalError::Busy),
+            Err(TryLockError::Error(source)) => {
+                return Err(io_error(&dir.join(LOCK_FILE), source));
+            }
+        }
+    }
 }
 
 fn open_lock(dir: &Path) -> Result<File, JournalError> {

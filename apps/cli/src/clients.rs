@@ -102,11 +102,12 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
         now: now_seconds(),
     };
     let report = maintain::maintain(&settings, &context)?;
-    let partial = report
-        .reclaim
-        .iter()
-        .flat_map(|reclaim| &reclaim.removals)
-        .any(|removal| !removal.removed)
+    let partial = report.error_count > 0
+        || report
+            .reclaim
+            .iter()
+            .flat_map(|reclaim| &reclaim.removals)
+            .any(|removal| !removal.removed)
         || report
             .stores
             .iter()
@@ -170,8 +171,27 @@ fn systemd_units(program: &Path, minutes: u64) -> String {
          \n\
          [Install]\n\
          WantedBy=timers.target\n",
-        program = program.display()
+        program = systemd_quote(&program.to_string_lossy())
     )
+}
+
+/// Quotes a path as one word of a systemd command line. The manager splits
+/// an unquoted line at each space, and it expands `%` and `$`.
+fn systemd_quote(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(character);
+            }
+            '%' => quoted.push_str("%%"),
+            '$' => quoted.push_str("$$"),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn launchd_agent(program: &Path, minutes: u64) -> String {
@@ -215,7 +235,9 @@ mod tests {
     fn the_units_run_the_maintenance_of_this_program() {
         let program = Path::new("/opt/suds & co/suds");
         let units = systemd_units(program, 30);
-        assert!(units.contains("ExecStart=/opt/suds & co/suds maintain\n"));
+        assert!(units.contains("ExecStart=\"/opt/suds & co/suds\" maintain\n"));
+        let odd = systemd_units(Path::new("/opt/100% \"q\"/$x/suds"), 30);
+        assert!(odd.contains("ExecStart=\"/opt/100%% \\\"q\\\"/$$x/suds\" maintain\n"));
         assert!(units.contains("OnUnitActiveSec=30min\n"));
         let agent = launchd_agent(program, 30);
         assert!(agent.contains("<string>/opt/suds &amp; co/suds</string>"));

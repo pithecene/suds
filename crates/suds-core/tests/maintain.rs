@@ -124,6 +124,36 @@ fn only_measures_without_the_standing_approval() {
     assert_eq!(reading.ceiling_bytes, 100 * GIB);
     assert!(reading.usage_bytes > 0);
     assert!(!reading.enforced);
+    assert!(reading.complete);
+    assert_eq!(report.error_count, 0);
+    // The run leaves no staged file beside the reading.
+    let state: Vec<_> = fs::read_dir(&fixture.directories.state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(state, ["pressure.json"]);
+}
+
+#[test]
+fn reports_what_it_could_not_read_and_marks_the_reading_partial() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = Fixture::new();
+    let hidden = fixture.repo.join("private");
+    fs::create_dir(&hidden).unwrap();
+    // The superuser reads every directory, so the test holds only for an
+    // ordinary user.
+    if fs::symlink_metadata(&hidden).unwrap().uid() == 0 {
+        return;
+    }
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+    let git = Git::default();
+    let report = maintain(&fixture.settings(false), &fixture.context(&git));
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
+    let report = report.unwrap();
+    assert_eq!(report.error_count, 1);
+    assert_eq!(report.errors[0].path, hidden.to_string_lossy());
+    assert!(!report.pressure.complete);
 }
 
 #[test]

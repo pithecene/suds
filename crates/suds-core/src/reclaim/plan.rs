@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +185,7 @@ pub fn plan_reclaim(
                 build.ecosystem,
                 &build.measure,
                 &build.survey,
+                &build.repositories,
             );
             candidates.extend(candidate(
                 &build.path,
@@ -274,12 +275,14 @@ impl Judge<'_> {
         ecosystem: Ecosystem,
         measure: &Measure,
         survey: &Survey,
+        repositories: &[PathBuf],
     ) -> (Option<Kept>, Vec<String>) {
         let mut evidence = vec![format!(
             "the layout of {} proves that a build regenerates the directory",
             ecosystem.label()
         )];
         let kept = surveyed(survey, &mut evidence)
+            .or_else(|| self.fetched(repositories, &mut evidence))
             .or_else(|| self.in_use(checkout, &mut evidence))
             .or_else(|| self.recent(measure.newest_modified.as_deref(), &mut evidence))
             .or_else(|| self.tracked(checkout, path, &mut evidence));
@@ -378,6 +381,35 @@ impl Judge<'_> {
         }
     }
 
+    /// Keeps build state that holds a repository with work of its own. A
+    /// build fetches some dependencies as repositories, and such a
+    /// repository holds only what a remote holds.
+    fn fetched(&self, repositories: &[PathBuf], evidence: &mut Vec<String>) -> Option<Kept> {
+        for repository in repositories {
+            match self.git.holds_only_fetched(repository) {
+                Ok(true) => {}
+                Ok(false) => {
+                    evidence.push(format!(
+                        "the repository {} beneath it holds a change or a commit that no remote holds",
+                        repository.display()
+                    ));
+                    return Some(Kept::HoldsCheckout);
+                }
+                Err(reason) => {
+                    evidence.push(reason);
+                    return Some(Kept::Unverified);
+                }
+            }
+        }
+        if !repositories.is_empty() {
+            evidence.push(format!(
+                "each of the {} repositories beneath it holds only what a remote holds",
+                repositories.len()
+            ));
+        }
+        None
+    }
+
     /// Keeps build state in which Git tracks a file or would track one. Such
     /// a file is no derived state, whatever directory holds it.
     fn tracked(&self, checkout: &Path, path: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
@@ -404,13 +436,6 @@ impl Judge<'_> {
 /// Keeps a directory that holds more than derived state, or whose
 /// measurement could not read an entry.
 fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
-    if survey.checkouts_beneath > 0 {
-        evidence.push(format!(
-            "{} directories beneath it hold a Git repository",
-            survey.checkouts_beneath
-        ));
-        return Some(Kept::HoldsCheckout);
-    }
     if survey.skipped_mount_count > 0 {
         evidence.push(format!(
             "{} mount points lie beneath it, and Suds measured nothing behind them",

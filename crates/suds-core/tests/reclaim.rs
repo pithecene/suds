@@ -640,3 +640,50 @@ fn reads_a_plan_that_an_earlier_release_recorded() {
     assert!(!earlier.tolerate_unreadable_processes);
     assert_eq!(earlier.candidates, plan.candidates);
 }
+
+#[test]
+fn removes_build_state_that_holds_a_repository_that_a_build_fetched() {
+    let fixture = Fixture::new();
+    // A build clones a dependency into its own directory, in CMake's way.
+    let remote = fixture.workspace.parent().unwrap().join("remote.git");
+    let fetched = fixture.repo.join("target/_deps/dependency-src");
+    fs::create_dir_all(fetched.parent().unwrap()).unwrap();
+    git(
+        fetched.parent().unwrap(),
+        &[
+            "clone",
+            "--quiet",
+            remote.to_str().unwrap(),
+            "dependency-src",
+        ],
+    );
+
+    let scan = inspect(
+        std::slice::from_ref(&fixture.workspace),
+        &Environment::default(),
+    );
+    // The inspection lists the repository as no checkout of its own.
+    assert!(
+        scan.checkouts
+            .iter()
+            .all(|checkout| checkout.path != fetched)
+    );
+    let plan = fixture.plan(&nobody(), false);
+    let target = find(&plan, &fixture.repo.join("target"));
+    assert_eq!(target.decision, Decision::Remove);
+    assert!(
+        target
+            .evidence
+            .iter()
+            .any(|fact| fact.contains("holds only what a remote holds"))
+    );
+
+    // A commit that no remote holds keeps the whole directory.
+    write(&fetched.join("patch.txt"), "local");
+    git(&fetched, &["add", "."]);
+    git(&fetched, &["commit", "-m", "local patch"]);
+    let report = fixture.apply(&plan);
+    assert!(fetched.join("patch.txt").exists());
+    assert!(!fixture.linked.join("target").exists());
+    assert_eq!(report.status, RunStatus::Partial);
+}

@@ -32,8 +32,10 @@ own program trims it, and Suds removes no entry of a store itself.
 
 Beyond those two commands, the release deletes, quarantines, copies,
 rewrites, installs, and repairs nothing. It calls Git, on macOS `lsof`, and
-each store's own program through typed adapters, and no other program. Its only state between runs is the
-operation journal that [Moves](#moves) describes. [AGENTS.md](AGENTS.md) states the rules that
+each store's own program through typed adapters, and no other program. Between runs it keeps the
+operation journal that [Moves](#moves) describes, and the registry and the
+pressure reading that [Clients and Schedule](#clients-and-schedule)
+describes. [AGENTS.md](AGENTS.md) states the rules that
 bind any operation that changes a file: an inspectable plan, stated
 preconditions, and a journal entry. In Suds, optimization means a measured
 reduction in storage use, structural friction, or operational residue.
@@ -302,6 +304,74 @@ A store whose newest entry changed within the idle time stays, because a
 build may write it. The journal records each trim with the store's size
 before and after it, and `suds journal` lists the run.
 
+## Clients and Schedule
+
+A client is a program that works in checkouts, such as Bosun or an agent
+that a person drives. Each client uses the same commands.
+
+```sh
+suds register --checkout DIR --client bosun --attempt wf-12
+suds release --checkout DIR --client bosun --attempt wf-12
+suds pressure --format json
+suds maintain
+suds schedule --scheduler systemd       # or launchd
+```
+
+The `register` command records that a client holds a checkout, and
+`release` records that the client's work there ended. Both append one
+`suds.registry/v1` record to `registry.jsonl` in the state directory. A
+registration adds knowledge and no permission:
+
+- Suds removes nothing beneath a checkout that a client registered and has
+  not released, and it reads the registry anew before each removal.
+- A released linked checkout enters each reclaim plan, before every other
+  checkout. Every other rule of [Reclamation](#reclamation) still decides
+  whether it leaves.
+
+The `maintain` command is the run that a schedule starts. It inspects the
+roots that the settings name, and it records one `suds.pressure/v1` reading
+in the state directory. The usage counts each root, each checkout with its
+build state, and each store. Docker keeps its own storage, which the usage
+leaves out. The `pressure` command prints the last reading and measures
+nothing, so a client can read it before each start.
+
+| Level | Usage | A client's response |
+| :--- | :--- | :--- |
+| `normal` | Below 80 percent of the ceiling | Start work |
+| `soft` | From 80 percent | Reclaim before more work |
+| `hard` | From 95 percent | Start no work |
+
+The level rises at once. It falls only after the usage has stayed lower for
+five minutes, so a reading near a threshold holds one level. The ceiling is
+the greater of half of the disk and 100 GiB unless the settings name
+another. No filesystem limit enforces the ceiling in this release, and each
+reading says so in its `enforced` field.
+
+The `maintain` command changes nothing unless the settings hold the
+owner's standing approval. With it, the command reclaims build state and
+trims the stores as `suds reclaim --apply` and `suds stores --apply` do,
+and the journal records the standing approval as each run's authority.
+
+Suds reads its settings from the file `settings.json`. On Linux the file
+lies in `~/.config/suds`, and on macOS it lies in
+`~/Library/Application Support/Suds`. No command writes the file, and a
+file that Suds cannot parse stops the run.
+
+```json
+{
+  "roots": ["/home/me/workspace"],
+  "standing_approval": true,
+  "idle_minutes": 60,
+  "ceiling_bytes": null,
+  "tolerate_unreadable_processes": false,
+  "budgets": { "docker.images": 42949672960 }
+}
+```
+
+The `schedule` command prints the units that run `suds maintain` every 30
+minutes: a service and a timer for systemd, or an agent for launchd. Suds
+installs nothing, so a person or an installer places the units.
+
 ## JSON Output
 
 The `--format json` option writes exactly one JSON document to standard
@@ -366,9 +436,10 @@ whose entry changed after the move and a move whose original path now holds
 another entry. Suds never merges, renames to avoid a conflict, copies, or
 deletes.
 
-The journal is an append-only file of JSON records, `suds.journal/v1`, in
-`~/Library/Application Support/Suds/journal` on macOS. Linux has no default
-journal, so each command there takes `--journal DIR`. Suds records each
+The journal is an append-only file of `suds.journal/v1` records. On macOS
+it lies in `~/Library/Application Support/Suds/journal`. Its place on Linux
+is `~/.local/state/suds/journal`, and `XDG_STATE_HOME` moves it. The option
+`--journal DIR` names another directory. Suds records each
 move before and after its rename. When a run stops between those records,
 the next `apply` or `undo` examines both paths. If the entry lies at
 exactly one of them, Suds records which, and otherwise it records the move as

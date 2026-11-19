@@ -5,6 +5,7 @@
 //! names.
 
 mod cli;
+mod clients;
 mod organize;
 mod output;
 mod reclaim;
@@ -43,6 +44,11 @@ fn main() -> ExitCode {
         Command::Undo(args) => organize::undo_command(&args),
         Command::Reclaim(args) => reclaim::reclaim_command(&args),
         Command::Stores(args) => stores::stores_command(&args),
+        Command::Register(args) => clients::register_command(&args),
+        Command::Release(args) => clients::release_command(&args),
+        Command::Pressure(args) => clients::pressure_command(&args),
+        Command::Maintain(args) => clients::maintain_command(&args),
+        Command::Schedule(args) => clients::schedule_command(&args),
     }
 }
 

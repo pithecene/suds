@@ -11,8 +11,9 @@ use suds_core::reclaim::execute::{Authority, Conditions, ReclaimReport, apply};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{
-    Candidate, Decision, Kept, Policy, ReclaimPlan, Subject, plan_reclaim,
+    Candidate, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
 };
+use suds_core::registry::{self, Standings};
 use tempfile::TempDir;
 
 /// The plan's idle time in these tests.
@@ -123,7 +124,24 @@ impl Fixture {
             checkouts,
             tolerate_unreadable_processes: false,
         };
-        plan_reclaim(&scan, liveness, &Git::default(), policy, at)
+        let observed = Observed {
+            liveness,
+            registry: &self.standings(),
+        };
+        plan_reclaim(&scan, &observed, &Git::default(), policy, at)
+    }
+
+    /// The registry's standings in this fixture's state directory.
+    fn standings(&self) -> Standings {
+        registry::standings(&registry::read(&self.registry()).unwrap())
+    }
+
+    fn registry(&self) -> PathBuf {
+        self.journal.with_file_name("registry.jsonl")
+    }
+
+    fn record(&self, checkout: &Path, event: registry::Event) {
+        registry::append(&self.registry(), checkout, "bosun", Some("wf-1"), event, 0).unwrap();
     }
 
     /// Applies `plan` at the time for which `plan` planned, with the
@@ -146,6 +164,7 @@ impl Fixture {
         let conditions = Conditions {
             authority: Authority::Person,
             observe,
+            registry: &mut || self.standings(),
             git: &Git::default(),
             now: at,
         };
@@ -430,7 +449,10 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
     };
     let plan = plan_reclaim(
         &scan,
-        &hidden,
+        &Observed {
+            liveness: &hidden,
+            registry: &Standings::new(),
+        },
         &Git::default(),
         tolerant,
         now() + 2 * IDLE_SECONDS,
@@ -510,7 +532,10 @@ fn names_each_directory_once_when_roots_overlap() {
     };
     let plan = plan_reclaim(
         &scan,
-        &nobody(),
+        &Observed {
+            liveness: &nobody(),
+            registry: &Standings::new(),
+        },
         &Git::default(),
         policy,
         now() + 2 * IDLE_SECONDS,
@@ -518,4 +543,44 @@ fn names_each_directory_once_when_roots_overlap() {
     assert_eq!(plan.candidates.len(), 3);
     let report = fixture.apply(&plan);
     assert_eq!(report.status, RunStatus::Complete);
+}
+
+#[test]
+fn keeps_what_a_client_registered_and_reclaims_what_it_released_first() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Registered);
+    let plan = fixture.plan(&nobody(), true);
+    assert_eq!(
+        find(&plan, &fixture.linked.join("target")).kept,
+        Some(Kept::Registered)
+    );
+    assert_eq!(find(&plan, &fixture.linked).kept, Some(Kept::Registered));
+    // The registration covers the linked checkout alone.
+    assert_eq!(
+        find(&plan, &fixture.repo.join("target")).decision,
+        Decision::Remove
+    );
+
+    // A released checkout enters the plan without the policy for linked
+    // checkouts, and before every other checkout.
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(plan.candidates[0].checkout.as_path(), fixture.linked);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Complete);
+    assert!(!fixture.linked.exists());
+}
+
+#[test]
+fn a_registration_during_the_run_keeps_the_checkout() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    fixture.record(&fixture.linked, registry::Event::Registered);
+    let report = fixture.apply(&plan);
+    assert!(fixture.linked.join("target").exists());
+    assert!(fixture.linked.exists());
+    assert!(!fixture.repo.join("target").exists());
+    assert_eq!(report.status, RunStatus::Partial);
 }

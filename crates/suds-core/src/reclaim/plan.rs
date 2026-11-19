@@ -18,6 +18,7 @@ use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
+use crate::registry::{self, Standings};
 use crate::timestamp;
 
 /// The schema tag of every reclaim plan.
@@ -122,31 +123,51 @@ pub enum Kept {
     HoldsCheckout,
     /// A mount point lies beneath the directory.
     HoldsMountPoint,
+    /// A client registered the checkout and has not released it.
+    Registered,
     /// Suds could not establish a fact that a removal needs.
     Unverified,
 }
 
-/// Plans the removal of the derived state that `scan` found. The `liveness`
-/// argument holds the processes' working directories, or the reason that
-/// Suds could not read them, and that failure keeps every candidate.
+/// What the machine reports at planning: the processes' working
+/// directories, or the reason that Suds could not read them, and the
+/// registry's standing of each checkout.
+pub struct Observed<'a> {
+    pub liveness: &'a Result<Liveness, String>,
+    pub registry: &'a Standings,
+}
+
+/// Plans the removal of the derived state that `scan` found. A failure to
+/// read the processes' working directories keeps every candidate. A
+/// checkout that a client released comes first, and the plan considers it
+/// whatever the policy says of linked checkouts.
 pub fn plan_reclaim(
     scan: &DevelopmentScan,
-    liveness: &Result<Liveness, String>,
+    observed: &Observed<'_>,
     git: &Git,
     policy: Policy,
     now: i64,
 ) -> ReclaimPlan {
     let judge = Judge {
-        liveness,
+        liveness: observed.liveness,
+        registry: observed.registry,
         git,
         idle_since: idle_since(now, policy.idle_seconds),
         tolerate_unreadable_processes: policy.tolerate_unreadable_processes,
     };
+    let released = |checkout: &Checkout| {
+        observed
+            .registry
+            .get(&checkout.path)
+            .is_some_and(|standing| standing.event == registry::Event::Released)
+    };
+    let mut ordered: Vec<&Checkout> = scan.checkouts.iter().collect();
+    ordered.sort_by_key(|checkout| !released(checkout));
     let mut candidates = Vec::new();
     // Two routes of an inspection can reach one checkout, and a plan names
     // each directory once.
     let mut named = HashSet::new();
-    for checkout in &scan.checkouts {
+    for checkout in ordered {
         for build in &checkout.build_state {
             if !named.insert(build.path.clone()) {
                 continue;
@@ -170,7 +191,8 @@ pub fn plan_reclaim(
                 evidence,
             ));
         }
-        let linked = policy.checkouts && checkout.kind == CheckoutKind::Linked;
+        let linked =
+            checkout.kind == CheckoutKind::Linked && (policy.checkouts || released(checkout));
         if linked && named.insert(checkout.path.clone()) {
             let (kept, evidence) = judge_linked(&judge, checkout, scan);
             let subject = Subject::LinkedCheckout;
@@ -233,6 +255,7 @@ fn judge_linked(
 /// through the same functions, so a removal holds to the plan's own rules.
 pub(crate) struct Judge<'a> {
     pub(crate) liveness: &'a Result<Liveness, String>,
+    pub(crate) registry: &'a Standings,
     pub(crate) git: &'a Git,
     pub(crate) idle_since: String,
     pub(crate) tolerate_unreadable_processes: bool,
@@ -279,6 +302,20 @@ impl Judge<'_> {
     /// Keeps a candidate when a process works in its checkout, or when Suds
     /// cannot tell where each of this user's processes works.
     fn in_use(&self, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
+        match self.registry.get(checkout) {
+            Some(standing) if standing.event == registry::Event::Registered => {
+                evidence.push(format!(
+                    "the client {} registered the checkout at {} and has not released it",
+                    standing.client, standing.at
+                ));
+                return Some(Kept::Registered);
+            }
+            Some(standing) => evidence.push(format!(
+                "the client {} released the checkout at {}",
+                standing.client, standing.at
+            )),
+            None => {}
+        }
         let liveness = match self.liveness {
             Ok(liveness) => liveness,
             Err(reason) => {

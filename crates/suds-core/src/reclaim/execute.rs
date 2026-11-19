@@ -20,6 +20,7 @@ use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
+use crate::registry::Standings;
 
 /// The schema tag of a reclaim run's result.
 pub const RECLAIM_RUN_SCHEMA: &str = "suds.reclaim-run/v1";
@@ -67,6 +68,10 @@ pub struct Conditions<'a> {
     /// The run calls this before each removal, so a process that starts
     /// during the run protects its checkout.
     pub observe: &'a mut dyn FnMut() -> Result<Liveness, String>,
+    /// The registry's standing of each checkout, read anew before each
+    /// removal, so a client that registers during the run keeps its
+    /// checkout.
+    pub registry: &'a mut dyn FnMut() -> Standings,
     pub git: &'a Git,
     pub now: i64,
 }
@@ -82,6 +87,7 @@ pub fn apply(
     let Conditions {
         authority,
         observe,
+        registry,
         git,
         now,
     } = conditions;
@@ -98,8 +104,10 @@ pub fn apply(
             continue;
         }
         let liveness = observe();
+        let standings = registry();
         let judge = Judge {
             liveness: &liveness,
+            registry: &standings,
             git,
             idle_since: idle_since(now, plan.idle_seconds),
             tolerate_unreadable_processes: plan.tolerate_unreadable_processes,

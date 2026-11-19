@@ -11,11 +11,15 @@ compile_error!("Suds supports macOS and Linux only.");
 
 pub mod development;
 pub mod inspection;
+pub mod maintain;
 pub mod model;
 pub mod organize;
 pub mod platform;
+pub mod pressure;
 pub mod reclaim;
+pub mod registry;
 pub mod roots;
 pub mod scan;
+pub mod state;
 pub mod stores;
 pub mod timestamp;

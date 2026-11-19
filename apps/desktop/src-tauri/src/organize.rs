@@ -327,16 +327,17 @@ mod tests {
     fn folders() -> Folders {
         let dir = TempDir::new().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
-        let (from, to) = (root.join("Downloads"), root.join("Documents"));
-        fs::create_dir(&from).unwrap();
-        fs::create_dir(&to).unwrap();
-        fs::write(from.join("a.pdf"), b"a").unwrap();
-        Folders {
+        let folders = Folders {
+            from: root.join("Downloads"),
+            to: root.join("Documents"),
             journal: root.join("journal"),
             _dir: dir,
-            from,
-            to,
+        };
+        for directory in [&folders.from, &folders.to] {
+            fs::create_dir(directory).unwrap();
         }
+        fs::write(folders.from.join("a.pdf"), b"a").unwrap();
+        folders
     }
 
     #[test]

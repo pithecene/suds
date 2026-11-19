@@ -227,8 +227,8 @@ fn store_specs(environment: &Environment) -> Vec<StoreSpec> {
     let cargo_home = environment
         .path("CARGO_HOME")
         .or_else(|| environment.home(".cargo"));
-    // pnpm keeps its store beneath its home directory, which `PNPM_HOME`
-    // names when the variable holds a path.
+    // The store of pnpm lies beneath the program's home directory, which
+    // `PNPM_HOME` names when the variable holds a path.
     let pnpm_data = environment.path("PNPM_HOME").or_else(|| {
         if cfg!(target_os = "macos") && environment.path("XDG_DATA_HOME").is_none() {
             environment.home("Library/pnpm")

@@ -284,6 +284,13 @@ fn write_summaries(out: &mut impl Write, summaries: &[RunSummary]) -> io::Result
                 writeln!(out, "               {}", escape(&refusal.message))?;
             }
         }
+        for removal in &summary.removals {
+            let outcome = if removal.removed { "removed" } else { "kept" };
+            writeln!(out, "  {outcome:<11}  {}", escape(&removal.path.display()))?;
+            if let Some(reason) = &removal.reason {
+                writeln!(out, "               {}", escape(reason))?;
+            }
+        }
     }
     Ok(())
 }

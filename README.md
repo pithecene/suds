@@ -229,7 +229,15 @@ Suds keeps a directory of build state in each of these cases:
 - An entry in the directory changed within the idle time, which is 60
   minutes unless `--idle-minutes` names another. A recent change suggests
   a build in progress. No age ever causes a removal.
-- Suds could not read the processes' working directories.
+- Suds could not read the processes' working directories. On Linux, the
+  kernel hides the working directory of a process that forbids its own
+  inspection. While this user runs such a process, Suds keeps every
+  directory, and the plan names the process. The option
+  `--tolerate-unreadable-processes` accepts those processes.
+- Git tracks a file in the directory, or would track one. Suds removes a
+  directory only when Git ignores every file beneath it.
+- A directory beneath it holds a Git repository.
+- A mount point lies beneath it, or Suds could not read an entry there.
 
 With `--checkouts`, the plan also considers each linked checkout, under
 the same two protections as build state. Suds has Git remove one only when
@@ -237,13 +245,13 @@ Git reports no changed, staged, or untracked file there. A remote-tracking
 branch must also hold every commit of its head. The branch and its commits
 stay in the repository. Suds never names a main checkout.
 
-With `--apply`, Suds records the plan in the journal and verifies each
+With `--apply`, Suds records the plan in the journal and judges each
 candidate again immediately before its removal. The directory must be the
-entry that the plan measured, with no symbolic link in its path. No process
-may have started in its checkout, and its layout must still prove its
-class. One refusal leaves the other candidates to proceed. The journal records the
-plan, the authority for the run, and each removal or refusal. A removal has
-no undo, because a build regenerates build state and the remote holds a
+entry that the plan measured, with no symbolic link in its path. Suds then
+observes the processes, measures the directory, and asks Git anew, and it
+applies every rule of the plan to what it finds. One refusal leaves the other candidates to proceed. The journal records the
+plan, the authority for the run, and each removal or refusal, and
+`suds journal` lists the run with its removals. A removal has no undo, because a build regenerates build state and the remote holds a
 removed checkout's work.
 
 ## JSON Output

@@ -63,6 +63,11 @@ pub struct ReclaimArgs {
     #[arg(long)]
     pub apply: bool,
 
+    /// Proceed while the system hides the working directory of a process of
+    /// this user. Without the option, such a process keeps every directory.
+    #[arg(long)]
+    pub tolerate_unreadable_processes: bool,
+
     /// The output format.
     #[arg(long, value_enum, default_value_t = Format::Table)]
     pub format: Format,

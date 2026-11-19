@@ -9,12 +9,31 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Liveness {
     directories: Vec<PathBuf>,
+    /// Each process of this user whose working directory the system would
+    /// not show. Such a process can still write in this user's checkouts.
+    unreadable: Vec<String>,
 }
 
 impl Liveness {
     /// A fixed set of working directories.
     pub fn of(directories: Vec<PathBuf>) -> Self {
-        Liveness { directories }
+        Liveness {
+            directories,
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// The observation with these processes of unknown working directory.
+    #[must_use]
+    pub fn with_unreadable(mut self, processes: Vec<String>) -> Self {
+        self.unreadable = processes;
+        self
+    }
+
+    /// Each process of this user whose working directory stayed unknown, by
+    /// its identifier and its name.
+    pub fn unreadable(&self) -> &[String] {
+        &self.unreadable
     }
 
     /// The working directory of a process that lies at `tree` or beneath it.
@@ -25,25 +44,44 @@ impl Liveness {
             .find(|directory| directory.starts_with(tree))
     }
 
-    /// Reads each process's working directory from `/proc`. The kernel
-    /// refuses the link of another user's process, and that process cannot
-    /// write in this user's checkout without its permissions, so the
-    /// observation leaves it out.
+    /// Reads each process's working directory from `/proc`. A process that
+    /// ended during the observation has no link. The kernel refuses the link
+    /// of another user's process, which the observation leaves out. It also
+    /// refuses the link of this user's process that forbids its inspection,
+    /// and the observation names each such process as unreadable.
     #[cfg(target_os = "linux")]
     pub fn observe() -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let this_user = std::fs::metadata("/proc/self")
+            .map_err(|err| format!("could not read /proc/self: {err}"))?
+            .uid();
         let entries = std::fs::read_dir("/proc")
             .map_err(|err| format!("could not list the processes in /proc: {err}"))?;
-        let directories = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
-            })
-            .filter_map(|entry| std::fs::read_link(entry.path().join("cwd")).ok())
-            .collect();
-        Ok(Liveness { directories })
+        let mut liveness = Liveness::default();
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(process) = name
+                .to_str()
+                .filter(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+            else {
+                continue;
+            };
+            let path = entry.path();
+            match std::fs::read_link(path.join("cwd")) {
+                Ok(directory) => liveness.directories.push(directory),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    let owner = std::fs::metadata(&path).map(|meta| meta.uid());
+                    if owner.is_ok_and(|owner| owner == this_user) {
+                        let command = std::fs::read_to_string(path.join("comm"))
+                            .map_or_else(|_| "unknown".to_owned(), |text| text.trim().to_owned());
+                        liveness.unreadable.push(format!("{process} ({command})"));
+                    }
+                }
+            }
+        }
+        Ok(liveness)
     }
 
     /// Asks `lsof`, which reads the system's process table, for each
@@ -62,9 +100,7 @@ impl Liveness {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok(Liveness {
-            directories: parse_lsof(&output.stdout),
-        })
+        Ok(Liveness::of(parse_lsof(&output.stdout)))
     }
 }
 

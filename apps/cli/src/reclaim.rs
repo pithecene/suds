@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use suds_core::development::{self, Environment};
 use suds_core::organize::journal::Journal;
-use suds_core::reclaim::execute::{self, Authority, ReclaimReport};
+use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{Decision, Policy, ReclaimPlan, plan_reclaim};
@@ -38,6 +38,7 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     let policy = Policy {
         idle_seconds: args.idle_minutes.saturating_mul(60),
         checkouts: args.checkouts,
+        tolerate_unreadable_processes: args.tolerate_unreadable_processes,
     };
     let plan = plan_reclaim(&scan, &Liveness::observe(), &git, policy, now_seconds());
 
@@ -57,15 +58,13 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
 
     let directory = journal_directory(&args.journal)?;
     let mut journal = Journal::open(&directory).map_err(|err| err.to_string())?;
-    // The processes may have changed while the plan measured the checkouts.
-    let report = execute::apply(
-        &mut journal,
-        &plan,
-        Authority::Person,
-        &Liveness::observe(),
-        &git,
-    )
-    .map_err(|err| err.to_string())?;
+    let conditions = Conditions {
+        authority: Authority::Person,
+        observe: &mut Liveness::observe,
+        git: &git,
+        now: now_seconds(),
+    };
+    let report = execute::apply(&mut journal, &plan, conditions).map_err(|err| err.to_string())?;
     let written = match args.format {
         Format::Table => write_report(&mut out, &report),
         Format::Json => serde_json::to_writer_pretty(&mut out, &report)

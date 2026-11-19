@@ -1,9 +1,11 @@
 //! Applying a reclaim plan.
 //!
-//! The executor records the plan, then verifies each removal's evidence
-//! again immediately before it acts, because a process can start or a file
-//! can change after planning. It removes build state itself, without
-//! following a symbolic link, and it has Git remove a linked checkout.
+//! The executor records the plan, then judges each candidate again
+//! immediately before it acts, because a process can start or a file can
+//! change after planning. It observes the processes, measures the directory,
+//! and asks Git anew for each removal. It removes build state itself,
+//! without following a symbolic link, and it has Git remove a linked
+//! checkout.
 
 use std::fs;
 use std::path::Path;
@@ -17,7 +19,7 @@ use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
-use crate::reclaim::plan::{Candidate, Decision, ReclaimPlan, Subject, unsaved_work};
+use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
 
 /// The schema tag of a reclaim run's result.
 pub const RECLAIM_RUN_SCHEMA: &str = "suds.reclaim-run/v1";
@@ -58,16 +60,31 @@ pub struct Removal {
     pub refusal: Option<String>,
 }
 
+/// What a run needs beside its plan: who approved it, how to observe the
+/// processes, the Git adapter, and the time in seconds since the Unix epoch.
+pub struct Conditions<'a> {
+    pub authority: Authority,
+    /// The run calls this before each removal, so a process that starts
+    /// during the run protects its checkout.
+    pub observe: &'a mut dyn FnMut() -> Result<Liveness, String>,
+    pub git: &'a Git,
+    pub now: i64,
+}
+
 /// Records `plan` and removes each candidate that it decided to remove. One
 /// refusal leaves the other candidates to proceed, and a journal failure
 /// stops the run.
 pub fn apply(
     journal: &mut Journal,
     plan: &ReclaimPlan,
-    authority: Authority,
-    liveness: &Result<Liveness, String>,
-    git: &Git,
+    conditions: Conditions<'_>,
 ) -> Result<ReclaimReport, JournalError> {
+    let Conditions {
+        authority,
+        observe,
+        git,
+        now,
+    } = conditions;
     journal.append(Event::ReclaimPlanned { plan: plan.clone() })?;
     let run = new_id("run");
     journal.append(Event::ReclaimStarted {
@@ -80,9 +97,14 @@ pub fn apply(
         if candidate.decision != Decision::Remove {
             continue;
         }
-        let path = candidate.path.as_path();
-        let checked = check(journal.directory(), candidate, liveness, git);
-        let outcome = match checked {
+        let liveness = observe();
+        let judge = Judge {
+            liveness: &liveness,
+            git,
+            idle_since: idle_since(now, plan.idle_seconds),
+            tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
+        };
+        let outcome = match check(journal.directory(), candidate, &judge) {
             Err(reason) => Err(reason),
             Ok(()) => {
                 journal.append(Event::RemovalStarted {
@@ -107,7 +129,7 @@ pub fn apply(
         })?;
         removals.push(Removal {
             index,
-            path: NativePath::new(path.to_path_buf()),
+            path: candidate.path.clone(),
             removed: refusal.is_none(),
             freed_bytes: if refusal.is_none() {
                 candidate.allocated_bytes
@@ -136,15 +158,11 @@ pub fn apply(
     })
 }
 
-/// Verifies every precondition of one removal.
-fn check(
-    journal: &Path,
-    candidate: &Candidate,
-    liveness: &Result<Liveness, String>,
-    git: &Git,
-) -> Result<(), String> {
+/// Verifies every precondition of one removal. The directory must be the
+/// entry that the plan measured, and the plan's own rules must still decide
+/// to remove it as it stands now.
+fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(), String> {
     let path = candidate.path.as_path();
-    let checkout = candidate.checkout.as_path();
     if journal.starts_with(path) {
         return Err(format!("{} holds the journal", path.display()));
     }
@@ -166,19 +184,7 @@ fn check(
         }
         Err(err) => return Err(format!("{} has no canonical path: {err}", path.display())),
     }
-    match liveness {
-        Err(reason) => {
-            return Err(format!(
-                "Suds could not read the working directories of the processes: {reason}"
-            ));
-        }
-        Ok(liveness) => {
-            if let Some(directory) = liveness.within(checkout) {
-                return Err(format!("a process works in {}", directory.display()));
-            }
-        }
-    }
-    match candidate.subject {
+    let (kept, mut evidence) = match candidate.subject {
         Subject::BuildState { ecosystem } => {
             if development::build_state_at(path) != Some(ecosystem) {
                 return Err(format!(
@@ -187,15 +193,25 @@ fn check(
                     path.display()
                 ));
             }
+            let (measure, survey) = development::survey_build_state(path);
+            judge.build_state(
+                candidate.checkout.as_path(),
+                path,
+                ecosystem,
+                &measure,
+                &survey,
+            )
         }
         Subject::LinkedCheckout => {
-            let mut evidence = Vec::new();
-            if unsaved_work(git, path, &mut evidence).is_some() {
-                return Err(evidence.pop().unwrap_or_default());
-            }
+            let (measure, survey) = development::survey_tree(path);
+            judge.checkout(path, measure.newest_modified.as_deref(), &survey)
         }
+    };
+    match kept {
+        // The judgment's last fact is the one that keeps the directory.
+        Some(_) => Err(evidence.pop().unwrap_or_default()),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {

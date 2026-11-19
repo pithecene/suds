@@ -90,6 +90,18 @@ impl Git {
         })
     }
 
+    /// Whether Git ignores every file beneath `directory` of `checkout`.
+    /// A tracked file there, or one that Git would track, is no derived
+    /// state.
+    pub fn ignores_all(&self, checkout: &Path, directory: &Path) -> Result<bool, String> {
+        let listed = self.run(
+            checkout,
+            &["ls-files", "--cached", "--others", "--exclude-standard"],
+            Some(directory),
+        )?;
+        Ok(listed.is_empty())
+    }
+
     /// Has Git remove the linked checkout at `checkout` from `repository`.
     /// Git itself refuses a checkout that holds a changed or untracked file.
     pub fn remove_worktree(&self, repository: &Path, checkout: &Path) -> Result<(), String> {

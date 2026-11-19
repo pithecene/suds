@@ -531,6 +531,8 @@ pub struct MoveState {
 pub struct RunState {
     pub run: String,
     pub plan: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
     pub started_at: String,
     pub moves: Vec<MoveState>,
     pub completed: Option<RunStatus>,
@@ -547,6 +549,36 @@ pub struct JournalState {
     pub plans: HashMap<String, MovePlan>,
     /// The runs in the order in which they started.
     pub runs: Vec<RunState>,
+    pub reclaim_plans: HashMap<String, ReclaimPlan>,
+    /// The reclaim runs in the order in which they started.
+    pub reclaims: Vec<ReclaimState>,
+}
+
+/// One reclaim run's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimState {
+    pub run: String,
+    pub plan: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
+    pub started_at: String,
+    pub authority: Authority,
+    /// Each candidate that the run reached, by its position in the plan.
+    pub removals: Vec<(usize, RemovalState)>,
+    pub completed: Option<RunStatus>,
+}
+
+/// What the journal records of one removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalState {
+    /// The removal started, and no record states its outcome.
+    Started,
+    Removed {
+        freed_bytes: u64,
+    },
+    Refused {
+        reason: String,
+    },
 }
 
 impl JournalState {
@@ -572,6 +604,7 @@ impl JournalState {
                 self.runs.push(RunState {
                     run: run.clone(),
                     plan: plan.clone(),
+                    sequence: record.sequence,
                     started_at: record.at.clone(),
                     moves: vec![
                         MoveState {
@@ -670,14 +703,53 @@ impl JournalState {
                     state.undo = Some(*status);
                 }
             }
-            // A removal has no undo, so a reclaim run changes no move's
-            // state.
-            Event::ReclaimPlanned { .. }
-            | Event::ReclaimStarted { .. }
-            | Event::RemovalStarted { .. }
-            | Event::Removed { .. }
-            | Event::RemovalRefused { .. }
-            | Event::ReclaimCompleted { .. } => {}
+            Event::ReclaimPlanned { plan } => {
+                self.reclaim_plans.insert(plan.id.clone(), plan.clone());
+            }
+            Event::ReclaimStarted {
+                run,
+                plan,
+                authority,
+            } => self.reclaims.push(ReclaimState {
+                run: run.clone(),
+                plan: plan.clone(),
+                sequence: record.sequence,
+                started_at: record.at.clone(),
+                authority: *authority,
+                removals: Vec::new(),
+                completed: None,
+            }),
+            Event::RemovalStarted { run, index } => {
+                self.set_removal(run, *index, RemovalState::Started);
+            }
+            Event::Removed {
+                run,
+                index,
+                freed_bytes,
+            } => {
+                let freed_bytes = *freed_bytes;
+                self.set_removal(run, *index, RemovalState::Removed { freed_bytes });
+            }
+            Event::RemovalRefused { run, index, reason } => {
+                let reason = reason.clone();
+                self.set_removal(run, *index, RemovalState::Refused { reason });
+            }
+            Event::ReclaimCompleted { run, status, .. } => {
+                if let Some(state) = self.reclaims.iter_mut().find(|state| state.run == *run) {
+                    state.completed = Some(*status);
+                }
+            }
+        }
+    }
+
+    /// Records the latest state of one removal of a reclaim run.
+    fn set_removal(&mut self, run: &str, index: usize, removal: RemovalState) {
+        let Some(state) = self.reclaims.iter_mut().find(|state| state.run == run) else {
+            return;
+        };
+        match state.removals.iter_mut().find(|(at, _)| *at == index) {
+            Some(entry) => entry.1 = removal,
+            None => state.removals.push((index, removal)),
         }
     }
 
@@ -693,48 +765,94 @@ impl JournalState {
         }
     }
 
-    /// Each run with its plan's paths, most recent first.
+    /// Each run with its plan's paths, most recent first. A reclaim run
+    /// lists its removals and offers no undo.
     pub fn summaries(&self) -> Vec<RunSummary> {
-        self.runs
+        let mut summaries: Vec<(u64, RunSummary)> = self
+            .reclaims
             .iter()
-            .rev()
-            .map(|run| {
-                let plan = self.plans.get(&run.plan);
-                let moves = run
+            .map(|run| (run.sequence, self.reclaim_summary(run)))
+            .chain(self.move_summaries())
+            .collect();
+        summaries.sort_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
+        summaries.into_iter().map(|(_, summary)| summary).collect()
+    }
+
+    fn reclaim_summary(&self, run: &ReclaimState) -> RunSummary {
+        let plan = self.reclaim_plans.get(&run.plan);
+        let removals = run
+            .removals
+            .iter()
+            .filter_map(|(index, state)| {
+                let candidate = plan?.candidates.get(*index)?;
+                let (removed, freed_bytes, reason) = match state {
+                    RemovalState::Started => (false, 0, None),
+                    RemovalState::Removed { freed_bytes } => (true, *freed_bytes, None),
+                    RemovalState::Refused { reason } => (false, 0, Some(reason.clone())),
+                };
+                Some(RemovalSummary {
+                    path: candidate.path.clone(),
+                    removed,
+                    freed_bytes,
+                    reason,
+                })
+            })
+            .collect();
+        RunSummary {
+            kind: RunKind::Reclaim,
+            run: run.run.clone(),
+            plan: run.plan.clone(),
+            started_at: run.started_at.clone(),
+            status: run.completed,
+            interrupted: false,
+            undo: None,
+            undoable: false,
+            moves: Vec::new(),
+            removals,
+        }
+    }
+
+    fn move_summaries(&self) -> impl Iterator<Item = (u64, RunSummary)> {
+        self.runs.iter().map(|run| {
+            let plan = self.plans.get(&run.plan);
+            let moves = run
+                .moves
+                .iter()
+                .enumerate()
+                .filter_map(|(index, state)| {
+                    let planned = plan?.moves.get(index)?;
+                    Some(MoveSummary {
+                        source: planned.source.clone(),
+                        destination: planned.destination.clone(),
+                        status: state.status,
+                        refusal: state.refusal.clone(),
+                    })
+                })
+                .collect();
+            let summary = RunSummary {
+                kind: RunKind::Move,
+                run: run.run.clone(),
+                plan: run.plan.clone(),
+                started_at: run.started_at.clone(),
+                status: run.completed,
+                interrupted: run.interrupted,
+                undo: run.undo,
+                undoable: run
                     .moves
                     .iter()
-                    .enumerate()
-                    .filter_map(|(index, state)| {
-                        let planned = plan?.moves.get(index)?;
-                        Some(MoveSummary {
-                            source: planned.source.clone(),
-                            destination: planned.destination.clone(),
-                            status: state.status,
-                            refusal: state.refusal.clone(),
-                        })
-                    })
-                    .collect();
-                RunSummary {
-                    run: run.run.clone(),
-                    plan: run.plan.clone(),
-                    started_at: run.started_at.clone(),
-                    status: run.completed,
-                    interrupted: run.interrupted,
-                    undo: run.undo,
-                    undoable: run
-                        .moves
-                        .iter()
-                        .any(|state| state.status == MoveStatus::Applied),
-                    moves,
-                }
-            })
-            .collect()
+                    .any(|state| state.status == MoveStatus::Applied),
+                moves,
+                removals: Vec::new(),
+            };
+            (run.sequence, summary)
+        })
     }
 }
 
 /// One run as `suds journal` and the desktop application list it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunSummary {
+    pub kind: RunKind,
     pub run: String,
     pub plan: String,
     pub started_at: String,
@@ -747,6 +865,26 @@ pub struct RunSummary {
     /// Whether any move remains applied, so that an undo could reverse it.
     pub undoable: bool,
     pub moves: Vec<MoveSummary>,
+    /// For a reclaim run, each candidate that the run reached.
+    pub removals: Vec<RemovalSummary>,
+}
+
+/// Whether a run moved entries or removed derived state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    Move,
+    Reclaim,
+}
+
+/// One removal of a reclaim run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemovalSummary {
+    pub path: NativePath,
+    pub removed: bool,
+    pub freed_bytes: u64,
+    /// The reason that the run removed nothing at the path.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

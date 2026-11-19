@@ -9,7 +9,9 @@ use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
-use suds_core::reclaim::plan::{Decision, Policy, ReclaimPlan, plan_reclaim};
+use suds_core::reclaim::plan::{Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
+use suds_core::registry::{self, Reading, Standings};
+use suds_core::state::Directories;
 
 use crate::cli::ReclaimArgs;
 use crate::organize::journal_directory;
@@ -35,7 +37,11 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
         checkouts: args.checkouts,
         tolerate_unreadable_processes: args.tolerate_unreadable_processes,
     };
-    let plan = plan_reclaim(&scan, &Liveness::observe(), &git, policy, now_seconds());
+    let observed = Observed {
+        liveness: &Liveness::observe(),
+        registry: &standings(),
+    };
+    let plan = plan_reclaim(&scan, &observed, &git, policy, now_seconds());
 
     if !args.apply {
         return planned(emit(args.format, &plan, write_plan));
@@ -46,6 +52,7 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     let conditions = Conditions {
         authority: Authority::Person,
         observe: &mut Liveness::observe,
+        registry: &mut standings,
         git: &git,
         now: now_seconds(),
     };
@@ -53,6 +60,16 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     let refused = report.removals.iter().any(|removal| !removal.removed);
     let written = emit(args.format, &report, write_report);
     ran(written, refused)
+}
+
+/// The registry's standing of each checkout. A process without a home
+/// directory has no registry, and a registry that Suds cannot read is an
+/// error, which keeps every candidate.
+fn standings() -> Reading {
+    match Directories::of(&Environment::of_process()) {
+        Some(directories) => registry::reading(&directories.registry()),
+        None => Ok(Standings::new()),
+    }
 }
 
 fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {

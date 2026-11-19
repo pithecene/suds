@@ -19,11 +19,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
+use crate::development::Environment;
 use crate::inspection::EntryRevision;
 use crate::organize::native::NativePath;
 use crate::organize::plan::{MovePlan, Refusal, RefusalCode};
 use crate::reclaim::execute::Authority;
 use crate::reclaim::plan::ReclaimPlan;
+use crate::state::Directories;
 use crate::timestamp;
 
 /// The schema tag of every journal record.
@@ -230,11 +232,7 @@ impl RunStatus {
 /// The reason that Suds could not use the journal.
 #[derive(Debug)]
 pub enum JournalError {
-    /// The platform has no default journal directory.
-    #[cfg(target_os = "linux")]
-    NoDefault,
     /// The process has no home directory in which to keep the journal.
-    #[cfg(target_os = "macos")]
     NoHome,
     /// Another Suds process holds the journal's lock.
     Busy,
@@ -257,12 +255,6 @@ pub enum JournalError {
 impl fmt::Display for JournalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(target_os = "linux")]
-            JournalError::NoDefault => write!(
-                f,
-                "no default journal directory exists for linux. Name one with --journal DIR."
-            ),
-            #[cfg(target_os = "macos")]
             JournalError::NoHome => write!(
                 f,
                 "no home directory exists for this process, so Suds has no journal directory. Name one with --journal DIR."
@@ -293,20 +285,12 @@ impl fmt::Display for JournalError {
 
 impl std::error::Error for JournalError {}
 
-/// The journal directory beneath the user's Application Support folder.
-#[cfg(target_os = "macos")]
+/// The journal directory, which lies in the user's state directory
+/// (`state::Directories`).
 pub fn default_directory() -> Result<PathBuf, JournalError> {
-    let home = std::env::home_dir()
-        .filter(|home| home.is_absolute())
-        .ok_or(JournalError::NoHome)?;
-    Ok(home.join("Library/Application Support/Suds/journal"))
-}
-
-/// Linux has no default journal directory, as it has no default inspection
-/// profile, so the operator names one.
-#[cfg(target_os = "linux")]
-pub fn default_directory() -> Result<PathBuf, JournalError> {
-    Err(JournalError::NoDefault)
+    Directories::of(&Environment::of_process())
+        .map(|directories| directories.journal())
+        .ok_or(JournalError::NoHome)
 }
 
 /// The journal, opened for writing under its exclusive lock.

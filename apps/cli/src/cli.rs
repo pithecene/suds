@@ -45,6 +45,69 @@ pub enum Command {
     /// Plan each shared store's trim to its budget, and run the trims with
     /// `--apply`. Each trim is a command of the store's own program.
     Stores(StoresArgs),
+
+    /// Record that a client holds a checkout. Suds removes nothing beneath
+    /// a checkout that a client registered and has not released.
+    Register(HoldArgs),
+
+    /// Record that a client released a checkout that it registered.
+    Release(HoldArgs),
+
+    /// Print the last pressure reading that `suds maintain` recorded.
+    Pressure(PressureArgs),
+
+    /// Measure the development storage and record its pressure. Under the
+    /// settings' standing approval, also reclaim and trim the stores.
+    Maintain(MaintainArgs),
+
+    /// Print the units that run `suds maintain` on a schedule.
+    Schedule(ScheduleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HoldArgs {
+    /// The checkout's directory.
+    #[arg(long, value_name = "DIR")]
+    pub checkout: PathBuf,
+
+    /// The client's name, such as `bosun`.
+    #[arg(long, value_name = "NAME")]
+    pub client: String,
+
+    /// The client's own name for the work, such as a workflow's identifier.
+    #[arg(long, value_name = "ID")]
+    pub attempt: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PressureArgs {
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
+}
+
+#[derive(Debug, Args)]
+pub struct MaintainArgs {
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleArgs {
+    /// The scheduler whose units Suds prints.
+    #[arg(long, value_enum)]
+    pub scheduler: Scheduler,
+
+    /// The time between two runs.
+    #[arg(long, value_name = "MINUTES", default_value_t = 30)]
+    pub minutes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Scheduler {
+    Systemd,
+    Launchd,
 }
 
 #[derive(Debug, Args)]
@@ -164,8 +227,9 @@ pub struct UndoArgs {
 
 #[derive(Debug, Args)]
 pub struct JournalOption {
-    /// The journal directory. On macOS, the default is
-    /// ~/Library/Application Support/Suds/journal. Linux has no default.
+    /// The journal directory. The default lies in the user's state
+    /// directory: ~/Library/Application Support/Suds/journal on macOS, and
+    /// ~/.local/state/suds/journal on Linux.
     #[arg(long = "journal", value_name = "DIR")]
     pub directory: Option<PathBuf>,
 }

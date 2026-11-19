@@ -11,6 +11,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Clients register checkouts and read the pressure of development storage**: `suds register` and `suds release` record which client holds a checkout, and Suds removes nothing beneath a registered one. `suds maintain` records a pressure reading against the ceiling, and `suds pressure` prints it. Under the standing approval of the settings, `suds maintain` also reclaims build state and trims the stores without a person. `suds schedule` prints the units that run it for systemd and for launchd.
+
 - **`suds stores` holds each shared store to a budget**: the command measures the stores of Go, pnpm, ccache, and mise and asks Docker for its images, its build cache, and its unused volumes. With `--apply`, a store beyond its budget takes the trim of its own program, and the journal records its size before and after. Suds removes no entry of a store itself, and it lists each unused named volume for a person without removing one.
 - **`suds reclaim` removes build output that no process uses**: the command plans the removal of each checkout's build state and prints the evidence for each decision. With `--apply`, it verifies each candidate again, removes it, and records each removal in the journal. It keeps a directory while a process works in its checkout or while an entry in it changed within the idle time. With `--checkouts`, it has Git remove a clean linked checkout whose commits a remote holds. It never names a main checkout.
 - **`suds inspect --profile development` classifies development storage**: the command finds each main and linked Git checkout beneath the named directories and measures the build output of Cargo, Node, CMake, and vcpkg beneath each one. It also measures the shared stores of Go, Cargo, pnpm, sccache, ccache, and vcpkg, and the toolchains of mise. Each class rests on proof from its program's own layout. The command writes a table or one `suds.development/v1` document on macOS and on Linux, and it changes nothing.
@@ -20,4 +22,5 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The journal has a default directory on Linux**: it lies in `~/.local/state/suds/journal`, and `XDG_STATE_HOME` moves it. The option `--journal` still names another directory.
 - **A shared `suds-core` crate holds the inspection code**: the `suds` command and the desktop application each call it. The scan records native paths and names. The `suds inspect` command's JSON report, terminal table, and exit statuses remain unchanged.

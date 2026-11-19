@@ -284,6 +284,22 @@ fn write_summaries(out: &mut impl Write, summaries: &[RunSummary]) -> io::Result
                 writeln!(out, "               {}", escape(&refusal.message))?;
             }
         }
+        for trim in &summary.trims {
+            let outcome = match (&trim.reason, trim.before_bytes, trim.after_bytes) {
+                (None, Some(before), Some(after)) => {
+                    format!("{} -> {}", format_bytes(before), format_bytes(after))
+                }
+                (reason, _, _) => reason.clone().unwrap_or_else(|| "in progress".to_owned()),
+            };
+            writeln!(
+                out,
+                "  {:<11}  {}  {}",
+                "trimmed",
+                trim.store,
+                escape(&outcome)
+            )?;
+            writeln!(out, "               {}", escape(&trim.command))?;
+        }
         for removal in &summary.removals {
             let outcome = if removal.removed { "removed" } else { "kept" };
             writeln!(out, "  {outcome:<11}  {}", escape(&removal.path.display()))?;

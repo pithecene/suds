@@ -149,6 +149,34 @@ pub enum Event {
         status: RunStatus,
         freed_bytes: u64,
     },
+    /// Suds is about to hold each store of this plan to its budget.
+    StoresStarted {
+        run: String,
+        plan: String,
+        authority: Authority,
+    },
+    /// Suds is about to run the store's own program with this command.
+    StoreTrimStarted {
+        run: String,
+        store: String,
+        command: String,
+    },
+    StoreTrimmed {
+        run: String,
+        store: String,
+        before_bytes: u64,
+        after_bytes: u64,
+    },
+    StoreTrimFailed {
+        run: String,
+        store: String,
+        reason: String,
+    },
+    StoresCompleted {
+        run: String,
+        status: RunStatus,
+        freed_bytes: u64,
+    },
 }
 
 /// What reconciliation found at an interrupted rename's two paths.
@@ -570,6 +598,20 @@ pub struct JournalState {
     pub reclaim_plans: HashMap<String, ReclaimPlan>,
     /// The reclaim runs in the order in which they started.
     pub reclaims: Vec<ReclaimState>,
+    /// The stores runs in the order in which they started.
+    pub stores: Vec<StoresState>,
+}
+
+/// One stores run's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoresState {
+    pub run: String,
+    pub plan: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
+    pub started_at: String,
+    pub trims: Vec<StoreTrimSummary>,
+    pub completed: Option<RunStatus>,
 }
 
 /// One reclaim run's state.
@@ -757,6 +799,63 @@ impl JournalState {
                     state.completed = Some(*status);
                 }
             }
+            Event::StoresStarted { run, plan, .. } => self.stores.push(StoresState {
+                run: run.clone(),
+                plan: plan.clone(),
+                sequence: record.sequence,
+                started_at: record.at.clone(),
+                trims: Vec::new(),
+                completed: None,
+            }),
+            Event::StoreTrimStarted {
+                run,
+                store,
+                command,
+            } => {
+                if let Some(state) = self.stores.iter_mut().find(|state| state.run == *run) {
+                    state.trims.push(StoreTrimSummary {
+                        store: store.clone(),
+                        command: command.clone(),
+                        before_bytes: None,
+                        after_bytes: None,
+                        reason: None,
+                    });
+                }
+            }
+            Event::StoreTrimmed {
+                run,
+                store,
+                before_bytes,
+                after_bytes,
+            } => self.update_trim(run, store, |trim| {
+                trim.before_bytes = Some(*before_bytes);
+                trim.after_bytes = Some(*after_bytes);
+            }),
+            Event::StoreTrimFailed { run, store, reason } => {
+                self.update_trim(run, store, |trim| trim.reason = Some(reason.clone()));
+            }
+            Event::StoresCompleted { run, status, .. } => {
+                if let Some(state) = self.stores.iter_mut().find(|state| state.run == *run) {
+                    state.completed = Some(*status);
+                }
+            }
+        }
+    }
+
+    fn update_trim(&mut self, run: &str, store: &str, change: impl FnOnce(&mut StoreTrimSummary)) {
+        let trim = self
+            .stores
+            .iter_mut()
+            .find(|state| state.run == run)
+            .and_then(|state| {
+                state
+                    .trims
+                    .iter_mut()
+                    .rev()
+                    .find(|trim| trim.store == store)
+            });
+        if let Some(trim) = trim {
+            change(trim);
         }
     }
 
@@ -790,6 +889,11 @@ impl JournalState {
             .reclaims
             .iter()
             .map(|run| (run.sequence, self.reclaim_summary(run)))
+            .chain(
+                self.stores
+                    .iter()
+                    .map(|run| (run.sequence, stores_summary(run))),
+            )
             .chain(self.move_summaries())
             .collect();
         summaries.sort_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
@@ -827,6 +931,7 @@ impl JournalState {
             undoable: false,
             moves: Vec::new(),
             removals,
+            trims: Vec::new(),
         }
     }
 
@@ -861,6 +966,7 @@ impl JournalState {
                     .any(|state| state.status == MoveStatus::Applied),
                 moves,
                 removals: Vec::new(),
+                trims: Vec::new(),
             };
             (run.sequence, summary)
         })
@@ -885,6 +991,36 @@ pub struct RunSummary {
     pub moves: Vec<MoveSummary>,
     /// For a reclaim run, each candidate that the run reached.
     pub removals: Vec<RemovalSummary>,
+    /// For a stores run, each store that the run trimmed.
+    pub trims: Vec<StoreTrimSummary>,
+}
+
+/// One store's trim in a stores run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoreTrimSummary {
+    pub store: String,
+    /// The command of the store's own program.
+    pub command: String,
+    pub before_bytes: Option<u64>,
+    pub after_bytes: Option<u64>,
+    /// The reason that the trim failed.
+    pub reason: Option<String>,
+}
+
+fn stores_summary(run: &StoresState) -> RunSummary {
+    RunSummary {
+        kind: RunKind::Stores,
+        run: run.run.clone(),
+        plan: run.plan.clone(),
+        started_at: run.started_at.clone(),
+        status: run.completed,
+        interrupted: false,
+        undo: None,
+        undoable: false,
+        moves: Vec::new(),
+        removals: Vec::new(),
+        trims: run.trims.clone(),
+    }
 }
 
 /// Whether a run moved entries or removed derived state.
@@ -893,6 +1029,7 @@ pub struct RunSummary {
 pub enum RunKind {
     Move,
     Reclaim,
+    Stores,
 }
 
 /// One removal of a reclaim run.

@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 suds-core.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

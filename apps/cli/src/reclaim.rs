@@ -11,19 +11,14 @@ use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{Decision, Policy, ReclaimPlan, plan_reclaim};
 
-use crate::cli::{Format, ReclaimArgs};
+use crate::cli::ReclaimArgs;
 use crate::organize::journal_directory;
+use crate::output::{emit, finish, planned, ran};
 use crate::table::{escape, format_bytes, write_rows};
-use crate::{EXIT_INVOCATION, EXIT_PARTIAL, now_seconds, resolve_roots};
+use crate::{now_seconds, resolve_roots};
 
 pub fn reclaim_command(args: &ReclaimArgs) -> ExitCode {
-    match run(args) {
-        Ok(code) => code,
-        Err(message) => {
-            eprintln!("suds: {message}");
-            ExitCode::from(EXIT_INVOCATION)
-        }
-    }
+    finish(run(args))
 }
 
 fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
@@ -42,18 +37,8 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     };
     let plan = plan_reclaim(&scan, &Liveness::observe(), &git, policy, now_seconds());
 
-    let mut out = io::stdout().lock();
     if !args.apply {
-        let written = match args.format {
-            Format::Table => write_plan(&mut out, &plan),
-            Format::Json => serde_json::to_writer_pretty(&mut out, &plan)
-                .map_err(io::Error::from)
-                .and_then(|()| writeln!(out)),
-        };
-        return written
-            .and_then(|()| out.flush())
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|err| format!("failed to write the plan: {err}"));
+        return planned(emit(args.format, &plan, write_plan));
     }
 
     let directory = journal_directory(&args.journal)?;
@@ -65,24 +50,9 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
         now: now_seconds(),
     };
     let report = execute::apply(&mut journal, &plan, conditions).map_err(|err| err.to_string())?;
-    let written = match args.format {
-        Format::Table => write_report(&mut out, &report),
-        Format::Json => serde_json::to_writer_pretty(&mut out, &report)
-            .map_err(io::Error::from)
-            .and_then(|()| writeln!(out)),
-    };
-    if let Err(err) = written.and_then(|()| out.flush()) {
-        // The removals already happened, and the journal records them.
-        return Err(format!(
-            "failed to write the result, which the journal records: {err}"
-        ));
-    }
     let refused = report.removals.iter().any(|removal| !removal.removed);
-    Ok(if refused {
-        ExitCode::from(EXIT_PARTIAL)
-    } else {
-        ExitCode::SUCCESS
-    })
+    let written = emit(args.format, &report, write_report);
+    ran(written, refused)
 }
 
 fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {

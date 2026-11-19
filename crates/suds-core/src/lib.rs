@@ -17,4 +17,5 @@ pub mod platform;
 pub mod reclaim;
 pub mod roots;
 pub mod scan;
+pub mod stores;
 pub mod timestamp;

@@ -46,6 +46,9 @@ pub struct ReclaimPlan {
     /// The time at which Suds built the plan, in RFC 3339 form and UTC.
     pub created_at: String,
     pub idle_seconds: u64,
+    /// A plan that an earlier release recorded names no value, and it
+    /// tolerated no such process.
+    #[serde(default)]
     pub tolerate_unreadable_processes: bool,
     pub candidates: Vec<Candidate>,
 }

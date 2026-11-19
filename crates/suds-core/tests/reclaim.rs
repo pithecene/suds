@@ -32,6 +32,12 @@ fn git(directory: &Path, arguments: &[&str]) {
             "commit.gpgsign=false",
             "-c",
             "init.defaultBranch=main",
+            // Git's own maintenance removes files in the background after
+            // a commit, which a scan in progress would report as vanished.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ])
         .args(arguments)
         .output()
@@ -618,4 +624,19 @@ fn a_registration_keeps_each_checkout_beneath_its_own() {
             .all(|candidate| candidate.kept == Some(Kept::Registered))
     );
     assert_eq!(plan.candidates.len(), 3);
+}
+
+#[test]
+fn reads_a_plan_that_an_earlier_release_recorded() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan(&nobody(), false);
+    let mut document = serde_json::to_value(&plan).unwrap();
+    // An earlier release wrote no such field into the journal.
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("tolerate_unreadable_processes");
+    let earlier: ReclaimPlan = serde_json::from_value(document).unwrap();
+    assert!(!earlier.tolerate_unreadable_processes);
+    assert_eq!(earlier.candidates, plan.candidates);
 }

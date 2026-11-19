@@ -32,6 +32,12 @@ fn git(directory: &Path, arguments: &[&str]) {
             "commit.gpgsign=false",
             "-c",
             "init.defaultBranch=main",
+            // Git's own maintenance removes files in the background after
+            // a commit, which a scan in progress would report as vanished.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ])
         .args(arguments)
         .output()

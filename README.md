@@ -352,8 +352,8 @@ nothing, so a client can read it before each start.
 The level rises at once. It falls only after the usage has stayed lower for
 five minutes, so a reading near a threshold holds one level. The ceiling is
 the greater of half of the disk and 100 GiB unless the settings name
-another. No filesystem limit enforces the ceiling in this release, and each
-reading says so in its `enforced` field.
+another. Each reading says in its `enforced` field whether a filesystem
+limit enforces the ceiling, as [Arena](#arena) describes.
 
 The `maintain` command changes nothing unless the settings hold the
 owner's standing approval. With it, the command reclaims build state and
@@ -379,6 +379,37 @@ file that Suds cannot parse stops the run.
 The `schedule` command prints the units that run `suds maintain` every 30
 minutes: a service and a timer for systemd, or an agent for launchd. Suds
 installs nothing, so a person or an installer places the units.
+
+## Arena
+
+```sh
+suds arena                       # the first root of the settings
+suds arena --root ~/workspace --format json
+```
+
+The arena is the development storage under its ceiling. The command reports
+the ceiling, the size and the free space of the root's filesystem, and
+whether a filesystem enforces the ceiling. It writes a table or one
+`suds.arena/v1` document.
+
+A filesystem enforces the ceiling when the root lies on a filesystem of its
+own that is no larger than the ceiling: an APFS volume under a quota, or a
+partition of that size. Every other root and every store must lie on that
+same filesystem, and the report lists each one that lies outside it. Suds
+audits no root through a symbolic link. Development storage then cannot fill the system's
+volume, whatever fills the arena. Suds reads what any user can read, so it
+cannot see a quota group of btrfs or a project quota of XFS, and it reports
+such a root as not enforced.
+
+Where nothing enforces the ceiling, the command prints the commands that
+would enforce it. APFS takes `diskutil apfs addVolume` with a quota. A btrfs
+filesystem takes a subvolume under a quota group, and XFS takes a project
+quota. Most of the commands need an administrator. Suds runs none of them and requests no privilege. Each command quotes its
+paths for a shell. The plan
+creates an empty location under the limit and moves nothing.
+
+Until a filesystem enforces the ceiling, Suds holds it by measurement
+alone, through the pressure reading of each maintenance run.
 
 ## JSON Output
 

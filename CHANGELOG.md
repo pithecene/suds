@@ -11,6 +11,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`suds arena` audits the ceiling of development storage**: the command reports the ceiling, the root's filesystem, and whether a filesystem enforces the ceiling. Where none does, it prints the commands that would for APFS, btrfs, and XFS, and it runs none of them. Each pressure reading now states whether a filesystem enforces its ceiling.
 - **Clients register checkouts and read the pressure of development storage**: `suds register` and `suds release` record which client holds a checkout, and Suds removes nothing beneath a registered one. `suds maintain` records a pressure reading against the ceiling, and `suds pressure` prints it. Under the standing approval of the settings, `suds maintain` also reclaims build state and trims the stores without a person. `suds schedule` prints the units that run it for systemd and for launchd.
 
 - **`suds stores` holds each shared store to a budget**: the command measures the stores of Go, pnpm, ccache, and mise and asks Docker for its images, its build cache, and its unused volumes. With `--apply`, a store beyond its budget takes the trim of its own program, and the journal records its size before and after. Suds removes no entry of a store itself, and it lists each unused named volume for a person without removing one.

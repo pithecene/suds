@@ -62,6 +62,22 @@ pub enum Command {
 
     /// Print the units that run `suds maintain` on a schedule.
     Schedule(ScheduleArgs),
+
+    /// Report the ceiling of development storage, whether a filesystem
+    /// enforces it, and the commands that would make one enforce it.
+    Arena(ArenaArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ArenaArgs {
+    /// The directory of the development tree. Without the option, Suds
+    /// audits the first root of the settings.
+    #[arg(long = "root", value_name = "DIR")]
+    pub root: Option<PathBuf>,
+
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]

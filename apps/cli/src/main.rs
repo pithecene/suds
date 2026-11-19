@@ -49,6 +49,7 @@ fn main() -> ExitCode {
         Command::Pressure(args) => clients::pressure_command(&args),
         Command::Maintain(args) => clients::maintain_command(&args),
         Command::Schedule(args) => clients::schedule_command(&args),
+        Command::Arena(args) => clients::arena_command(&args),
     }
 }
 

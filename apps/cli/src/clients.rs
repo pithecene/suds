@@ -6,7 +6,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use suds_core::development::Environment;
+use suds_core::arena::{self, Arena};
+use suds_core::development::{self, Environment};
 use suds_core::maintain::{self, Context, MaintenanceReport};
 use suds_core::pressure::{Level, Pressure};
 use suds_core::reclaim::git::Git;
@@ -15,10 +16,12 @@ use suds_core::roots;
 use suds_core::state::{Directories, load_settings};
 use suds_core::stores::Programs;
 
-use crate::cli::{Format, HoldArgs, MaintainArgs, PressureArgs, ScheduleArgs, Scheduler};
+use crate::cli::{
+    ArenaArgs, Format, HoldArgs, MaintainArgs, PressureArgs, ScheduleArgs, Scheduler,
+};
 use crate::now_seconds;
 use crate::output::{emit, finish, planned, ran};
-use crate::table::format_bytes;
+use crate::table::{escape, format_bytes};
 
 fn directories() -> Result<Directories, String> {
     Directories::of(&Environment::of_process())
@@ -132,6 +135,74 @@ fn write_maintenance(out: &mut impl Write, report: &MaintenanceReport) -> io::Re
         format_bytes(reclaimed),
         format_bytes(trimmed)
     )
+}
+
+pub fn arena_command(args: &ArenaArgs) -> ExitCode {
+    finish(audit_arena(args))
+}
+
+/// Audits the arena and prints its provisioning plan. Suds runs no command
+/// of the plan.
+fn audit_arena(args: &ArenaArgs) -> Result<ExitCode, String> {
+    let settings = load_settings(&directories()?.settings())?;
+    let root = match &args.root {
+        Some(root) => {
+            let cwd = env::current_dir()
+                .map_err(|err| format!("could not read the working directory: {err}"))?;
+            roots::normalize(&cwd.join(root))
+        }
+        None => settings
+            .roots
+            .first()
+            .cloned()
+            .ok_or("the settings name no root. Name the development tree with --root DIR.")?,
+    };
+    let others: Vec<_> = settings
+        .roots
+        .iter()
+        .filter(|other| **other != root)
+        .cloned()
+        .chain(development::store_locations(&Environment::of_process()))
+        .collect();
+    let audited = arena::audit(&root, &others, settings.ceiling_bytes)?;
+    planned(emit(args.format, &audited, write_arena))
+}
+
+fn write_arena(out: &mut impl Write, audited: &Arena) -> io::Result<()> {
+    writeln!(
+        out,
+        "The ceiling is {}, and the filesystem holds {} with {} free.",
+        format_bytes(audited.ceiling_bytes),
+        format_bytes(audited.capacity_bytes),
+        format_bytes(audited.available_bytes)
+    )?;
+    let verdict = if audited.enforced {
+        "A filesystem enforces the ceiling"
+    } else {
+        "No filesystem enforces the ceiling"
+    };
+    writeln!(out, "{verdict}: {}.", audited.finding)?;
+    for location in &audited.uncovered {
+        writeln!(out, "  outside the root's filesystem: {}", escape(location))?;
+    }
+    if audited.provisioning.is_empty() {
+        return Ok(());
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "These commands give the ceiling a filesystem limit. Suds runs none of them."
+    )?;
+    for step in &audited.provisioning {
+        let who = if step.privileged {
+            "administrator"
+        } else {
+            "user"
+        };
+        writeln!(out, "  [{who}] {}", step.command)?;
+        writeln!(out, "      {}", step.purpose)?;
+    }
+    Ok(())
 }
 
 pub fn schedule_command(args: &ScheduleArgs) -> ExitCode {

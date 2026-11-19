@@ -392,9 +392,8 @@ pub fn read(dir: &Path) -> Result<Vec<Record>, JournalError> {
 const LOCK_PATIENCE: Duration = Duration::from_millis(250);
 
 /// Takes the journal's lock, and reports a busy journal only after a short
-/// wait. A process that this one starts holds a copy of the lock from its
-/// start until it runs its own program, so a lock can read as held for an
-/// instant after its holder released it.
+/// wait. A process that this one starts holds a copy of the lock until it
+/// runs its own program, so a released lock can read as held for an instant.
 fn acquire(
     dir: &Path,
     mut attempt: impl FnMut() -> Result<(), TryLockError>,

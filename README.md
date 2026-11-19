@@ -174,7 +174,7 @@ its default beneath the home directory otherwise.
 | `go.build-cache` | `GOCACHE` | `~/.cache/go-build` |
 | `go.module-cache` | `GOMODCACHE`, `GOPATH` | `~/go/pkg/mod` |
 | `cargo.registry` | `CARGO_HOME` | `~/.cargo/registry` |
-| `pnpm.store` | `XDG_DATA_HOME` | `~/.local/share/pnpm/store` |
+| `pnpm.store` | `PNPM_HOME`, `XDG_DATA_HOME` | `~/.local/share/pnpm/store` |
 | `sccache.cache` | `SCCACHE_DIR` | `~/.cache/sccache` |
 | `ccache.cache` | `CCACHE_DIR` | `~/.cache/ccache` |
 | `vcpkg.binary-cache` | `VCPKG_DEFAULT_BINARY_CACHE` | `~/.cache/vcpkg/archives` |
@@ -184,7 +184,14 @@ On macOS, the cache directory is `~/Library/Caches`, pnpm's store lies in
 `~/Library/pnpm/store`, and sccache's cache lies in
 `~/Library/Caches/Mozilla.sccache`. A store is `present` when its directory
 exists, `absent` when none exists, and `unrecognized` when a directory
-exists without the entry that its program writes there.
+exists without the entry that its program writes there. A store is
+`unreadable` when Suds cannot examine its location, or when a symbolic link
+stands on its path beneath the home directory. Suds follows no such link,
+and the report's errors name the path.
+
+A root may be a mount point, and Suds enters no mount point beneath a root.
+When one root lies beneath another, Suds inspects the outer root alone, so
+no checkout counts twice.
 
 A file with several links counts once, toward the first class that reaches
 it. The checkouts come before the stores, so the checkouts' sizes sum to

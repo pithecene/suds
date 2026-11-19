@@ -5,11 +5,11 @@
 //! `.git` file of a linked checkout, whose first line names its repository.
 //! The profile changes nothing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -113,6 +113,10 @@ pub enum StoreStatus {
     /// A directory exists without its program's marker, so nothing proves
     /// that the program owns it.
     Unrecognized,
+    /// Suds could not examine the location, or a symbolic link stands on
+    /// its path beneath the home directory. The report's errors name the
+    /// path.
+    Unreadable,
 }
 
 /// One shared store or toolchain directory.
@@ -223,11 +227,15 @@ fn store_specs(environment: &Environment) -> Vec<StoreSpec> {
     let cargo_home = environment
         .path("CARGO_HOME")
         .or_else(|| environment.home(".cargo"));
-    let pnpm_data = if cfg!(target_os = "macos") && environment.path("XDG_DATA_HOME").is_none() {
-        environment.home("Library/pnpm")
-    } else {
-        environment.data_home().map(|data| data.join("pnpm"))
-    };
+    // pnpm keeps its store beneath its home directory, which `PNPM_HOME`
+    // names when the variable holds a path.
+    let pnpm_data = environment.path("PNPM_HOME").or_else(|| {
+        if cfg!(target_os = "macos") && environment.path("XDG_DATA_HOME").is_none() {
+            environment.home("Library/pnpm")
+        } else {
+            environment.data_home().map(|data| data.join("pnpm"))
+        }
+    });
     let sccache = if cfg!(target_os = "macos") {
         environment.home("Library/Caches/Mozilla.sccache")
     } else {
@@ -394,7 +402,7 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
     let mut scan = SharedScan::default();
     let mut found = Found::default();
     let mut results = Vec::new();
-    for path in workspaces {
+    for path in outermost(workspaces) {
         let mut workspace = Workspace {
             path: path.clone(),
             measured: true,
@@ -438,8 +446,14 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         let Some(path) = spec.path else {
             continue;
         };
-        let present = fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
-        let status = if !present {
+        let examined = examine_store(&path, environment.home.as_deref());
+        if let Err(err) = &examined {
+            scan.record_error(&path, err);
+        }
+        let present = matches!(examined, Ok(true));
+        let status = if examined.is_err() {
+            StoreStatus::Unreadable
+        } else if !present {
             StoreStatus::Absent
         } else if spec
             .marker
@@ -473,6 +487,49 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
     }
 }
 
+/// The workspaces that lie beneath no other workspace, in their given
+/// order and without a repeat. An outer workspace covers each one beneath
+/// it, so a second traversal would count the same entries again.
+fn outermost(workspaces: &[PathBuf]) -> Vec<&PathBuf> {
+    let mut kept: Vec<&PathBuf> = Vec::new();
+    for path in workspaces {
+        let covered = workspaces
+            .iter()
+            .any(|other| other != path && path.starts_with(other));
+        if !covered && !kept.contains(&path) {
+            kept.push(path);
+        }
+    }
+    kept
+}
+
+/// Whether a directory exists at a store's location. The function examines
+/// each component beneath the home directory without following a link, as
+/// the storage profile examines its default roots. A link there would lead
+/// the measurement outside the location that the program documents.
+fn examine_store(path: &Path, home: Option<&Path>) -> io::Result<bool> {
+    let mut examined = match home {
+        Some(home) if path.starts_with(home) => home.to_path_buf(),
+        _ => PathBuf::new(),
+    };
+    let beneath = path.strip_prefix(&examined).unwrap_or(path);
+    for component in beneath.components() {
+        examined.push(component);
+        let meta = match fs::symlink_metadata(&examined) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if meta.file_type().is_symlink() && home.is_some_and(|home| path.starts_with(home)) {
+            return Err(io::Error::other(format!(
+                "{} is a symbolic link on the store's path, and the inspection follows no symbolic link",
+                examined.display()
+            )));
+        }
+    }
+    fs::symlink_metadata(path).map(|meta| meta.is_dir())
+}
+
 fn measure_whole(scan: &mut SharedScan, path: &Path) -> Measure {
     scan.measure(path, &mut |_| false)
         .map(|bounded| bounded.measure)
@@ -484,6 +541,9 @@ fn measure_whole(scan: &mut SharedScan, path: &Path) -> Measure {
 struct Found {
     /// The checkouts that await their measurement.
     pending: VecDeque<Checkout>,
+    /// The path of each checkout that the inspection has queued, so that no
+    /// second route to a checkout measures it again.
+    seen: HashSet<PathBuf>,
     checkouts: Vec<Checkout>,
     stores: Vec<Store>,
 }
@@ -491,13 +551,17 @@ struct Found {
 impl Found {
     fn take(&mut self, scan: &mut SharedScan, path: PathBuf, claimed: Claim) {
         match claimed {
-            Claim::Checkout(kind, repository) => self.pending.push_back(Checkout {
-                path,
-                kind,
-                repository,
-                own: Measure::default(),
-                build_state: Vec::new(),
-            }),
+            Claim::Checkout(kind, repository) => {
+                if self.seen.insert(path.clone()) {
+                    self.pending.push_back(Checkout {
+                        path,
+                        kind,
+                        repository,
+                        own: Measure::default(),
+                        build_state: Vec::new(),
+                    });
+                }
+            }
             Claim::Toolchain(ecosystem) => {
                 let measure = measure_whole(scan, &path);
                 self.stores.push(Store {
@@ -614,7 +678,7 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
         }
     }
     for store in &scan.stores {
-        if store.status == StoreStatus::Absent {
+        if matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable) {
             continue;
         }
         match store.class {

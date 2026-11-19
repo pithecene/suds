@@ -282,7 +282,7 @@ would run, and changes nothing.
 | `go.build-cache` | 10 GiB | `go clean -cache` | Every cached build output |
 | `go.module-cache` | 10 GiB | `go clean -modcache` | Every downloaded module |
 | `pnpm.store` | 10 GiB | `pnpm store prune --store-dir DIR` | Each package that no project references |
-| `ccache.cache` | 5 GiB | `ccache --trim-dir DIR --trim-max-size SIZE` | The least recently used results beyond the budget |
+| `ccache.cache` | 10 GiB | `ccache --trim-dir DIR --trim-max-size SIZE` | The least recently used results beyond the budget |
 | `mise.installs` | 20 GiB | `mise prune --yes` | Each tool version that no tracked configuration names |
 | `docker.images` | 20 GiB | `docker image prune --all --force` | Each image that no container uses |
 | `docker.build-cache` | 10 GiB | `docker builder prune --force` with the builder's size option | The build cache beyond the budget |

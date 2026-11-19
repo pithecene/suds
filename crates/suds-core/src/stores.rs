@@ -47,7 +47,9 @@ impl Default for Budgets {
             ("go.build-cache", 10),
             ("go.module-cache", 10),
             ("pnpm.store", 10),
-            ("ccache.cache", 5),
+            // The program bounds its own cache at 5 GiB by default, so a
+            // budget of that size would trim on every run and free nothing.
+            ("ccache.cache", 10),
             ("mise.installs", 20),
             (DOCKER_IMAGES, 20),
             (DOCKER_BUILD_CACHE, 10),
@@ -296,7 +298,8 @@ pub struct Entry {
     pub id: String,
     /// The store's directory, or none for a store of the container engine.
     pub path: Option<NativePath>,
-    pub measured_bytes: u64,
+    /// The store's size, or none where Suds could not measure it.
+    pub measured_bytes: Option<u64>,
     pub budget_bytes: Option<u64>,
     #[serde(flatten)]
     pub decision: Decision,
@@ -331,10 +334,12 @@ pub fn engine_usage(docker: &Path) -> Result<EngineUsage, String> {
         .output()
         .map_err(|err| format!("could not run {}: {err}", docker.display()))?;
     if !output.status.success() {
+        // The first line names the failure, and a table shows one line.
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "{} system df failed: {}",
             docker.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.lines().next().unwrap_or("").trim()
         ));
     }
     parse_engine_usage(&output.stdout)
@@ -474,7 +479,7 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
         entries.push(Entry {
             id: store.id.clone(),
             path: Some(NativePath::new(store.path.clone())),
-            measured_bytes: measured,
+            measured_bytes: Some(measured),
             budget_bytes: budget,
             decision,
         });
@@ -484,7 +489,7 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
         Err(reason) => entries.push(Entry {
             id: "docker".to_owned(),
             path: None,
-            measured_bytes: 0,
+            measured_bytes: None,
             budget_bytes: None,
             decision: Decision::Audit {
                 reason: reason.clone(),
@@ -522,7 +527,7 @@ fn engine_entries(usage: &EngineUsage, inputs: &Inputs<'_>) -> Vec<Entry> {
         entries.push(Entry {
             id: id.to_owned(),
             path: None,
-            measured_bytes: measured,
+            measured_bytes: Some(measured),
             budget_bytes: budget,
             decision,
         });
@@ -531,11 +536,13 @@ fn engine_entries(usage: &EngineUsage, inputs: &Inputs<'_>) -> Vec<Entry> {
         entries.push(Entry {
             id: DOCKER_NAMED_VOLUMES.to_owned(),
             path: None,
-            measured_bytes: usage
-                .unused_named_volumes
-                .iter()
-                .map(|(_, bytes)| bytes)
-                .sum(),
+            measured_bytes: Some(
+                usage
+                    .unused_named_volumes
+                    .iter()
+                    .map(|(_, bytes)| bytes)
+                    .sum(),
+            ),
             budget_bytes: None,
             decision: Decision::AwaitsPerson {
                 names: usage
@@ -602,7 +609,7 @@ pub fn apply(
             Ok(after) => Event::StoreTrimmed {
                 run: run.clone(),
                 store: entry.id.clone(),
-                before_bytes: entry.measured_bytes,
+                before_bytes: entry.measured_bytes.unwrap_or(0),
                 after_bytes: *after,
             },
             Err(reason) => Event::StoreTrimFailed {
@@ -614,7 +621,7 @@ pub fn apply(
         trims.push(TrimOutcome {
             store: entry.id.clone(),
             command: trim.display(),
-            before_bytes: entry.measured_bytes,
+            before_bytes: entry.measured_bytes.unwrap_or(0),
             after_bytes: outcome.as_ref().ok().copied(),
             failure: outcome.err(),
         });

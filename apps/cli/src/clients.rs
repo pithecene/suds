@@ -185,6 +185,10 @@ fn write_arena(out: &mut impl Write, audited: &Arena) -> io::Result<()> {
     for location in &audited.uncovered {
         writeln!(out, "  outside the root's filesystem: {}", escape(location))?;
     }
+    writeln!(
+        out,
+        "The audit measures no usage. Run suds maintain, and suds pressure prints the usage against the ceiling."
+    )?;
     if audited.provisioning.is_empty() {
         return Ok(());
     }

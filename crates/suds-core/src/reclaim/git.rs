@@ -102,6 +102,29 @@ impl Git {
         Ok(listed.is_empty())
     }
 
+    /// Whether the repository at `directory` holds nothing but what it
+    /// fetched: its tree is clean, and a remote-tracking branch or a tag
+    /// holds every commit of its head. A build fetches a dependency as such
+    /// a repository, often at a tag and on no branch.
+    pub fn holds_only_fetched(&self, directory: &Path) -> Result<bool, String> {
+        if !self.is_clean(directory)? {
+            return Ok(false);
+        }
+        let count = self.run(
+            directory,
+            &[
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--remotes",
+                "--tags",
+            ],
+            None,
+        )?;
+        Ok(count.trim() == "0")
+    }
+
     /// Has Git remove the linked checkout at `checkout` from `repository`.
     /// Git itself refuses a checkout that holds a changed or untracked file.
     pub fn remove_worktree(&self, repository: &Path, checkout: &Path) -> Result<(), String> {

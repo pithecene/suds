@@ -242,7 +242,10 @@ Suds keeps a directory of build state in each of these cases:
   `--tolerate-unreadable-processes` accepts those processes.
 - Git tracks a file in the directory, or would track one. Suds removes a
   directory only when Git ignores every file beneath it.
-- A directory beneath it holds a Git repository.
+- A repository beneath it holds a changed file, or a commit that no
+  remote-tracking branch and no tag holds. A build fetches some
+  dependencies as repositories, and one that holds only what it fetched
+  keeps nothing.
 - A mount point lies beneath it, or Suds could not read an entry there.
 
 With `--checkouts`, the plan also considers each linked checkout, under

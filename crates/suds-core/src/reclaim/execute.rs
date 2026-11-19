@@ -201,13 +201,14 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
                     path.display()
                 ));
             }
-            let (measure, survey) = development::survey_build_state(path);
+            let (measure, survey, repositories) = development::survey_build_state(path);
             judge.build_state(
                 candidate.checkout.as_path(),
                 path,
                 ecosystem,
                 &measure,
                 &survey,
+                &repositories,
             )
         }
         Subject::LinkedCheckout => {

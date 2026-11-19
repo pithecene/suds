@@ -9,6 +9,7 @@
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("Suds supports macOS and Linux only.");
 
+pub mod development;
 pub mod inspection;
 pub mod model;
 pub mod organize;

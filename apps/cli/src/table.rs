@@ -5,6 +5,7 @@
 
 use std::io::{self, Write};
 
+use suds_core::development::{CheckoutKind, DevelopmentReport, StoreClass, StoreStatus};
 use suds_core::model::{EntryKind, Report, RootResult, RootStatus};
 
 const NOTE: &str = "Each allocated size estimates the disk space of an entry's blocks. \
@@ -47,6 +48,96 @@ pub fn write(out: &mut impl Write, report: &Report, top: usize) -> io::Result<()
     writeln!(out)?;
     writeln!(out, "{NOTE}")?;
     Ok(())
+}
+
+/// Writes a development report: the total of each class, then each checkout
+/// with its build state, then each store.
+pub fn write_development(out: &mut impl Write, report: &DevelopmentReport) -> io::Result<()> {
+    let totals = &report.totals;
+    let mut rows = vec![row(&["CLASS", "COUNT", "ALLOCATED", "LOGICAL"])];
+    for (label, total) in [
+        ("main checkouts", totals.main_checkouts),
+        ("linked checkouts", totals.linked_checkouts),
+        ("build state", totals.build_state),
+        ("shared stores", totals.shared_stores),
+        ("toolchains", totals.toolchains),
+    ] {
+        rows.push(vec![
+            label.to_owned(),
+            total.count.to_string(),
+            format_bytes(total.allocated_bytes),
+            format_bytes(total.logical_bytes),
+        ]);
+    }
+    write_rows(out, "", &rows, &[false, true, true, true])?;
+
+    if !report.checkouts.is_empty() {
+        writeln!(out)?;
+        let mut rows = vec![row(&["CHECKOUT", "KIND", "OWN", "BUILD STATE", "PATH"])];
+        for checkout in &report.checkouts {
+            let build: u64 = checkout
+                .build_state
+                .iter()
+                .map(|state| state.measure.allocated_bytes)
+                .sum();
+            let kind = match checkout.kind {
+                CheckoutKind::Main => "main",
+                CheckoutKind::Linked => "linked",
+            };
+            let name = checkout.path.rsplit('/').next().unwrap_or(&checkout.path);
+            rows.push(vec![
+                escape(name),
+                kind.to_owned(),
+                format_bytes(checkout.own.allocated_bytes),
+                format_bytes(build),
+                escape(&checkout.path),
+            ]);
+        }
+        write_rows(out, "", &rows, &[false, false, true, true, false])?;
+    }
+
+    if !report.stores.is_empty() {
+        writeln!(out)?;
+        let mut rows = vec![row(&["STORE", "CLASS", "ALLOCATED", "STATUS", "PATH"])];
+        for store in &report.stores {
+            let class = match store.class {
+                StoreClass::SharedStore => "shared store",
+                StoreClass::Toolchain => "toolchain",
+            };
+            let (status, size) = match store.status {
+                StoreStatus::Present => ("present", format_bytes(store.measure.allocated_bytes)),
+                StoreStatus::Unrecognized => {
+                    ("unrecognized", format_bytes(store.measure.allocated_bytes))
+                }
+                StoreStatus::Absent => ("absent", "-".to_owned()),
+            };
+            rows.push(vec![
+                store.id.clone(),
+                class.to_owned(),
+                size,
+                status.to_owned(),
+                escape(&store.path),
+            ]);
+        }
+        write_rows(out, "", &rows, &[false, false, true, false, false])?;
+    }
+
+    if report.error_count > 0 {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "Suds could not read {} entries, so the sizes are lower bounds.",
+            report.error_count
+        )?;
+        for error in &report.errors {
+            writeln!(out, "  {}: {}", escape(&error.path), escape(&error.message))?;
+        }
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "A file with several links counts once, toward the first class that holds it. {NOTE}"
+    )
 }
 
 fn summary_row(root: &RootResult) -> Vec<String> {

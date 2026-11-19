@@ -10,13 +10,15 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
-
-# A bind mount keeps its device, so only statx's mount-root attribute marks it.
-[target.'cfg(target_os = "linux")'.dependencies]
+# The operation journal stores one JSON record per line.
+serde_json.workspace = true
+# A move opens each directory without following a link and renames an entry
+# with the kernel's no-replace flag, which the standard library lacks. On
+# Linux, statx's mount-root attribute also marks a bind mount, which keeps its
+# device.
 rustix.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

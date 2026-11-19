@@ -7,6 +7,10 @@ fn main() {
         "choose_location",
         "start_inspection",
         "cancel_inspection",
+        "create_move_plan",
+        "apply_plan",
+        "list_journal",
+        "undo_run",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("the Tauri build step failed");

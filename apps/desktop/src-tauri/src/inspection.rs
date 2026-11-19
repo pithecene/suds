@@ -1,12 +1,15 @@
 //! Inspections that run on a background thread and report each root as it
 //! completes.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Serialize;
+use suds_core::inspection::ChildScan;
 use suds_core::model::RootResult;
+use suds_core::organize::plan::MoveRequest;
 use suds_core::platform::RootSpec;
 use suds_core::scan;
 
@@ -40,12 +43,24 @@ struct Running {
     cancel: Arc<AtomicBool>,
 }
 
+/// A location's children as its most recent inspection found them. The
+/// webview names a child by its inspection, its location, and its position in
+/// the event's list, so a reference from an earlier inspection names nothing.
+struct Inspected {
+    inspection: InspectionId,
+    /// `None` until the location's scan ends.
+    children: Option<Vec<ChildScan>>,
+}
+
+type InspectedMap = Arc<Mutex<HashMap<LocationId, Inspected>>>;
+
 /// The inspection in progress, if any. A new inspection cancels the one
 /// before it, so at most one scans at a time.
 #[derive(Default)]
 pub struct Inspections {
     current: Mutex<Option<Running>>,
     started: Mutex<InspectionId>,
+    inspected: InspectedMap,
 }
 
 impl Inspections {
@@ -67,8 +82,54 @@ impl Inspections {
         }) {
             previous.cancel.store(true, Ordering::Relaxed);
         }
-        thread::spawn(move || run(id, &roots, &cancel, &send));
+        {
+            let mut inspected = lock(&self.inspected);
+            for (location, _) in &roots {
+                inspected.insert(
+                    *location,
+                    Inspected {
+                        inspection: id,
+                        children: None,
+                    },
+                );
+            }
+        }
+        let inspected = Arc::clone(&self.inspected);
+        thread::spawn(move || run(id, &roots, &cancel, &inspected, &send));
         id
+    }
+
+    /// The move requests for the children at `positions` in the result that
+    /// `inspection` reported for `location`. Each request carries the
+    /// revision that the inspection recorded.
+    pub fn requests(
+        &self,
+        inspection: InspectionId,
+        location: LocationId,
+        positions: &[u32],
+    ) -> Result<Vec<MoveRequest>, String> {
+        let inspected = lock(&self.inspected);
+        let children = inspected
+            .get(&location)
+            .filter(|entry| entry.inspection == inspection)
+            .and_then(|entry| entry.children.as_ref())
+            .ok_or_else(|| {
+                "the selection belongs to an earlier or unfinished inspection. Inspect the location again."
+                    .to_owned()
+            })?;
+        positions
+            .iter()
+            .map(|&position| {
+                usize::try_from(position)
+                    .ok()
+                    .and_then(|index| children.get(index))
+                    .map(|child| MoveRequest {
+                        name: child.name.clone(),
+                        expected: Some(child.revision),
+                    })
+                    .ok_or_else(|| format!("the inspection lists no entry at position {position}"))
+            })
+            .collect()
     }
 
     /// Requests that the given inspection stop. A request for an inspection
@@ -86,6 +147,7 @@ fn run(
     id: InspectionId,
     roots: &[(LocationId, RootSpec)],
     cancel: &AtomicBool,
+    inspected: &InspectedMap,
     send: &impl Fn(InspectionEvent),
 ) {
     for (location, spec) in roots {
@@ -93,6 +155,14 @@ fn run(
             break;
         }
         let scan = scan::scan_root(spec, cancel);
+        // The record precedes the event, so a selection from the event
+        // always resolves. A later inspection of the location replaced the
+        // record, and this run then leaves it alone.
+        if let Some(entry) = lock(inspected).get_mut(location)
+            && entry.inspection == id
+        {
+            entry.children = Some(scan.children.clone());
+        }
         send(InspectionEvent::Root {
             inspection: id,
             location: *location,
@@ -170,6 +240,32 @@ mod tests {
                 cancelled: false
             }
         );
+    }
+
+    #[test]
+    fn resolves_a_selection_only_against_the_latest_inspection() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a"), b"data").unwrap();
+        let inspections = Inspections::default();
+        let (sender, receiver) = mpsc::channel();
+        let first = inspections.start(vec![(4, spec(dir.path()))], move |event| {
+            sender.send(event).unwrap();
+        });
+        receiver.iter().take(2).for_each(drop);
+
+        let requests = inspections.requests(first, 4, &[0]).unwrap();
+        assert_eq!(requests[0].name, "a");
+        assert!(requests[0].expected.is_some());
+        assert!(inspections.requests(first, 4, &[1]).is_err());
+        assert!(inspections.requests(first, 5, &[0]).is_err());
+
+        let (sender, receiver) = mpsc::channel();
+        let second = inspections.start(vec![(4, spec(dir.path()))], move |event| {
+            sender.send(event).unwrap();
+        });
+        receiver.iter().take(2).for_each(drop);
+        assert!(inspections.requests(first, 4, &[0]).is_err());
+        assert!(inspections.requests(second, 4, &[0]).is_ok());
     }
 
     #[test]

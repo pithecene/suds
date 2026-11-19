@@ -1,8 +1,11 @@
 //! The Suds command-line interface.
 //!
-//! This release reads filesystem metadata and modifies no file.
+//! The `inspect` command reads filesystem metadata and modifies no file. The
+//! `apply` and `undo` commands move only the entries that a recorded plan
+//! names.
 
 mod cli;
+mod organize;
 mod table;
 
 use std::env;
@@ -18,7 +21,7 @@ use suds_core::model::{Report, ReportStatus};
 use suds_core::platform::{self, RootSpec};
 use suds_core::{roots, scan};
 
-use crate::cli::{Cli, Command, Format, InspectArgs};
+use crate::cli::{Cli, Command, Format, InspectArgs, PlanCommand};
 
 /// An existing root yielded a partial measurement or no measurement.
 const EXIT_PARTIAL: u8 = 1;
@@ -30,6 +33,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Inspect(args) => inspect(&args),
+        Command::Plan(PlanCommand::Move(args)) => organize::plan_move_command(&args),
+        Command::Apply(args) => organize::apply_command(&args),
+        Command::Journal(args) => organize::journal_command(&args),
+        Command::Undo(args) => organize::undo_command(&args),
     }
 }
 

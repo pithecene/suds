@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-journal"
+description = "Enables the list_journal command without any pre-configured scope."
+commands.allow = ["list_journal"]
+
+[[permission]]
+identifier = "deny-list-journal"
+description = "Denies the list_journal command without any pre-configured scope."
+commands.deny = ["list_journal"]

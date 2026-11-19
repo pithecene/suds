@@ -3,12 +3,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelInspection,
   chooseLocation,
+  createMovePlan,
   type InspectionEvent,
   listLocations,
   type Location,
+  type Plan,
   type RootResult,
   startInspection,
 } from "./api";
+import { HistorySheet } from "./HistorySheet";
+import { MoveSheet } from "./MoveSheet";
 import { RootDetail } from "./RootDetail";
 import { StatusBadge } from "./StatusBadge";
 import { formatBytes } from "./format";
@@ -16,6 +20,8 @@ import { formatBytes } from "./format";
 interface Outcome {
   result: RootResult;
   cancelled: boolean;
+  /** The inspection that produced the result, which a move selection names. */
+  inspection: number;
 }
 
 interface Run {
@@ -30,6 +36,8 @@ export function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [plan, setPlan] = useState<{ plan: Plan; location: number } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Events from a replaced inspection still arrive, so each event names its
   // inspection, and the window keeps only the current one's.
   const current = useRef<number | null>(null);
@@ -54,7 +62,11 @@ export function App() {
     }
     if (event.type === "root") {
       setOutcomes((previous) =>
-        new Map(previous).set(event.location, { result: event.result, cancelled: event.cancelled }),
+        new Map(previous).set(event.location, {
+          result: event.result,
+          cancelled: event.cancelled,
+          inspection: event.inspection,
+        }),
       );
       setRun((previous) => {
         if (previous === null) {
@@ -128,6 +140,28 @@ export function App() {
       .catch((err: unknown) => setFailure(String(err)));
   }, [inspect]);
 
+  const requestMove = useCallback((location: number, inspection: number, entries: number[]) => {
+    setFailure(null);
+    createMovePlan(inspection, location, entries)
+      .then((response) => {
+        if (response.type === "planned") {
+          setPlan({ plan: response.plan, location });
+        } else if (response.type === "refused") {
+          setFailure(response.refusals.map((refusal) => refusal.message).join(" "));
+        }
+      })
+      .catch((err: unknown) => setFailure(String(err)));
+  }, []);
+
+  // After a move or an undo, the window inspects each Downloads location
+  // again, so the table and every selection match the folder.
+  const refreshInboxes = useCallback(() => {
+    const ids = locations.filter((location) => location.kind === "inbox").map((location) => location.id);
+    if (ids.length > 0) {
+      inspect(ids);
+    }
+  }, [locations, inspect]);
+
   const cancel = useCallback(() => {
     if (run !== null) {
       cancelInspection(run.id).catch((err: unknown) => setFailure(String(err)));
@@ -154,6 +188,9 @@ export function App() {
           </button>
           <button type="button" onClick={addFolder}>
             Add Folder…
+          </button>
+          <button type="button" onClick={() => setHistoryOpen(true)}>
+            History
           </button>
         </div>
       </header>
@@ -211,10 +248,20 @@ export function App() {
               scanning={run?.pending.has(selectedLocation.id) ?? false}
               busy={run !== null}
               onInspect={() => inspect([selectedLocation.id])}
+              selectable={selectedLocation.kind === "inbox"}
+              onMove={(entries) => {
+                if (selectedOutcome !== undefined) {
+                  requestMove(selectedLocation.id, selectedOutcome.inspection, entries);
+                }
+              }}
             />
           )}
         </main>
       </div>
+      {plan !== null && (
+        <MoveSheet plan={plan.plan} onChanged={refreshInboxes} onClose={() => setPlan(null)} />
+      )}
+      {historyOpen && <HistorySheet onChanged={refreshInboxes} onClose={() => setHistoryOpen(false)} />}
     </div>
   );
 }

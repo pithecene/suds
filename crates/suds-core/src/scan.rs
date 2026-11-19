@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::inspection::{ChildScan, RootScan, ScanError};
+use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
 use crate::timestamp;
@@ -120,17 +120,18 @@ fn walk_root(root: &Path, cancel: &AtomicBool) -> Outcome {
                 break;
             }
             let mut tally = Tally::default();
-            let kind = walker.walk(&root.join(&name), &mut tally, cancel);
+            let visited = walker.walk(&root.join(&name), &mut tally, cancel);
             // A cancellation during the child's walk leaves its measure short,
             // so the result omits that child rather than list a wrong figure.
             if walker.cancelled {
                 break;
             }
-            if let Some(kind) = kind {
+            if let Some(revision) = visited {
                 totals.add(&tally);
                 children.push(ChildScan {
                     name,
-                    kind,
+                    kind: revision.kind,
+                    revision,
                     measure: tally.into_measure(),
                 });
             }
@@ -152,6 +153,34 @@ fn walk_root(root: &Path, cancel: &AtomicBool) -> Outcome {
         RootStatus::Partial
     };
     (status, walker, totals.into_measure(), children)
+}
+
+/// The measurement of one entry and everything beneath it, as a move plan
+/// shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryMeasure {
+    pub measure: Measure,
+    pub skipped_mount_count: u64,
+    pub error_count: u64,
+    /// The first traversal errors, in traversal order.
+    pub errors: Vec<ScanError>,
+}
+
+/// Measures the entry at `path`, which lies on `device`, with the same rules
+/// as a root's direct child.
+pub fn measure_entry(path: &Path, device: u64) -> EntryMeasure {
+    let mut walker = Walker::new(device);
+    let mut tally = Tally::default();
+    // A plan measures only the entries that a person selected, so the
+    // measurement runs to its end.
+    let never = AtomicBool::new(false);
+    walker.walk(path, &mut tally, &never);
+    EntryMeasure {
+        measure: tally.into_measure(),
+        skipped_mount_count: walker.mount_count,
+        error_count: walker.error_count,
+        errors: walker.errors,
+    }
 }
 
 /// The state that persists across one root's traversal.
@@ -183,11 +212,16 @@ impl Walker {
     }
 
     /// Adds the sums for the entry at `start` and everything beneath it to
-    /// `tally`. The function returns the entry's type, or `None` when the scan
-    /// cannot measure the entry or the entry lies on another filesystem.
-    fn walk(&mut self, start: &Path, tally: &mut Tally, cancel: &AtomicBool) -> Option<EntryKind> {
-        let kind = self.visit(start, tally)?;
-        if kind == EntryKind::Directory {
+    /// `tally`. The function returns the entry's revision, or `None` when the
+    /// scan cannot measure the entry or the entry lies on another filesystem.
+    fn walk(
+        &mut self,
+        start: &Path,
+        tally: &mut Tally,
+        cancel: &AtomicBool,
+    ) -> Option<EntryRevision> {
+        let revision = self.visit(start, tally)?;
+        if revision.kind == EntryKind::Directory {
             // The listings arrive sorted, and the traversal pushes subdirectories
             // onto the stack in reverse order, so the traversal order, and with
             // it the sampled errors and hard-link attribution, depends only on
@@ -210,18 +244,19 @@ impl Walker {
                         break;
                     }
                     let path = dir.join(name);
-                    if self.visit(&path, tally) == Some(EntryKind::Directory) {
+                    let visited = self.visit(&path, tally);
+                    if visited.is_some_and(|revision| revision.kind == EntryKind::Directory) {
                         subdirs.push(path);
                     }
                 }
                 pending.extend(subdirs.into_iter().rev());
             }
         }
-        Some(kind)
+        Some(revision)
     }
 
     /// Measures one entry without descending into it.
-    fn visit(&mut self, path: &Path, tally: &mut Tally) -> Option<EntryKind> {
+    fn visit(&mut self, path: &Path, tally: &mut Tally) -> Option<EntryRevision> {
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -255,7 +290,7 @@ impl Walker {
             || meta.nlink() <= 1
             || self.linked.insert((meta.dev(), meta.ino()));
         tally.count(kind, &meta, counts_storage);
-        Some(kind)
+        Some(EntryRevision::from_metadata(&meta))
     }
 
     /// Lists a directory's entry names in byte order.
@@ -322,7 +357,7 @@ fn is_mount_root(_path: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
-fn entry_kind(file_type: FileType) -> EntryKind {
+pub(crate) fn entry_kind(file_type: FileType) -> EntryKind {
     if file_type.is_dir() {
         EntryKind::Directory
     } else if file_type.is_file() {

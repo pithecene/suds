@@ -212,16 +212,22 @@ button:focus-visible {
   border: 1px solid currentColor;
 }
 
-.badge-complete {
+.badge-complete,
+.badge-applied,
+.badge-reversed {
   color: var(--ok);
 }
 
 .badge-partial,
-.badge-cancelled {
+.badge-cancelled,
+.badge-not_applied,
+.badge-not_started {
   color: var(--warn);
 }
 
-.badge-unreadable {
+.badge-unreadable,
+.badge-refused,
+.badge-unresolved {
   color: var(--bad);
 }
 
@@ -291,4 +297,108 @@ section h3 {
   color: var(--muted);
   font-size: 12px;
   max-width: 70ch;
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0 8px;
+}
+
+.children .check {
+  width: 28px;
+}
+
+.children tr.chosen td {
+  background: var(--selected);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.sheet {
+  width: min(760px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 20px 24px;
+}
+
+.sheet::backdrop {
+  background: rgb(0 0 0 / 0.3);
+}
+
+.sheet h2 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.plan-paths {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0 0 12px;
+}
+
+.plan-paths dt {
+  color: var(--muted);
+}
+
+.plan-paths dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.conditions,
+.outcomes,
+.history {
+  padding-left: 18px;
+}
+
+.outcomes .path {
+  word-break: break-all;
+}
+
+.outcomes p {
+  margin: 2px 0 6px;
+}
+
+.history {
+  list-style: none;
+  padding-left: 0;
+}
+
+.history > li {
+  border-bottom: 1px solid var(--rule);
+  padding: 8px 0;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
 }

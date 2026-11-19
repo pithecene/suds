@@ -17,9 +17,13 @@ counts, and its largest direct children. The command writes a terminal
 table or one JSON document, and the desktop application shows the same
 measurements in a window.
 
+The `suds inspect --profile development` command finds each Git checkout
+beneath the directories that the caller names. It reports each checkout,
+the build output beneath it, and each shared store and toolchain, as
+[Development Profile](#development-profile) describes.
+
 The release deletes, quarantines, copies, rewrites, installs, and repairs
-nothing. It interprets no package manager's state and calls no external
-program. Its only state between runs is the operation journal that
+nothing. It calls no external program. Its only state between runs is the operation journal that
 [Moves](#moves) describes. [AGENTS.md](AGENTS.md) states the rules that
 bind any operation that changes a file: an inspectable plan, stated
 preconditions, and a journal entry. In Suds, optimization means a measured
@@ -56,9 +60,10 @@ lists each refusal in the report.
 
 ## Linux
 
-On Linux, Suds requires each root as an argument, as in
-`suds inspect --root ~/.cache`. Linux has no default profile, so
-`suds inspect` without `--root` exits with status 2.
+On Linux, the storage profile requires each root as an argument, as in
+`suds inspect --root ~/.cache`. It has no default roots there, so
+`suds inspect` without `--root` exits with status 2. The development
+profile needs no root on either system.
 
 ## Desktop Application
 
@@ -129,6 +134,72 @@ children follow, ranked by allocated size, then by logical size, then by
 name. The table escapes each control character in a name, a path, or an
 error message, so a file's name cannot rewrite the terminal. The JSON
 document keeps every name unchanged.
+
+## Development Profile
+
+```sh
+suds inspect --profile development --root ~/workspace
+suds inspect --profile development --root ~/workspace --format json
+suds inspect --profile development      # the stores and toolchains alone
+```
+
+Each `--root` names a directory beneath which Suds looks for checkouts. The
+profile works on macOS and on Linux. It writes a terminal table or one
+`suds.development/v1` document, and it changes nothing.
+
+Each class rests on proof from its program's own layout, and a name alone
+proves none:
+
+| Class | Proof |
+| :--- | :--- |
+| Main checkout | A directory whose `.git` is a directory |
+| Linked checkout | A directory whose `.git` file names an entry of a main checkout's `worktrees` directory |
+| Cargo build state | A `target` directory that holds `CACHEDIR.TAG`, beside a `Cargo.toml` |
+| Node build state | A `node_modules` directory beside a `package.json` or a `pnpm-workspace.yaml`, or one that holds the state file of pnpm or npm |
+| CMake build state | A directory that holds `CMakeCache.txt` |
+| vcpkg build state | A `vcpkg_installed` directory beside a `vcpkg.json` |
+| vcpkg checkout | A directory that holds `.vcpkg-root` |
+
+Suds claims build state only beneath a checkout, so build output that no
+checkout owns stays unclassified. A submodule stays a part of its parent
+checkout. A checkout's own size leaves out its build state and each
+checkout beneath it.
+
+The profile then measures each shared store and toolchain directory at the
+location that its program documents: the program's own variable first, and
+its default beneath the home directory otherwise.
+
+| Identifier | Variable | Default on Linux |
+| :--- | :--- | :--- |
+| `go.build-cache` | `GOCACHE` | `~/.cache/go-build` |
+| `go.module-cache` | `GOMODCACHE`, `GOPATH` | `~/go/pkg/mod` |
+| `cargo.registry` | `CARGO_HOME` | `~/.cargo/registry` |
+| `pnpm.store` | `PNPM_HOME`, `XDG_DATA_HOME` | `~/.local/share/pnpm/store` |
+| `sccache.cache` | `SCCACHE_DIR` | `~/.cache/sccache` |
+| `ccache.cache` | `CCACHE_DIR` | `~/.cache/ccache` |
+| `vcpkg.binary-cache` | `VCPKG_DEFAULT_BINARY_CACHE` | `~/.cache/vcpkg/archives` |
+| `mise.installs` | `MISE_DATA_DIR` | `~/.local/share/mise/installs` |
+
+On macOS, the cache directory is `~/Library/Caches`, pnpm's store lies in
+`~/Library/pnpm/store`, and sccache's cache lies in
+`~/Library/Caches/Mozilla.sccache`. A store is `present` when its directory
+exists, `absent` when none exists, and `unrecognized` when a directory
+exists without the entry that its program writes there. A store is
+`unreadable` when Suds cannot examine its location, or when a symbolic link
+stands on its path beneath the home directory. Suds follows no such link,
+and the report's errors name the path.
+
+A root may be a mount point, and Suds enters no mount point beneath a root.
+When one root lies beneath another, Suds inspects the outer root alone, so
+no checkout counts twice.
+
+A file with several links counts once, toward the first class that reaches
+it. The checkouts come before the stores, so the checkouts' sizes sum to
+the figure that `du` reports for the same directories.
+
+The profile reads the content of one file in each linked checkout. The
+checkout's `.git` file holds one line that names its repository, and Suds
+reads that line.
 
 ## JSON Output
 
@@ -257,8 +328,9 @@ what it found at each path.
 ## Safety Properties
 
 - Suds sends no telemetry and makes no network request.
-- Suds reads metadata and directory listings. It never opens a regular file
-  and reads no extended attribute.
+- Suds reads metadata and directory listings, and it reads no extended
+  attribute. The development profile opens the `.git` file of each linked
+  checkout, and no other inspection opens a regular file.
 - Suds never requests elevated privileges.
 - Suds moves an entry only through a recorded plan, and it deletes,
   copies, and overwrites nothing.

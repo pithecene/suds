@@ -108,6 +108,12 @@ pub struct InspectArgs {
     #[arg(long, value_enum, default_value_t = Format::Table)]
     pub format: Format,
 
+    /// The profile. The storage profile measures each root. The development
+    /// profile finds the checkouts beneath each root and measures them with
+    /// their build state, and it measures each shared store and toolchain.
+    #[arg(long, value_enum, default_value_t = Profile::Storage)]
+    pub profile: Profile,
+
     /// A root to inspect in place of the default profile. Repeat the option
     /// for several roots.
     #[arg(long = "root", value_name = "PATH")]
@@ -117,6 +123,12 @@ pub struct InspectArgs {
     /// JSON output lists every child.
     #[arg(long, value_name = "N", default_value_t = 10)]
     pub top: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Profile {
+    Storage,
+    Development,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

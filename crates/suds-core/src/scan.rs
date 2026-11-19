@@ -183,6 +183,80 @@ pub fn measure_entry(path: &Path, device: u64) -> EntryMeasure {
     }
 }
 
+/// One traversal that several measurements share. A regular file with
+/// several links counts toward the first measurement that reaches it, so the
+/// measurements of one scan sum to the storage that their trees occupy.
+pub struct SharedScan {
+    walker: Walker,
+}
+
+/// One measurement of a shared scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedMeasure {
+    /// The entry and everything beneath it, without the directories that the
+    /// measurement set aside.
+    pub measure: Measure,
+    /// Each directory that the caller's boundary claimed, in traversal order.
+    /// The measurement neither counted nor entered it.
+    pub set_aside: Vec<PathBuf>,
+}
+
+impl Default for SharedScan {
+    fn default() -> Self {
+        SharedScan {
+            walker: Walker::new(0),
+        }
+    }
+}
+
+impl SharedScan {
+    /// Measures the entry at `start` and everything beneath it on its
+    /// filesystem. The measurement asks `boundary` about each directory
+    /// beneath `start` and sets aside each one that the boundary claims. It
+    /// returns `None` when it cannot measure `start` itself.
+    pub fn measure(
+        &mut self,
+        start: &Path,
+        boundary: &mut dyn FnMut(&Path) -> bool,
+    ) -> Option<BoundedMeasure> {
+        match fs::symlink_metadata(start) {
+            Ok(meta) => self.walker.device = meta.dev(),
+            Err(err) => {
+                self.walker.record_error(start, &err);
+                return None;
+            }
+        }
+        let mut tally = Tally::default();
+        let mut set_aside = Vec::new();
+        let never = AtomicBool::new(false);
+        self.walker
+            .walk_within(start, &mut tally, &never, Some(boundary), &mut set_aside)?;
+        Some(BoundedMeasure {
+            measure: tally.into_measure(),
+            set_aside,
+        })
+    }
+
+    /// Records that the caller could not examine `path`, so the scan's
+    /// errors name every path that an inspection could not read.
+    pub fn record_error(&mut self, path: &Path, err: &io::Error) {
+        self.walker.record_error(path, err);
+    }
+
+    pub fn error_count(&self) -> u64 {
+        self.walker.error_count
+    }
+
+    /// The first traversal errors, in traversal order.
+    pub fn errors(&self) -> &[ScanError] {
+        &self.walker.errors
+    }
+
+    pub fn skipped_mount_count(&self) -> u64 {
+        self.walker.mount_count
+    }
+}
+
 /// The state that persists across one root's traversal.
 struct Walker {
     /// The root's device, which bounds the traversal to one filesystem.
@@ -220,7 +294,23 @@ impl Walker {
         tally: &mut Tally,
         cancel: &AtomicBool,
     ) -> Option<EntryRevision> {
-        let revision = self.visit(start, tally)?;
+        self.walk_within(start, tally, cancel, None, &mut Vec::new())
+    }
+
+    /// Walks as `walk` does, and sets aside each directory beneath `start`
+    /// that `boundary` claims, without counting or entering it.
+    fn walk_within(
+        &mut self,
+        start: &Path,
+        tally: &mut Tally,
+        cancel: &AtomicBool,
+        mut boundary: Option<&mut dyn FnMut(&Path) -> bool>,
+        set_aside: &mut Vec<PathBuf>,
+    ) -> Option<EntryRevision> {
+        // A bounded measurement starts where its caller chose, so its start
+        // may be a mount point. A mount point beneath the start still ends
+        // the traversal there.
+        let revision = self.visit_entry(start, tally, boundary.is_some())?;
         if revision.kind == EntryKind::Directory {
             // The listings arrive sorted, and the traversal pushes subdirectories
             // onto the stack in reverse order, so the traversal order, and with
@@ -244,6 +334,13 @@ impl Walker {
                         break;
                     }
                     let path = dir.join(name);
+                    if let Some(boundary) = boundary.as_deref_mut()
+                        && self.is_directory_here(&path)
+                        && boundary(&path)
+                    {
+                        set_aside.push(path);
+                        continue;
+                    }
                     let visited = self.visit(&path, tally);
                     if visited.is_some_and(|revision| revision.kind == EntryKind::Directory) {
                         subdirs.push(path);
@@ -255,8 +352,27 @@ impl Walker {
         Some(revision)
     }
 
+    /// Whether `path` is a directory of the scanned filesystem and no mount
+    /// point. The visit that follows counts a mount point as skipped, so no
+    /// boundary sets one aside.
+    fn is_directory_here(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.dev() == self.device)
+            && matches!(is_mount_root(path), Ok(false))
+    }
+
     /// Measures one entry without descending into it.
     fn visit(&mut self, path: &Path, tally: &mut Tally) -> Option<EntryRevision> {
+        self.visit_entry(path, tally, false)
+    }
+
+    /// Measures one entry as `visit` does. With `chosen`, the entry is the
+    /// start that a caller named, which may be a mount point.
+    fn visit_entry(
+        &mut self,
+        path: &Path,
+        tally: &mut Tally,
+        chosen: bool,
+    ) -> Option<EntryRevision> {
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -265,8 +381,8 @@ impl Walker {
             }
         };
         let kind = entry_kind(meta.file_type());
-        let mut mount = meta.dev() != self.device;
-        if !mount && kind == EntryKind::Directory {
+        let mut mount = !chosen && meta.dev() != self.device;
+        if !chosen && !mount && kind == EntryKind::Directory {
             // A failed check leaves the entry unmeasured and the root partial,
             // because the scan cannot rule out a mount boundary.
             match is_mount_root(path) {

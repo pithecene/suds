@@ -16,12 +16,13 @@ use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use suds_core::development::{self, Environment};
 use suds_core::inspection::{RootScan, build_report};
 use suds_core::model::{Report, ReportStatus};
 use suds_core::platform::{self, RootSpec};
 use suds_core::{roots, scan};
 
-use crate::cli::{Cli, Command, Format, InspectArgs, PlanCommand};
+use crate::cli::{Cli, Command, Format, InspectArgs, PlanCommand, Profile};
 
 /// An existing root yielded a partial measurement or no measurement.
 const EXIT_PARTIAL: u8 = 1;
@@ -41,6 +42,9 @@ fn main() -> ExitCode {
 }
 
 fn inspect(args: &InspectArgs) -> ExitCode {
+    if args.profile == Profile::Development {
+        return inspect_development(args);
+    }
     let roots = match resolve_roots(&args.roots) {
         Ok(roots) => roots,
         Err(message) => {
@@ -48,11 +52,7 @@ fn inspect(args: &InspectArgs) -> ExitCode {
             return ExitCode::from(EXIT_INVOCATION);
         }
     };
-    let observed_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        });
+    let observed_at = now_seconds();
     // The `suds` command accepts no cancellation request, so this
     // cancellation flag stays false.
     let never = AtomicBool::new(false);
@@ -67,14 +67,54 @@ fn inspect(args: &InspectArgs) -> ExitCode {
         Format::Table => table::write(&mut out, &report, args.top),
         Format::Json => write_json(&mut out, &report),
     };
-    if let Err(err) = written.and_then(|()| out.flush()) {
+    finish(written.and_then(|()| out.flush()), report.status)
+}
+
+/// Inspects the development profile. Each root is a directory beneath which
+/// Suds looks for checkouts, and no root leaves the stores alone to report.
+fn inspect_development(args: &InspectArgs) -> ExitCode {
+    let workspaces: Vec<PathBuf> = if args.roots.is_empty() {
+        Vec::new()
+    } else {
+        match resolve_roots(&args.roots) {
+            Ok(roots) => roots.into_iter().map(|root| root.path).collect(),
+            Err(message) => {
+                eprintln!("suds: {message}");
+                return ExitCode::from(EXIT_INVOCATION);
+            }
+        }
+    };
+    let observed_at = now_seconds();
+    let scan = development::inspect(&workspaces, &Environment::of_process());
+    let report = development::build_report(&scan, observed_at);
+
+    let mut out = io::stdout().lock();
+    let written = match args.format {
+        Format::Table => table::write_development(&mut out, &report),
+        Format::Json => serde_json::to_writer_pretty(&mut out, &report)
+            .map_err(io::Error::from)
+            .and_then(|()| writeln!(out)),
+    };
+    finish(written.and_then(|()| out.flush()), report.status)
+}
+
+fn finish(written: io::Result<()>, status: ReportStatus) -> ExitCode {
+    if let Err(err) = written {
         eprintln!("suds: failed to write the report: {err}");
         return ExitCode::from(EXIT_INVOCATION);
     }
-    match report.status {
+    match status {
         ReportStatus::Complete => ExitCode::SUCCESS,
         ReportStatus::Partial => ExitCode::from(EXIT_PARTIAL),
     }
+}
+
+fn now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 fn resolve_roots(paths: &[PathBuf]) -> Result<Vec<RootSpec>, String> {

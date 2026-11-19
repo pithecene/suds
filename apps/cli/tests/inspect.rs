@@ -515,3 +515,41 @@ fn macos_default_profile_follows_no_link_beneath_the_home_directory() {
         home.path().join("Library").to_str().unwrap()
     );
 }
+
+#[test]
+fn the_development_profile_reports_a_checkout_and_its_build_state() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    write(&repo.join(".git/HEAD"), 10);
+    write(&repo.join("Cargo.toml"), 20);
+    write(&repo.join("target/CACHEDIR.TAG"), 43);
+    write(&repo.join("target/debug/app"), 500);
+
+    // The profile locates each store through the environment, so the test
+    // gives the command an empty home and no other variable.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_suds"))
+            .args(["inspect", "--profile", "development", "--root"])
+            .arg(&repo)
+            .args(args)
+            .env_clear()
+            .env("HOME", dir.path().join("home"))
+            .output()
+            .expect("run suds")
+    };
+    let output = run(&["--format", "json"]);
+    let report: Value = serde_json::from_slice(&output.stdout).expect("parse report");
+    assert_eq!(report["schema"], "suds.development/v1");
+    let checkout = &report["checkouts"][0];
+    assert_eq!(checkout["kind"], "main");
+    assert_eq!(checkout["own"]["logical_bytes"], 30);
+    assert_eq!(checkout["build_state"][0]["ecosystem"], "cargo");
+    assert_eq!(checkout["build_state"][0]["logical_bytes"], 543);
+
+    assert_eq!(report["stores"][0]["status"], "absent");
+
+    let table = run(&[]);
+    let text = String::from_utf8(table.stdout).unwrap();
+    assert!(text.contains("build state"), "{text}");
+    assert!(text.contains("go.build-cache"), "{text}");
+}

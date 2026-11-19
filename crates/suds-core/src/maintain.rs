@@ -124,6 +124,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         budgets: &budgets,
         programs: context.programs,
         engine: &engine,
+        builder_budget_option: stores::builder_budget_option(&context.programs.docker),
         idle_seconds,
         now: context.now,
     };

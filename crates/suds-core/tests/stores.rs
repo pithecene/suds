@@ -95,7 +95,7 @@ fn every_store() -> DevelopmentScan {
         store("go.build-cache", Ecosystem::Go, 82, present),
         store("go.module-cache", Ecosystem::Go, 11, present),
         store("pnpm.store", Ecosystem::Pnpm, 14, present),
-        store("ccache.cache", Ecosystem::Ccache, 6, present),
+        store("ccache.cache", Ecosystem::Ccache, 12, present),
         store("mise.installs", Ecosystem::Mise, 33, present),
         store("cargo.registry", Ecosystem::Cargo, 50, present),
         store("sccache.cache", Ecosystem::Sccache, 1, StoreStatus::Absent),
@@ -221,7 +221,7 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
             "go clean -cache | GOCACHE=/stores/go.build-cache | /".to_owned(),
             "go clean -modcache | GOMODCACHE=/stores/go.module-cache | /".to_owned(),
             "pnpm store prune --store-dir /stores/pnpm.store | | /".to_owned(),
-            "ccache --trim-dir /stores/ccache.cache --trim-max-size 5242880Ki | | /".to_owned(),
+            "ccache --trim-dir /stores/ccache.cache --trim-max-size 10485760Ki | | /".to_owned(),
             "mise prune --yes | MISE_DATA_DIR=/stores | /".to_owned(),
             "docker image prune --all --force | | /".to_owned(),
             format!("docker builder prune --force --keep-storage {cache_budget} | | /"),
@@ -238,7 +238,7 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
         .map(|trim| trim.store.as_str())
         .collect();
     assert_eq!(failed, ["pnpm.store"]);
-    assert_eq!(report.freed_bytes, (72 + 1 + 1 + 13 + 114 + 3 + 39) * GIB);
+    assert_eq!(report.freed_bytes, (72 + 1 + 2 + 13 + 114 + 3 + 39) * GIB);
 
     let summaries = JournalState::from_records(&read(&journal_dir).unwrap()).summaries();
     assert_eq!(summaries.len(), 1);
@@ -278,6 +278,8 @@ fn audits_the_engine_when_it_does_not_answer() {
     );
     assert_eq!(plan.entries.len(), 1);
     assert!(matches!(plan.entries[0].decision, Decision::Audit { .. }));
+    // A store that Suds could not measure states no size.
+    assert_eq!(plan.entries[0].measured_bytes, None);
 }
 
 #[test]
@@ -360,7 +362,7 @@ fn a_command_receives_the_bytes_of_a_path_that_is_not_utf8() {
     let mut scanned = scan(vec![store(
         "ccache.cache",
         Ecosystem::Ccache,
-        6,
+        12,
         StoreStatus::Present,
     )]);
     scanned.stores[0].path.clone_from(&store_path);

@@ -73,7 +73,9 @@ fn plan_row(entry: &Entry) -> Vec<String> {
         .map_or_else(|| "-".to_owned(), format_bytes);
     vec![
         entry.id.clone(),
-        format_bytes(entry.measured_bytes),
+        entry
+            .measured_bytes
+            .map_or_else(|| "-".to_owned(), format_bytes),
         budget,
         decision.to_owned(),
         escape(&detail),

@@ -140,6 +140,23 @@ pub struct Observed<'a> {
     pub registry: &'a Reading,
 }
 
+impl Kept {
+    /// The reason as the plan's JSON names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Kept::InUse => "in_use",
+            Kept::RecentlyModified => "recently_modified",
+            Kept::UncommittedChanges => "uncommitted_changes",
+            Kept::UnpushedCommits => "unpushed_commits",
+            Kept::TrackedFiles => "tracked_files",
+            Kept::HoldsCheckout => "holds_checkout",
+            Kept::HoldsMountPoint => "holds_mount_point",
+            Kept::Registered => "registered",
+            Kept::Unverified => "unverified",
+        }
+    }
+}
+
 /// Plans the removal of the derived state that `scan` found. A failure to
 /// read the processes' working directories keeps every candidate. A
 /// checkout that a client released comes first, and the plan considers it

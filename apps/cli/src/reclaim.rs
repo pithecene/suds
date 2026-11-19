@@ -9,7 +9,7 @@ use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
-use suds_core::reclaim::plan::{Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
+use suds_core::reclaim::plan::{Candidate, Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
 use suds_core::registry::{self, Reading, Standings};
 use suds_core::state::Directories;
 
@@ -92,7 +92,7 @@ fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {
             candidate.subject.label().to_owned(),
             format_bytes(candidate.allocated_bytes),
             escape(&candidate.path.display()),
-            escape(candidate.evidence.last().map_or("", String::as_str)),
+            escape(&reason(candidate)),
         ]);
     }
     write_rows(out, "", &rows, &[false, false, true, false, false])?;
@@ -102,6 +102,17 @@ fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {
         "The plan removes {removable} directories and frees about {}. Suds changed nothing. Run the command with --apply to remove them.",
         format_bytes(plan.removable_bytes())
     )
+}
+
+/// Why the plan decided as it did: the last fact of its evidence, behind
+/// the reason's name for a kept candidate. A kept candidate's last fact is
+/// the keeping one.
+fn reason(candidate: &Candidate) -> String {
+    let fact = candidate.evidence.last().map_or("", String::as_str);
+    match candidate.kept {
+        Some(kept) => format!("{}: {fact}", kept.label()),
+        None => fact.to_owned(),
+    }
 }
 
 fn write_report(out: &mut impl Write, report: &ReclaimReport) -> io::Result<()> {

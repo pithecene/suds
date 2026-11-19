@@ -237,6 +237,12 @@ impl SharedScan {
         })
     }
 
+    /// Records that the caller could not examine `path`, so the scan's
+    /// errors name every path that an inspection could not read.
+    pub fn record_error(&mut self, path: &Path, err: &io::Error) {
+        self.walker.record_error(path, err);
+    }
+
     pub fn error_count(&self) -> u64 {
         self.walker.error_count
     }
@@ -301,7 +307,10 @@ impl Walker {
         mut boundary: Option<&mut dyn FnMut(&Path) -> bool>,
         set_aside: &mut Vec<PathBuf>,
     ) -> Option<EntryRevision> {
-        let revision = self.visit(start, tally)?;
+        // A bounded measurement starts where its caller chose, so its start
+        // may be a mount point. A mount point beneath the start still ends
+        // the traversal there.
+        let revision = self.visit_entry(start, tally, boundary.is_some())?;
         if revision.kind == EntryKind::Directory {
             // The listings arrive sorted, and the traversal pushes subdirectories
             // onto the stack in reverse order, so the traversal order, and with
@@ -326,7 +335,7 @@ impl Walker {
                     }
                     let path = dir.join(name);
                     if let Some(boundary) = boundary.as_deref_mut()
-                        && fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir())
+                        && self.is_directory_here(&path)
                         && boundary(&path)
                     {
                         set_aside.push(path);
@@ -343,8 +352,27 @@ impl Walker {
         Some(revision)
     }
 
+    /// Whether `path` is a directory of the scanned filesystem and no mount
+    /// point. The visit that follows counts a mount point as skipped, so no
+    /// boundary sets one aside.
+    fn is_directory_here(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.dev() == self.device)
+            && matches!(is_mount_root(path), Ok(false))
+    }
+
     /// Measures one entry without descending into it.
     fn visit(&mut self, path: &Path, tally: &mut Tally) -> Option<EntryRevision> {
+        self.visit_entry(path, tally, false)
+    }
+
+    /// Measures one entry as `visit` does. With `chosen`, the entry is the
+    /// start that a caller named, which may be a mount point.
+    fn visit_entry(
+        &mut self,
+        path: &Path,
+        tally: &mut Tally,
+        chosen: bool,
+    ) -> Option<EntryRevision> {
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -353,8 +381,8 @@ impl Walker {
             }
         };
         let kind = entry_kind(meta.file_type());
-        let mut mount = meta.dev() != self.device;
-        if !mount && kind == EntryKind::Directory {
+        let mut mount = !chosen && meta.dev() != self.device;
+        if !chosen && !mount && kind == EntryKind::Directory {
             // A failed check leaves the entry unmeasured and the root partial,
             // because the scan cannot rule out a mount boundary.
             match is_mount_root(path) {

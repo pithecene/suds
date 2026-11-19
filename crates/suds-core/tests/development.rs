@@ -249,3 +249,90 @@ fn a_workspace_that_does_not_exist_makes_the_report_partial() {
     assert!(!scan.workspaces[0].measured);
     assert_eq!(build_report(&scan, 0).status, ReportStatus::Partial);
 }
+
+#[test]
+fn follows_no_symbolic_link_on_a_store_path_beneath_the_home_directory() {
+    let fixture = Fixture::new();
+    let outside = fixture.home.parent().unwrap().join("outside");
+    write(&outside.join("registry/secret"), 99);
+    std::os::unix::fs::symlink(&outside, fixture.home.join(".cargo")).unwrap();
+
+    let scan = inspect(&[], &fixture.environment());
+    let registry = scan
+        .stores
+        .iter()
+        .find(|store| store.id == "cargo.registry")
+        .unwrap();
+    assert_eq!(registry.status, StoreStatus::Unreadable);
+    assert_eq!(registry.measure.logical_bytes, 0);
+    assert_eq!(scan.error_count, 1);
+    assert_eq!(scan.errors[0].path, fixture.home.join(".cargo/registry"));
+    assert_eq!(build_report(&scan, 0).status, ReportStatus::Partial);
+}
+
+#[test]
+fn reports_a_store_that_it_cannot_examine_as_unreadable() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let fixture = Fixture::new();
+    let data = fixture.home.join(".local");
+    // The superuser searches every directory, so the test holds only for
+    // an ordinary user.
+    if fs::symlink_metadata(&data).unwrap().uid() == 0 {
+        return;
+    }
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o000)).unwrap();
+    let scan = inspect(&[], &fixture.environment());
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mise = scan
+        .stores
+        .iter()
+        .find(|store| store.id == "mise.installs")
+        .unwrap();
+    assert_eq!(mise.status, StoreStatus::Unreadable);
+    assert!(scan.error_count >= 1);
+}
+
+#[test]
+fn inspects_overlapping_roots_once() {
+    let fixture = Fixture::new();
+    let repo = fixture.workspace.join("repo");
+    let once = fixture.scan();
+    let twice = inspect(
+        &[
+            fixture.workspace.clone(),
+            repo.clone(),
+            fixture.workspace.clone(),
+        ],
+        &fixture.environment(),
+    );
+    assert_eq!(twice.workspaces.len(), 1);
+    assert_eq!(twice.checkouts, once.checkouts);
+
+    // A checkout that two inner roots reach still counts once.
+    let inner = inspect(
+        &[repo.clone(), repo.join(".claude/worktrees")],
+        &fixture.environment(),
+    );
+    assert_eq!(inner.checkouts.len(), 2);
+}
+
+#[test]
+fn locates_the_pnpm_store_beneath_its_home_variable() {
+    let fixture = Fixture::new();
+    let pnpm = fixture.home.join("pnpm-home");
+    write(&pnpm.join("store/v10/index"), 7);
+    let mut environment = fixture.environment();
+    environment
+        .variables
+        .insert("PNPM_HOME".to_owned(), pnpm.clone().into_os_string());
+    let scan = inspect(&[], &environment);
+    let store = scan
+        .stores
+        .iter()
+        .find(|store| store.id == "pnpm.store")
+        .unwrap();
+    assert_eq!(store.path, pnpm.join("store"));
+    assert_eq!(store.status, StoreStatus::Present);
+}

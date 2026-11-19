@@ -110,6 +110,7 @@ pub fn write_development(out: &mut impl Write, report: &DevelopmentReport) -> io
                     ("unrecognized", format_bytes(store.measure.allocated_bytes))
                 }
                 StoreStatus::Absent => ("absent", "-".to_owned()),
+                StoreStatus::Unreadable => ("unreadable", "-".to_owned()),
             };
             rows.push(vec![
                 store.id.clone(),

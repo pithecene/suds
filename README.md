@@ -182,8 +182,8 @@ The `apply` command accepts only a plan that `suds plan` or the desktop
 application built and recorded in the journal, unchanged, and each plan
 runs once. Immediately before each move, Suds verifies the entry's
 recorded identity, the identity and canonical path of both directories,
-and that the destination is free. It refuses an entry that holds the
-journal directory. It then renames the entry with the
+and that the destination is free, and it refuses an entry that holds the
+journal directory. Suds then renames the entry with the
 kernel's no-replace flag, so the move is atomic and overwrites nothing.
 After the rename, Suds confirms that the destination holds the planned
 entry. When another process swapped the source in the meantime, Suds

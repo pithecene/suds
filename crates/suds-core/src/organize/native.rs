@@ -4,7 +4,7 @@
 //! and the journal record each path's bytes in hexadecimal beside a display
 //! string. Only the bytes name a file. Reading a document checks that the
 //! display string matches the bytes, so an edited display string cannot
-//! misdescribe the path that an operation acts on.
+//! misdescribe an operation's path.
 
 use std::ffi::OsString;
 use std::fmt;

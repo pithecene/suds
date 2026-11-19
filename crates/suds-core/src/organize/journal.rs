@@ -1,16 +1,11 @@
-//! The append-only operation journal.
-//!
-//! The journal is the only state that Suds keeps between runs. It holds one
-//! JSON record per line in `journal.jsonl`, and Suds never rewrites or
-//! removes a record. Every move writes a record before its rename and another
-//! after it, so the next run can tell whether an interrupted rename happened.
-//! An exclusive lock on `journal.lock` keeps two processes from writing at
-//! once.
-//!
-//! A record ends with a line feed, and one write holds the whole line. Bytes
-//! after the last line feed are therefore the remains of an append that an
-//! interruption or a full disk cut short. They form no record, so a reader
-//! sets them aside and a writer removes them before its first append.
+//! The append-only operation journal, the only state that Suds keeps
+//! between runs. The file `journal.jsonl` holds one JSON record on each line,
+//! and Suds never rewrites or removes a record. Every move writes a record
+//! before its rename and another after it, so the next run can tell whether
+//! an interrupted rename happened. An exclusive lock on `journal.lock` keeps
+//! two processes from writing at once. Bytes after the last line feed remain
+//! from an append that did not finish and form no record, so a reader sets
+//! them aside and a writer removes them.
 
 use std::collections::HashMap;
 use std::fmt;

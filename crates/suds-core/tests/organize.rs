@@ -66,6 +66,12 @@ impl Fixture {
         undo(&mut self.open(), run, &mut |_| {}).unwrap()
     }
 
+    /// Asserts that `name` exists in both directories with these contents.
+    fn assert_both_hold(&self, name: &str, at_source: &[u8], at_destination: &[u8]) {
+        assert_eq!(fs::read(self.from.join(name)).unwrap(), at_source);
+        assert_eq!(fs::read(self.to.join(name)).unwrap(), at_destination);
+    }
+
     fn state(&self) -> JournalState {
         JournalState::from_records(&read(&self.journal).unwrap())
     }
@@ -174,8 +180,7 @@ fn refuses_a_destination_that_appeared_after_planning_and_keeps_both_entries() {
         refusal_codes(&report),
         [Some(RefusalCode::DestinationExists)]
     );
-    assert_eq!(fs::read(fixture.from.join("notes.txt")).unwrap(), b"mine");
-    assert_eq!(fs::read(fixture.to.join("notes.txt")).unwrap(), b"theirs");
+    fixture.assert_both_hold("notes.txt", b"mine", b"theirs");
 }
 
 #[test]
@@ -370,11 +375,7 @@ fn refuses_undo_when_the_original_path_became_occupied() {
 
     let report = fixture.undo(&run);
     assert_eq!(refusal_codes(&report), [Some(RefusalCode::SourceOccupied)]);
-    assert_eq!(
-        fs::read(fixture.from.join("setup.dmg")).unwrap(),
-        b"downloaded again"
-    );
-    assert_eq!(fs::read(fixture.to.join("setup.dmg")).unwrap(), b"first");
+    fixture.assert_both_hold("setup.dmg", b"downloaded again", b"first");
 }
 
 #[test]

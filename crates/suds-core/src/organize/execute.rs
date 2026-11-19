@@ -251,10 +251,15 @@ fn apply_move(
     }
 }
 
+/// The direction of a rename whose outcome `settle` records.
+#[derive(Clone, Copy)]
+enum Direction {
+    Forward,
+    Reverse,
+}
+
 /// Records a forward rename's outcome after it verifies the entry that
-/// arrived. No system call renames an entry by its inode, so another process
-/// can swap the source between the check and the rename. Suds then returns
-/// the swapped entry and refuses the move.
+/// arrived.
 fn settle_move(
     journal: &mut Journal,
     run: &str,
@@ -262,8 +267,39 @@ fn settle_move(
     planned: &PlannedMove,
     prepared: &Prepared<'_>,
 ) -> Result<MoveOutcome, OperationError> {
-    let source = planned.source.as_path();
-    let destination = planned.destination.as_path();
+    let step = Step {
+        run,
+        index,
+        planned,
+        prepared,
+    };
+    settle(journal, &step, &planned.expected, Direction::Forward)
+}
+
+/// One rename of a run: the move that it serves and its open directories.
+struct Step<'a> {
+    run: &'a str,
+    index: usize,
+    planned: &'a PlannedMove,
+    prepared: &'a Prepared<'a>,
+}
+
+/// Records a rename's outcome after it verifies the entry that arrived. No
+/// system call renames an entry by its inode, so another process can swap
+/// the entry between the check and the rename. Suds then returns the
+/// swapped entry and refuses the step.
+fn settle(
+    journal: &mut Journal,
+    step: &Step<'_>,
+    expected: &EntryRevision,
+    direction: Direction,
+) -> Result<MoveOutcome, OperationError> {
+    let Step {
+        run,
+        index,
+        planned,
+        prepared,
+    } = *step;
     let outcome = |status, refusal| MoveOutcome {
         index,
         source: planned.source.clone(),
@@ -271,50 +307,96 @@ fn settle_move(
         status,
         refusal,
     };
-    let arrived = Presence::at(destination, &planned.expected);
+    let (from, to, from_directory, to_directory) = match direction {
+        Direction::Forward => (
+            planned.source.as_path(),
+            planned.destination.as_path(),
+            &prepared.source,
+            &prepared.destination,
+        ),
+        Direction::Reverse => (
+            planned.destination.as_path(),
+            planned.source.as_path(),
+            &prepared.destination,
+            &prepared.source,
+        ),
+    };
+    let run = run.to_owned();
+    let arrived = Presence::at(to, expected);
     if let Presence::Expected(revision) = arrived {
-        journal.append(Event::MoveApplied {
-            run: run.to_owned(),
-            index,
-            revision: Some(revision),
-        })?;
-        return Ok(outcome(MoveStatus::Applied, None));
+        let (event, status) = match direction {
+            Direction::Forward => (
+                Event::MoveApplied {
+                    run,
+                    index,
+                    revision: Some(revision),
+                },
+                MoveStatus::Applied,
+            ),
+            Direction::Reverse => (Event::MoveReversed { run, index }, MoveStatus::Reversed),
+        };
+        journal.append(event)?;
+        return Ok(outcome(status, None));
     }
     let detail = if matches!(arrived, Presence::Other) {
         let returned = renameat_with(
-            &prepared.destination,
+            to_directory,
             prepared.name,
-            &prepared.source,
+            from_directory,
             prepared.name,
             RenameFlags::NOREPLACE,
         );
-        match returned {
-            Ok(()) => {
+        match (returned, direction) {
+            (Ok(()), Direction::Forward) => {
                 let refusal = Refusal::new(
                     RefusalCode::SourceChanged,
                     format!(
                         "another entry took the place of {} during the move, so Suds returned that entry and moved nothing",
-                        source.display()
+                        from.display()
                     ),
                 );
                 journal.append(Event::MoveRefused {
-                    run: run.to_owned(),
+                    run,
                     index,
                     refusal: refusal.clone(),
                 })?;
                 return Ok(outcome(MoveStatus::Refused, Some(refusal)));
             }
-            Err(errno) => format!(
+            (Ok(()), Direction::Reverse) => {
+                let refusal = Refusal::new(
+                    RefusalCode::DestinationChanged,
+                    format!(
+                        "another entry took the place of {} during the undo, so Suds returned that entry and reversed nothing",
+                        from.display()
+                    ),
+                );
+                journal.append(Event::ReverseRefused {
+                    run,
+                    index,
+                    refusal: refusal.clone(),
+                })?;
+                return Ok(outcome(MoveStatus::Applied, Some(refusal)));
+            }
+            (Err(errno), Direction::Forward) => format!(
                 "the rename moved an entry that the plan does not name to {}, and Suds could not return it to {}: {}",
-                destination.display(),
-                source.display(),
+                to.display(),
+                from.display(),
+                io::Error::from(errno)
+            ),
+            (Err(errno), Direction::Reverse) => format!(
+                "the undo moved an entry that Suds did not move to {}, and Suds could not return it to {}: {}",
+                to.display(),
+                from.display(),
                 io::Error::from(errno)
             ),
         }
     } else {
-        format!("after the rename, {}", arrived.describe(destination))
+        match direction {
+            Direction::Forward => format!("after the rename, {}", arrived.describe(to)),
+            Direction::Reverse => format!("after the undo's rename, {}", arrived.describe(to)),
+        }
     };
-    unresolved(journal, run, index, detail)
+    unresolved(journal, &run, index, detail)
         .map(|refusal| outcome(MoveStatus::Unresolved, Some(refusal)))
 }
 
@@ -391,11 +473,10 @@ fn check_move<'a>(plan: &MovePlan, planned: &'a PlannedMove) -> Result<Prepared<
     })
 }
 
-/// Refuses to rename `entry` when the journal directory is that entry or lies
-/// beneath it. An append changes the journal file and never its directory's
-/// revision, so such a rename would pass every other precondition. The next
-/// command would then find an empty journal at the old path and no record of
-/// the move.
+/// Refuses to rename `entry` when it is the journal directory or holds it.
+/// An append changes no revision of that directory, so the rename would pass
+/// every other precondition, and the next command would find no record of
+/// the move at the journal's old path.
 fn check_journal_outside(journal: &Path, entry: &Path) -> Result<(), Refusal> {
     if !journal.starts_with(entry) {
         return Ok(());
@@ -638,7 +719,15 @@ fn reverse_move(
         planned,
     );
     match reversed {
-        Ok(()) => settle_reverse(journal, run, index, planned, &prepared, &moved),
+        Ok(()) => {
+            let step = Step {
+                run,
+                index,
+                planned,
+                prepared: &prepared,
+            };
+            settle(journal, &step, &moved, Direction::Reverse)
+        }
         Err(mut refusal) => {
             if refusal.code == RefusalCode::DestinationExists {
                 refusal.code = RefusalCode::SourceOccupied;
@@ -646,71 +735,6 @@ fn reverse_move(
             refuse(journal, refusal)
         }
     }
-}
-
-/// Records a reversal's outcome after it verifies the entry that returned,
-/// and returns a swapped entry to the destination, as `settle_move` does.
-fn settle_reverse(
-    journal: &mut Journal,
-    run: &str,
-    index: usize,
-    planned: &PlannedMove,
-    prepared: &Prepared<'_>,
-    moved: &EntryRevision,
-) -> Result<MoveOutcome, OperationError> {
-    let source = planned.source.as_path();
-    let destination = planned.destination.as_path();
-    let outcome = |status, refusal| MoveOutcome {
-        index,
-        source: planned.source.clone(),
-        destination: planned.destination.clone(),
-        status,
-        refusal,
-    };
-    let returned = Presence::at(source, moved);
-    if matches!(returned, Presence::Expected(_)) {
-        journal.append(Event::MoveReversed {
-            run: run.to_owned(),
-            index,
-        })?;
-        return Ok(outcome(MoveStatus::Reversed, None));
-    }
-    let detail = if matches!(returned, Presence::Other) {
-        let restored = renameat_with(
-            &prepared.source,
-            prepared.name,
-            &prepared.destination,
-            prepared.name,
-            RenameFlags::NOREPLACE,
-        );
-        match restored {
-            Ok(()) => {
-                let refusal = Refusal::new(
-                    RefusalCode::DestinationChanged,
-                    format!(
-                        "another entry took the place of {} during the undo, so Suds returned that entry and reversed nothing",
-                        destination.display()
-                    ),
-                );
-                journal.append(Event::ReverseRefused {
-                    run: run.to_owned(),
-                    index,
-                    refusal: refusal.clone(),
-                })?;
-                return Ok(outcome(MoveStatus::Applied, Some(refusal)));
-            }
-            Err(errno) => format!(
-                "the undo moved an entry that Suds did not move to {}, and Suds could not return it to {}: {}",
-                source.display(),
-                destination.display(),
-                io::Error::from(errno)
-            ),
-        }
-    } else {
-        format!("after the undo's rename, {}", returned.describe(source))
-    };
-    unresolved(journal, run, index, detail)
-        .map(|refusal| outcome(MoveStatus::Unresolved, Some(refusal)))
 }
 
 /// Verifies every precondition of a reversal: the destination still holds

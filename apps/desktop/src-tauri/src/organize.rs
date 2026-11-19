@@ -300,6 +300,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
+    use std::path::PathBuf;
 
     use suds_core::organize::journal::{MoveStatus, RunStatus};
     use suds_core::organize::plan::MoveRequest;
@@ -314,15 +315,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn applies_and_undoes_a_plan_that_the_window_built() {
+    /// A Downloads directory that holds `a.pdf`, a Documents directory, and
+    /// a journal directory, each by its canonical path.
+    struct Folders {
+        _dir: TempDir,
+        from: PathBuf,
+        to: PathBuf,
+        journal: PathBuf,
+    }
+
+    fn folders() -> Folders {
         let dir = TempDir::new().unwrap();
-        let from = dir.path().join("Downloads");
-        let to = dir.path().join("Documents");
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let (from, to) = (root.join("Downloads"), root.join("Documents"));
         fs::create_dir(&from).unwrap();
         fs::create_dir(&to).unwrap();
         fs::write(from.join("a.pdf"), b"a").unwrap();
-        let operations = Operations::new(Ok(dir.path().join("journal")));
+        Folders {
+            journal: root.join("journal"),
+            _dir: dir,
+            from,
+            to,
+        }
+    }
+
+    #[test]
+    fn applies_and_undoes_a_plan_that_the_window_built() {
+        let Folders {
+            _dir,
+            from,
+            to,
+            journal,
+        } = folders();
+        let operations = Operations::new(Ok(journal));
 
         let PlanResponse::Planned { plan } = operations
             .create_plan(&from, &[request("a.pdf")], &to)
@@ -356,14 +381,12 @@ mod tests {
     fn the_history_settles_an_interrupted_move_and_offers_its_undo() {
         use suds_core::organize::journal::{Event, Journal};
 
-        let dir = TempDir::new().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let from = root.join("Downloads");
-        let to = root.join("Documents");
-        fs::create_dir(&from).unwrap();
-        fs::create_dir(&to).unwrap();
-        fs::write(from.join("a.pdf"), b"a").unwrap();
-        let journal = root.join("journal");
+        let Folders {
+            _dir,
+            from,
+            to,
+            journal,
+        } = folders();
         let operations = Operations::new(Ok(journal.clone()));
         let PlanResponse::Planned { plan } = operations
             .create_plan(&from, &[request("a.pdf")], &to)
@@ -400,13 +423,12 @@ mod tests {
 
     #[test]
     fn a_plan_stays_eligible_after_an_application_that_failed() {
-        let dir = TempDir::new().unwrap();
-        let from = dir.path().join("Downloads");
-        let to = dir.path().join("Documents");
-        fs::create_dir(&from).unwrap();
-        fs::create_dir(&to).unwrap();
-        fs::write(from.join("a.pdf"), b"a").unwrap();
-        let journal = dir.path().join("journal");
+        let Folders {
+            _dir,
+            from,
+            to,
+            journal,
+        } = folders();
         let operations = Operations::new(Ok(journal.clone()));
         let PlanResponse::Planned { plan } = operations
             .create_plan(&from, &[request("a.pdf")], &to)

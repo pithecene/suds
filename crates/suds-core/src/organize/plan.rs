@@ -74,8 +74,8 @@ pub struct PlannedMove {
     /// not read. A positive count makes the measure a lower bound.
     pub measure_error_count: u64,
     /// The first of those entries in traversal order, each with its reason.
-    /// The count includes the entries beyond this list, as an inspection's
-    /// count does.
+    /// The count includes the entries beyond this list, like an inspection's
+    /// count.
     pub measure_errors: Vec<MeasureError>,
 }
 
@@ -492,22 +492,15 @@ mod tests {
             codes(plan_move(&from, &[], &to, 0)),
             [RefusalCode::NothingSelected]
         );
-        assert_eq!(
-            codes(plan_move(&from, &[request("missing")], &to, 0)),
-            [RefusalCode::SourceMissing]
-        );
-        assert_eq!(
-            codes(plan_move(&from, &[request("taken")], &to, 0)),
-            [RefusalCode::DestinationExists]
-        );
-        assert_eq!(
-            codes(plan_move(&from, &[request("link")], &to, 0)),
-            [RefusalCode::UnsupportedKind]
-        );
-        assert_eq!(
-            codes(plan_move(&from, &[request("../to")], &to, 0)),
-            [RefusalCode::OutsideScope]
-        );
+        for (name, code) in [
+            ("missing", RefusalCode::SourceMissing),
+            ("taken", RefusalCode::DestinationExists),
+            ("link", RefusalCode::UnsupportedKind),
+            ("../to", RefusalCode::OutsideScope),
+        ] {
+            let refused = plan_move(&from, &[request(name)], &to, 0);
+            assert_eq!(codes(refused), [code], "{name}");
+        }
         assert_eq!(
             codes(plan_move(
                 &from,

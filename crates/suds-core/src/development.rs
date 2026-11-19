@@ -83,8 +83,8 @@ pub struct BuildState {
 }
 
 /// What a directory of build state holds that a build does not regenerate,
-/// and what the measurement could not see. A directory is derived state as
-/// a whole only when every count is zero.
+/// and what the measurement could not see. A directory counts as derived
+/// state as a whole only when every count is zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Survey {
     /// The directories beneath it that hold a `.git` entry.

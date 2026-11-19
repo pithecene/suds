@@ -44,11 +44,10 @@ impl Liveness {
             .find(|directory| directory.starts_with(tree))
     }
 
-    /// Reads each process's working directory from `/proc`. A process that
-    /// ended during the observation has no link. The kernel refuses the link
-    /// of another user's process, which the observation leaves out. It also
-    /// refuses the link of this user's process that forbids its inspection,
-    /// and the observation names each such process as unreadable.
+    /// Reads each process's working directory from `/proc`, and leaves out
+    /// another user's process, whose link the kernel refuses. The kernel
+    /// also refuses the link of this user's process that forbids its own
+    /// inspection, and the observation names each one as unreadable.
     #[cfg(target_os = "linux")]
     pub fn observe() -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt;

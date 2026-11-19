@@ -2,10 +2,10 @@
 //!
 //! The executor records the plan, then judges each candidate again
 //! immediately before it acts, because a process can start or a file can
-//! change after planning. It observes the processes, measures the directory,
-//! and asks Git anew for each removal. It removes build state itself,
-//! without following a symbolic link, and it has Git remove a linked
-//! checkout.
+//! change after planning. For each removal it observes the processes,
+//! measures the directory, and asks Git anew. The executor removes build
+//! state itself, without following a symbolic link, and it has Git remove a
+//! linked checkout.
 
 use std::fs;
 use std::path::Path;

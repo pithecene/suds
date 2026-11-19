@@ -30,11 +30,24 @@ pub enum Filesystem {
     Other,
 }
 
-/// The filesystem that holds `path`. Every user volume of a current macOS
-/// is an APFS volume.
+/// The filesystem that holds `path`, by the name that the kernel reports.
+/// A volume of another type, such as a network volume, takes no APFS quota.
 #[cfg(target_os = "macos")]
-pub fn filesystem_of(_path: &Path) -> Filesystem {
-    Filesystem::Apfs
+pub fn filesystem_of(path: &Path) -> Filesystem {
+    let Ok(stat) = rustix::fs::statfs(path) else {
+        return Filesystem::Other;
+    };
+    let name: Vec<u8> = stat
+        .f_fstypename
+        .iter()
+        .take_while(|unit| **unit != 0)
+        .map(|unit| unit.cast_unsigned())
+        .collect();
+    if name == b"apfs" {
+        Filesystem::Apfs
+    } else {
+        Filesystem::Other
+    }
 }
 
 /// The filesystem that holds `path`, by the type that the kernel reports.
@@ -72,8 +85,12 @@ pub struct Arena {
     pub available_bytes: u64,
     pub ceiling_bytes: u64,
     pub ceiling_source: CeilingSource,
-    /// Whether a filesystem enforces the ceiling.
+    /// Whether a filesystem enforces the ceiling on the root and on every
+    /// other location that the audit received.
     pub enforced: bool,
+    /// Each other root or store that lies outside the root's filesystem,
+    /// so no limit of that filesystem bounds it.
+    pub uncovered: Vec<String>,
     /// The fact that decides `enforced`.
     pub finding: String,
     /// Each command that gives the ceiling a filesystem limit, or none when
@@ -99,12 +116,34 @@ pub fn is_enforced(root_device: u64, system_device: u64, capacity: u64, ceiling:
 }
 
 /// Audits the arena at `root`. The settings name the ceiling, and the
-/// default follows the disk's size.
-pub fn audit(root: &Path, settings_ceiling: Option<u64>) -> Result<Arena, String> {
+/// default follows the disk's size. The `others` hold each other root and
+/// each store whose bytes count toward the pressure, and a limit holds only
+/// when it covers every one of them.
+pub fn audit(
+    root: &Path,
+    others: &[PathBuf],
+    settings_ceiling: Option<u64>,
+) -> Result<Arena, String> {
     let failed = |path: &Path, err: std::io::Error| {
         format!("could not read the metadata of {}: {err}", path.display())
     };
-    let root_device = fs::metadata(root).map_err(|err| failed(root, err))?.dev();
+    // The audit follows no link: a root behind one would mix the link's
+    // place with its target's filesystem.
+    let meta = fs::symlink_metadata(root).map_err(|err| failed(root, err))?;
+    let canonical = fs::canonicalize(root).map_err(|err| failed(root, err))?;
+    if meta.file_type().is_symlink() || canonical != root {
+        return Err(format!(
+            "{} is a symbolic link or lies behind one, and Suds audits no root through a link. Name {} instead.",
+            root.display(),
+            canonical.display()
+        ));
+    }
+    let root_device = meta.dev();
+    let uncovered: Vec<String> = others
+        .iter()
+        .filter(|other| fs::metadata(other).map_or(true, |meta| meta.dev() != root_device))
+        .map(|other| other.to_string_lossy().into_owned())
+        .collect();
     let system = Path::new("/");
     let system_device = fs::metadata(system)
         .map_err(|err| failed(system, err))?
@@ -124,8 +163,15 @@ pub fn audit(root: &Path, settings_ceiling: Option<u64>) -> Result<Arena, String
         }
     };
     let filesystem = filesystem_of(root);
-    let enforced = is_enforced(root_device, system_device, capacity, ceiling);
-    let finding = if enforced {
+    let bounded = is_enforced(root_device, system_device, capacity, ceiling);
+    let enforced = bounded && uncovered.is_empty();
+    let finding = if bounded && !enforced {
+        format!(
+            "{} lies on a filesystem within the ceiling, and {} other locations lie outside that filesystem",
+            root.display(),
+            uncovered.len()
+        )
+    } else if enforced {
         format!(
             "{} lies on a filesystem of its own of {} GiB, within the ceiling",
             root.display(),
@@ -152,8 +198,9 @@ pub fn audit(root: &Path, settings_ceiling: Option<u64>) -> Result<Arena, String
         ceiling_bytes: ceiling,
         ceiling_source: source,
         enforced,
+        uncovered,
         finding,
-        provisioning: if enforced {
+        provisioning: if bounded {
             Vec::new()
         } else {
             provisioning(filesystem, root, ceiling)
@@ -176,7 +223,7 @@ pub fn provisioning(filesystem: Filesystem, root: &Path, ceiling: u64) -> Vec<St
         root.file_name()
             .map_or_else(|| "development".into(), |name| name.to_string_lossy())
     ));
-    let arena = arena.display();
+    let place = shell_quote(&arena.to_string_lossy());
     match filesystem {
         Filesystem::Apfs => vec![
             step(
@@ -197,48 +244,68 @@ pub fn provisioning(filesystem: Filesystem, root: &Path, ceiling: u64) -> Vec<St
         ],
         Filesystem::Btrfs => vec![
             step(
-                format!("sudo btrfs subvolume create {arena}"),
+                format!("sudo btrfs subvolume create {place}"),
                 true,
                 "Create a subvolume for the development tree.",
             ),
             step(
-                format!("sudo btrfs quota enable {arena}"),
+                format!("sudo btrfs quota enable {place}"),
                 true,
                 "Turn on quota groups for the filesystem.",
             ),
             step(
-                format!("sudo btrfs qgroup limit {gib}G {arena}"),
+                format!("sudo btrfs qgroup limit {gib}G {place}"),
                 true,
                 "Limit the subvolume to the ceiling.",
             ),
             step(
-                format!("sudo chown \"$USER\" {arena}"),
+                format!("sudo chown \"$USER\" {place}"),
                 true,
                 "Give the subvolume to the user who develops in it.",
             ),
         ],
-        Filesystem::Xfs => vec![
-            step(
-                "findmnt -no OPTIONS -T .".to_owned(),
-                false,
-                "Confirm that the filesystem's mount options hold prjquota. A remount with that option needs an administrator.",
-            ),
-            step(
-                format!("sudo xfs_quota -x -c 'project -s -p {arena} 4242' MOUNTPOINT"),
-                true,
-                "Make the development tree a project.",
-            ),
-            step(
-                format!("sudo xfs_quota -x -c 'limit -p bhard={gib}g 4242' MOUNTPOINT"),
-                true,
-                "Limit the project to the ceiling.",
-            ),
-        ],
+        Filesystem::Xfs => {
+            let target = shell_quote(&root.to_string_lossy());
+            let project = shell_quote(&format!("project -s -p {} 4242", arena.display()));
+            let limit = shell_quote(&format!("limit -p bhard={gib}g 4242"));
+            vec![
+                step(
+                    format!("findmnt -no TARGET,OPTIONS -T {target}"),
+                    false,
+                    "Read the mount point of the root's filesystem, and confirm that its options hold prjquota. A remount with that option needs an administrator.",
+                ),
+                step(
+                    format!("sudo xfs_quota -x -c {project} MOUNTPOINT"),
+                    true,
+                    "Make the development tree a project.",
+                ),
+                step(
+                    format!("sudo xfs_quota -x -c {limit} MOUNTPOINT"),
+                    true,
+                    "Limit the project to the ceiling.",
+                ),
+            ]
+        }
         Filesystem::Ext4 | Filesystem::Other => vec![step(
-            format!("a partition or a logical volume of {gib} GiB, mounted at {arena}"),
+            format!("a partition or a logical volume of {gib} GiB, mounted at {place}"),
             true,
             "This filesystem offers no limit on a directory that fits every kernel, so a filesystem of the ceiling's size holds the development tree.",
         )],
+    }
+}
+
+/// Quotes `text` as one word of a shell command. A person copies each
+/// command of a plan into a shell, where a space would split a path and
+/// another character could run a command.
+fn shell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._-+=:,@".contains(character));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 }
 
@@ -248,7 +315,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{CeilingSource, Filesystem, GIB, audit, is_enforced, provisioning};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{CeilingSource, Filesystem, GIB, audit, is_enforced, provisioning, shell_quote};
 
     #[test]
     fn a_filesystem_of_its_own_within_the_ceiling_enforces_it() {
@@ -278,18 +348,42 @@ mod tests {
         );
         assert!(btrfs.iter().all(|step| step.privileged));
 
-        assert!(
-            provisioning(Filesystem::Xfs, root, 100 * GIB)[2]
-                .command
-                .contains("bhard=100g")
+        let xfs = provisioning(Filesystem::Xfs, root, 100 * GIB);
+        // The first step reads the audited root's filesystem.
+        assert_eq!(
+            xfs[0].command,
+            "findmnt -no TARGET,OPTIONS -T /home/a/workspace"
+        );
+        assert_eq!(
+            xfs[2].command,
+            "sudo xfs_quota -x -c 'limit -p bhard=100g 4242' MOUNTPOINT"
         );
         assert_eq!(provisioning(Filesystem::Ext4, root, 100 * GIB).len(), 1);
     }
 
     #[test]
+    fn quotes_each_path_as_one_word_of_a_shell() {
+        assert_eq!(shell_quote("/home/a/work"), "/home/a/work");
+        assert_eq!(shell_quote("/home/a/work space"), "'/home/a/work space'");
+        assert_eq!(shell_quote("a'b; rm -rf /"), "'a'\\''b; rm -rf /'");
+        let root = Path::new("/home/a/work space");
+        let btrfs = provisioning(Filesystem::Btrfs, root, 100 * GIB);
+        assert_eq!(
+            btrfs[0].command,
+            "sudo btrfs subvolume create '/home/a/work space-arena'"
+        );
+        let xfs = provisioning(Filesystem::Xfs, root, 100 * GIB);
+        assert_eq!(
+            xfs[1].command,
+            "sudo xfs_quota -x -c 'project -s -p /home/a/work space-arena 4242' MOUNTPOINT"
+        );
+    }
+
+    #[test]
     fn audits_a_directory_against_a_ceiling_of_the_settings() {
         let dir = TempDir::new().unwrap();
-        let arena = audit(dir.path(), Some(GIB)).unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let arena = audit(&root, &[], Some(GIB)).unwrap();
         assert_eq!(arena.ceiling_bytes, GIB);
         assert_eq!(arena.ceiling_source, CeilingSource::Settings);
         assert!(arena.capacity_bytes > 0);
@@ -297,9 +391,33 @@ mod tests {
         assert!(!arena.enforced);
         assert!(!arena.provisioning.is_empty());
 
-        let by_default = audit(dir.path(), None).unwrap();
+        let by_default = audit(&root, &[], None).unwrap();
         assert_eq!(by_default.ceiling_source, CeilingSource::Default);
         assert!(by_default.ceiling_bytes >= 100 * GIB);
-        assert!(audit(&dir.path().join("missing"), None).is_err());
+        assert!(audit(&root.join("missing"), &[], None).is_err());
+    }
+
+    #[test]
+    fn audits_no_root_through_a_symbolic_link() {
+        let dir = TempDir::new().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let refused = audit(&root.join("link"), &[], None).unwrap_err();
+        assert!(refused.contains("symbolic link"), "{refused}");
+        assert!(audit(&root.join("link/.."), &[], None).is_err());
+        assert!(audit(&root.join("real"), &[], None).is_ok());
+    }
+
+    #[test]
+    fn a_location_outside_the_roots_filesystem_is_uncovered() {
+        let dir = TempDir::new().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("store")).unwrap();
+        // A location that does not exist lies on no filesystem at all.
+        let others = [root.join("store"), PathBuf::from("/no/such/store")];
+        let arena = audit(&root, &others, None).unwrap();
+        assert_eq!(arena.uncovered, ["/no/such/store"]);
+        assert!(!arena.enforced);
     }
 }

@@ -340,6 +340,16 @@ fn store_specs(environment: &Environment) -> Vec<StoreSpec> {
     ]
 }
 
+/// The directory of each store that exists, without a measurement. An
+/// audit of the arena needs each location and no size.
+pub fn store_locations(environment: &Environment) -> Vec<PathBuf> {
+    store_specs(environment)
+        .into_iter()
+        .filter_map(|spec| spec.path)
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect()
+}
+
 /// What a directory's own layout proves about it.
 enum Claim {
     Checkout(CheckoutKind, Option<PathBuf>),

@@ -64,7 +64,16 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
     let scan = development::inspect(&settings.roots, context.environment);
     let inspection = development::build_report(&scan, context.now);
-    let audited = arena::audit(first, settings.ceiling_bytes)?;
+    // The pressure counts every root and every store, so the audit covers
+    // each of them.
+    let others: Vec<_> = settings
+        .roots
+        .iter()
+        .skip(1)
+        .cloned()
+        .chain(development::store_locations(context.environment))
+        .collect();
+    let audited = arena::audit(first, &others, settings.ceiling_bytes)?;
     let measurement = Measurement {
         usage_bytes: pressure::usage(&scan),
         ceiling_bytes: audited.ceiling_bytes,

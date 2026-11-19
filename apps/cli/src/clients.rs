@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use suds_core::arena::{self, Arena};
-use suds_core::development::Environment;
+use suds_core::development::{self, Environment};
 use suds_core::maintain::{self, Context, MaintenanceReport};
 use suds_core::pressure::{Level, Pressure};
 use suds_core::reclaim::git::Git;
@@ -21,7 +21,7 @@ use crate::cli::{
 };
 use crate::now_seconds;
 use crate::output::{emit, finish, planned, ran};
-use crate::table::format_bytes;
+use crate::table::{escape, format_bytes};
 
 fn directories() -> Result<Directories, String> {
     Directories::of(&Environment::of_process())
@@ -157,7 +157,14 @@ fn audit_arena(args: &ArenaArgs) -> Result<ExitCode, String> {
             .cloned()
             .ok_or("the settings name no root. Name the development tree with --root DIR.")?,
     };
-    let audited = arena::audit(&root, settings.ceiling_bytes)?;
+    let others: Vec<_> = settings
+        .roots
+        .iter()
+        .filter(|other| **other != root)
+        .cloned()
+        .chain(development::store_locations(&Environment::of_process()))
+        .collect();
+    let audited = arena::audit(&root, &others, settings.ceiling_bytes)?;
     planned(emit(args.format, &audited, write_arena))
 }
 
@@ -175,6 +182,9 @@ fn write_arena(out: &mut impl Write, audited: &Arena) -> io::Result<()> {
         "No filesystem enforces the ceiling"
     };
     writeln!(out, "{verdict}: {}.", audited.finding)?;
+    for location in &audited.uncovered {
+        writeln!(out, "  outside the root's filesystem: {}", escape(location))?;
+    }
     if audited.provisioning.is_empty() {
         return Ok(());
     }

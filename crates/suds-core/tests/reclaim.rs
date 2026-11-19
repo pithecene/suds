@@ -142,7 +142,7 @@ impl Fixture {
         observe: &mut dyn FnMut() -> Result<Liveness, String>,
         at: i64,
     ) -> ReclaimReport {
-        let mut journal = Journal::open(&self.journal).unwrap();
+        let mut journal = open_journal(&self.journal);
         let conditions = Conditions {
             authority: Authority::Person,
             observe,
@@ -158,6 +158,21 @@ impl Fixture {
 }
 
 const IDLE_SECONDS: i64 = 3600;
+
+/// Opens the journal, and waits when it is busy. A test in another thread
+/// can start Git between two runs of one test, and the new process holds a
+/// copy of this journal's lock until it runs its program.
+fn open_journal(directory: &Path) -> Journal {
+    for _ in 0..200 {
+        match Journal::open(directory) {
+            Err(suds_core::organize::journal::JournalError::Busy) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            opened => return opened.unwrap(),
+        }
+    }
+    panic!("the journal at {} stayed busy", directory.display());
+}
 
 fn now() -> i64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();

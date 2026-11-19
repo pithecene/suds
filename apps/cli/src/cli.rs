@@ -1,5 +1,6 @@
 //! The command-line interface.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -40,6 +41,34 @@ pub enum Command {
     /// with `--apply`. A build regenerates build state, so its removal is
     /// permanent.
     Reclaim(ReclaimArgs),
+
+    /// Plan each shared store's trim to its budget, and run the trims with
+    /// `--apply`. Each trim is a command of the store's own program.
+    Stores(StoresArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StoresArgs {
+    /// A store's budget, as in `go.build-cache=10G`. Repeat the option for
+    /// several stores.
+    #[arg(long = "budget", value_name = "STORE=SIZE")]
+    pub budgets: Vec<OsString>,
+
+    /// The time for which a store must have stood unchanged.
+    #[arg(long, value_name = "MINUTES", default_value_t = 60)]
+    pub idle_minutes: u64,
+
+    /// Run the trims that the plan names. Without the option, Suds prints
+    /// the plan and changes nothing.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
+
+    #[command(flatten)]
+    pub journal: JournalOption,
 }
 
 #[derive(Debug, Args)]

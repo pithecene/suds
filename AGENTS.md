@@ -40,7 +40,8 @@ rules hold for every release:
 - Execute no shell string. Call an external program only through a typed
   adapter for the program that owns the state. The current release calls
   Git, which owns each checkout, and on macOS `lsof`, which reads the
-  process table.
+  process table. It calls Go, pnpm, ccache, mise, and Docker, and each one
+  trims only its own store.
 - Read file contents only through an explicit capability or an action of
   the user. Background inspection reads metadata alone.
 - Make no network request outside a remote connector that the user

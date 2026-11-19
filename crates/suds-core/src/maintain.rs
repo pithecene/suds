@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::arena;
 use crate::development::{self, Environment};
 use crate::organize::journal::Journal;
 use crate::pressure::{self, Measurement, Pressure, Thresholds};
@@ -54,16 +55,12 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .first()
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
     let scan = development::inspect(&settings.roots, context.environment);
-    let disk = pressure::filesystem(first);
-    let ceiling = settings
-        .ceiling_bytes
-        .or_else(|| disk.map(|(capacity, _)| pressure::default_ceiling(capacity)))
-        .ok_or_else(|| format!("could not read the filesystem of {}", first.display()))?;
+    let audited = arena::audit(first, settings.ceiling_bytes)?;
     let measurement = Measurement {
         usage_bytes: pressure::usage(&scan),
-        ceiling_bytes: ceiling,
-        enforced: false,
-        filesystem_available_bytes: disk.map(|(_, available)| available),
+        ceiling_bytes: audited.ceiling_bytes,
+        enforced: audited.enforced,
+        filesystem_available_bytes: Some(audited.available_bytes),
         now: context.now,
     };
     let path = context.directories.pressure();

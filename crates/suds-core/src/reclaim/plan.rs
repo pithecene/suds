@@ -31,17 +31,25 @@ pub struct Policy {
     /// change suggests a build in progress, so it protects the directory. No
     /// age ever causes a removal.
     pub idle_seconds: u64,
-    /// Whether the plan considers linked checkouts as well as build state.
-    pub checkouts: bool,
+    /// Which linked checkouts the plan considers alongside derived state.
+    pub checkouts: CheckoutScope,
     /// Whether a removal may proceed while the system hides the working
     /// directory of one of this user's processes.
     pub tolerate_unreadable_processes: bool,
-    /// Whether a person can accept a client's report when Git cannot
-    /// establish that a remote holds the landed head.
-    pub admit_landed: bool,
 }
 
-/// A plan to remove derived development state.
+/// Which linked checkouts a reclaim plan can include.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutScope {
+    /// Consider derived state only.
+    DerivedOnly,
+    /// Also consider linked checkouts their clients have released.
+    Released,
+    /// Also consider every linked checkout.
+    AllLinked,
+}
+
+/// A plan to reclaim development storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReclaimPlan {
     pub schema: String,
@@ -132,7 +140,7 @@ pub enum Kept {
     UncommittedChanges,
     /// The checkout's head holds a commit that no remote holds.
     UnpushedCommits,
-    /// The checkout's head differs from the commit its client released.
+    /// Retained for plans that recorded a mismatch with the released head.
     LandedHeadChanged,
     /// Git tracks a file in the build state, or would track one.
     TrackedFiles,
@@ -176,10 +184,9 @@ impl Kept {
     }
 }
 
-/// Plans the removal of the derived state that `scan` found. A failure to
-/// read the processes' working directories keeps every candidate. A
-/// checkout that a client released comes first, and the plan considers it
-/// whatever the policy says of linked checkouts.
+/// Plans reclamation from `scan` within the policy's scope. A failure to
+/// read the processes' working directories keeps every candidate. Released
+/// checkouts and their build state take priority within that scope.
 pub fn plan_reclaim(
     scan: &DevelopmentScan,
     observed: &Observed<'_>,
@@ -193,7 +200,6 @@ pub fn plan_reclaim(
         git,
         idle_since: idle_since(now, policy.idle_seconds),
         tolerate_unreadable_processes: policy.tolerate_unreadable_processes,
-        admit_landed: policy.admit_landed,
     };
     let released = |checkout: &Checkout| {
         observed.registry.as_ref().is_ok_and(|standings| {
@@ -233,8 +239,12 @@ pub fn plan_reclaim(
                 evidence,
             ));
         }
-        let linked =
-            checkout.kind == CheckoutKind::Linked && (policy.checkouts || released(checkout));
+        let linked = checkout.kind == CheckoutKind::Linked
+            && match policy.checkouts {
+                CheckoutScope::DerivedOnly => false,
+                CheckoutScope::Released => released(checkout),
+                CheckoutScope::AllLinked => true,
+            };
         if linked && named.insert(checkout.path.clone()) {
             let (kept, evidence) = judge_linked(&judge, checkout, scan);
             let subject = Subject::LinkedCheckout;
@@ -341,7 +351,6 @@ pub(crate) struct Judge<'a> {
     pub(crate) git: &'a Git,
     pub(crate) idle_since: String,
     pub(crate) tolerate_unreadable_processes: bool,
-    pub(crate) admit_landed: bool,
 }
 
 impl Judge<'_> {
@@ -446,23 +455,11 @@ impl Judge<'_> {
                 return Some(Kept::Unverified);
             }
         }
-        if let Some(commit) = self.landed(checkout) {
-            match self.git.head(checkout) {
-                Ok(head) if head == commit => {
-                    return self.verify_landed(checkout, commit, evidence);
-                }
-                Ok(head) if !self.admit_landed => {
-                    evidence.push(format!(
-                        "the head is {head}, but the client released {commit}"
-                    ));
-                    return Some(Kept::LandedHeadChanged);
-                }
-                Err(reason) if !self.admit_landed => {
-                    evidence.push(reason);
-                    return Some(Kept::Unverified);
-                }
-                _ => {}
-            }
+        if let Some(commit) = self.landed(checkout)
+            && self.git.head(checkout).is_ok_and(|head| head == commit)
+        {
+            self.record_landed(checkout, commit, evidence);
+            return None;
         }
         match self.git.unpushed(checkout) {
             Ok(0) => {
@@ -482,18 +479,13 @@ impl Judge<'_> {
         }
     }
 
-    fn verify_landed(
-        &self,
-        checkout: &Path,
-        commit: &str,
-        evidence: &mut Vec<String>,
-    ) -> Option<Kept> {
+    fn record_landed(&self, checkout: &Path, commit: &str, evidence: &mut Vec<String>) {
         match self.git.remote_tracking_ref(checkout, commit) {
             Ok(Some(reference)) => {
                 evidence.push(format!(
                     "the remote-tracking reference {reference} holds {commit}"
                 ));
-                return None;
+                return;
             }
             Ok(None) => {
                 evidence.push(format!(
@@ -502,13 +494,9 @@ impl Judge<'_> {
             }
             Err(reason) => evidence.push(reason),
         }
-        if self.admit_landed {
-            evidence.push(format!(
-                "its client reported the head {commit} as landed on a remote"
-            ));
-            return None;
-        }
-        Some(Kept::Unverified)
+        evidence.push(format!(
+            "its client reported the head {commit} as landed on a remote"
+        ));
     }
 
     /// Keeps a candidate when a process works in its checkout, or when Suds

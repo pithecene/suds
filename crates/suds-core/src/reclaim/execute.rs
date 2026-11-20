@@ -138,9 +138,8 @@ pub fn apply(
             git,
             idle_since: idle_since(now, plan.idle_seconds),
             tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
-            admit_landed: authority == Authority::Person,
         };
-        let outcome = match check(journal.directory(), candidate, &judge) {
+        let outcome = match check(journal.directory(), candidate, authority, &judge) {
             Err(reason) => Err(reason),
             Ok(evidence) => {
                 journal.append(Event::RemovalStarted {
@@ -214,7 +213,15 @@ pub fn apply(
 /// Verifies every precondition of one removal. The directory must be the
 /// entry that the plan measured, and the plan's own rules must still decide
 /// to remove it as it stands now.
-fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<Vec<String>, String> {
+fn check(
+    journal: &Path,
+    candidate: &Candidate,
+    authority: Authority,
+    judge: &Judge<'_>,
+) -> Result<Vec<String>, String> {
+    if candidate.subject == Subject::LinkedCheckout && authority == Authority::StandingApproval {
+        return Err("removing a linked checkout requires a person's approval".to_owned());
+    }
     let path = candidate.path.as_path();
     if journal.starts_with(path) {
         return Err(format!("{} holds the journal", path.display()));

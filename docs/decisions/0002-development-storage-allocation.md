@@ -56,6 +56,11 @@ person watches.
   creates a bounded volume once and never observes or reclaims it.
 - **A person's approval of every removal.** Build output would then outgrow
   the disk between approvals, as the incident showed.
+- **Unattended removal of a released linked checkout whose head is in a
+  remote-tracking reference.** The reference identifies a Git commit. It
+  cannot account for ignored files in the worktree, which Git can discard
+  even when it reports a clean checkout. Require a person's approval to
+  remove the worktree and reclaim its proven build output on schedule.
 - **Removal by age.** An old checkout may hold the only copy of a change,
   and a recent cache entry may be the largest waste.
 
@@ -67,17 +72,14 @@ person watches.
   because a quarantine frees no space.
 - Suds needs proof that a path holds derived state, so it classifies by
   each ecosystem's own layout and never by a name alone.
-- Under the standing approval, a release with `--landed COMMIT` names the
-  head of a linked checkout for Suds to verify. The head must still match,
-  the tree must have no changed, staged, or untracked file, and no client
-  may hold an unreleased registration. No process may work there, and no
-  entry may have changed within the idle time. A local remote-tracking
-  reference must contain the commit at planning and again at removal. If
-  Suds cannot verify the commit from the local references, the checkout
-  stays and the plan or journal names the reason. A person's own
-  `suds reclaim --apply` can still accept a matching release as evidence.
-  Git removes a verified linked checkout without force and keeps its
-  branch. The journal records the reference used at removal.
+- A person's `suds reclaim --apply` can accept a release with
+  `--landed COMMIT` as evidence while the linked checkout's head still
+  matches. The tree must have no changed, staged, or untracked file, and
+  no client may hold an unreleased registration. No process may work
+  there, and no entry may have changed within the idle time. Git removes
+  the worktree without force and keeps its branch. The journal records
+  the local remote-tracking reference when Suds finds one that contains
+  the released head at removal.
 - A hard ceiling needs a filesystem limit, which a privileged command
   creates once for each machine. Suds plans that command, and a person runs
   it. Until then Suds holds the ceiling by measurement and reports that no

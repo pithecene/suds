@@ -274,20 +274,18 @@ second worktree, and no commit, branch, tag, or stash that a remote lacks.
 Any other repository is a checkout, and it keeps the candidate. A
 registration of a directory inside a candidate keeps the candidate too.
 
-With `--checkouts`, the plan also considers each linked checkout. Git must
-report no changed, staged, or untracked file there. No process may work in
-the checkout, no entry may have changed within the idle time, and no client
-may hold an unreleased registration. A remote-tracking branch can show
-that a remote holds the checkout's head. A checkout released with
-`--landed COMMIT` is a candidate in every run that may remove build state,
-including a scheduled run under the standing approval.
+Removing a linked checkout requires a person's approval through
+`suds reclaim --apply`. The reclaim plan considers released linked
+checkouts by default and considers all linked checkouts with `--checkouts`.
+Git must report no changed, staged, or untracked file there. No process
+may work in the checkout, no entry may have changed within the idle time,
+and no client may hold an unreleased registration.
 
-Under the standing approval, the checkout's head must match `COMMIT` and
-a local remote-tracking reference must contain it. Suds checks both at
-planning and again before removal, then records the reference it used in
-the journal. If Suds cannot verify the commit from the local references,
-the checkout stays and the plan or journal names the reason. A person's
-own `suds reclaim --apply` can still accept a matching release as evidence.
+A remote-tracking branch can show that a remote holds the checkout's
+head. A release with `--landed COMMIT` can also serve as evidence while
+the head still matches `COMMIT`. Suds looks for a local remote-tracking
+reference that contains the released commit at planning and before
+removal. The journal records the reference when Suds finds one at removal.
 
 Suds has Git remove the linked checkout without force. The branch and its
 commits stay in the repository. Suds never names a main checkout.
@@ -373,16 +371,15 @@ registration adds knowledge and no permission:
 
 - Suds removes nothing beneath a checkout that a client registered and has
   not released, and it reads the registry anew before each removal.
-- A release ends the registration for its client and attempt. A linked
-  checkout that its clients have released enters each reclaim plan before
-  other checkouts. The rules of [Reclamation](#reclamation) decide whether
-  it leaves.
+- A release ends the registration for its client and attempt. In
+  `suds reclaim`, a linked checkout that its clients have released takes
+  priority over other checkouts. The rules of [Reclamation](#reclamation)
+  decide whether it leaves.
 - A client can report delivery with `suds release --checkout DIR --client
   bosun --attempt wf-12 --landed COMMIT`. After a squash merge, a pull
   request's head can serve as evidence if it has been fetched into a local
-  remote-tracking reference. A scheduled run under the standing approval
-  can remove the linked checkout when Suds verifies the head and the other
-  conditions of [Reclamation](#reclamation).
+  remote-tracking reference. A person can also approve removal based on a
+  matching release when no local reference contains the released head.
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading
@@ -403,10 +400,10 @@ the greater of half of the disk and 100 GiB unless the settings name
 another. Each reading says in its `enforced` field whether a filesystem
 limit enforces the ceiling, as [Arena](#arena) describes.
 
-The `maintain` command reclaims build state, removes eligible released
-linked checkouts, and trims the stores only when the settings hold the
-owner's standing approval. The journal records the standing approval as
-each run's authority.
+The `maintain` command reclaims derived state, including eligible build
+output inside released checkouts, and trims the stores only when the
+settings hold the owner's standing approval. The journal records the
+standing approval as each run's authority.
 
 Suds reads its settings from the file `settings.json`. On Linux the file
 lies in `~/.config/suds`, and on macOS it lies in

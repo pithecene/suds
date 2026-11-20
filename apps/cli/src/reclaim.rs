@@ -9,7 +9,9 @@ use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
-use suds_core::reclaim::plan::{Candidate, Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
+use suds_core::reclaim::plan::{
+    Candidate, CheckoutScope, Decision, Observed, Policy, ReclaimPlan, plan_reclaim,
+};
 use suds_core::registry::{self, Reading, Standings};
 use suds_core::state::Directories;
 
@@ -34,9 +36,12 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     let git = Git::default();
     let policy = Policy {
         idle_seconds: args.idle_minutes.saturating_mul(60),
-        checkouts: args.checkouts,
+        checkouts: if args.checkouts {
+            CheckoutScope::AllLinked
+        } else {
+            CheckoutScope::Released
+        },
         tolerate_unreadable_processes: args.tolerate_unreadable_processes,
-        admit_landed: true,
     };
     let observed = Observed {
         liveness: &Liveness::observe(),

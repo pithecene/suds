@@ -11,7 +11,7 @@ use suds_core::reclaim::execute::{Authority, Conditions, ReclaimReport, apply};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{
-    Candidate, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
+    Candidate, CheckoutScope, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
 };
 use suds_core::registry::{self, Reading, Standings};
 use tempfile::TempDir;
@@ -129,9 +129,12 @@ impl Fixture {
         );
         let policy = Policy {
             idle_seconds: IDLE,
-            checkouts,
+            checkouts: if checkouts {
+                CheckoutScope::AllLinked
+            } else {
+                CheckoutScope::Released
+            },
             tolerate_unreadable_processes: false,
-            admit_landed: true,
         };
         let observed = Observed {
             liveness,
@@ -453,9 +456,8 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
     );
     let tolerant = Policy {
         idle_seconds: IDLE,
-        checkouts: false,
+        checkouts: CheckoutScope::DerivedOnly,
         tolerate_unreadable_processes: true,
-        admit_landed: false,
     };
     let plan = plan_reclaim(
         &scan,
@@ -537,9 +539,8 @@ fn names_each_directory_once_when_roots_overlap() {
     );
     let policy = Policy {
         idle_seconds: IDLE,
-        checkouts: true,
+        checkouts: CheckoutScope::AllLinked,
         tolerate_unreadable_processes: false,
-        admit_landed: false,
     };
     let plan = plan_reclaim(
         &scan,
@@ -1047,7 +1048,7 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
 }
 
 #[test]
-fn keeps_a_landed_checkout_when_its_tracking_reference_disappears_after_planning() {
+fn a_persons_plan_with_a_verified_head_still_requires_personal_approval() {
     let fixture = Fixture::new();
     let git_adapter = Git::default();
     let head = git_adapter.head(&fixture.linked).unwrap();
@@ -1060,36 +1061,12 @@ fn keeps_a_landed_checkout_when_its_tracking_reference_disappears_after_planning
         0,
     )
     .unwrap();
-    let at = now() + 2 * IDLE_SECONDS;
-    let plan = plan_reclaim(
-        &inspect(
-            std::slice::from_ref(&fixture.workspace),
-            &Environment::default(),
-        ),
-        &Observed {
-            liveness: &nobody(),
-            registry: &fixture.standings(),
-        },
-        &git_adapter,
-        Policy {
-            idle_seconds: IDLE,
-            checkouts: false,
-            tolerate_unreadable_processes: false,
-            admit_landed: false,
-        },
-        at,
-    );
+    let plan = fixture.plan(&nobody(), false);
     let candidate = find(&plan, &fixture.linked);
     assert_eq!(candidate.decision, Decision::Remove);
-    assert_eq!(
-        candidate.evidence.last().unwrap(),
-        &format!("the remote-tracking reference refs/remotes/origin/feature holds {head}")
-    );
+    let proof = format!("the remote-tracking reference refs/remotes/origin/feature holds {head}");
+    assert_eq!(candidate.evidence.last(), Some(&proof));
 
-    git(
-        &fixture.repo,
-        &["update-ref", "-d", "refs/remotes/origin/feature"],
-    );
     let mut journal = open_journal(&fixture.journal);
     let report = apply(
         &mut journal,
@@ -1099,7 +1076,7 @@ fn keeps_a_landed_checkout_when_its_tracking_reference_disappears_after_planning
             observe: &mut nobody,
             registry: &mut || fixture.standings(),
             git: &git_adapter,
-            now: at,
+            now: now() + 2 * IDLE_SECONDS,
         },
     )
     .unwrap();
@@ -1110,13 +1087,20 @@ fn keeps_a_landed_checkout_when_its_tracking_reference_disappears_after_planning
         .unwrap();
     assert!(!removal.removed);
     assert_eq!(
-        removal.refusal,
-        Some(format!(
-            "no remote-tracking reference holds the released head {head}"
-        ))
+        removal.refusal.as_deref(),
+        Some("removing a linked checkout requires a person's approval")
     );
     assert!(fixture.linked.exists());
     assert!(!fixture.linked.join("target").exists());
+    drop(journal);
+
+    let plan = fixture.plan(&nobody(), false);
+    let approved = fixture.apply(&plan);
+    assert!(!fixture.linked.exists());
+    assert!(read(&fixture.journal).unwrap().iter().any(|record| {
+        matches!(&record.event, Event::Removed { run, evidence, .. }
+            if run == &approved.run && evidence.contains(&proof))
+    }));
 }
 
 #[test]
@@ -1155,7 +1139,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         candidate.evidence
     );
 
-    // A person's plan can accept a release that the standing approval cannot.
+    // Standing approval cannot apply the checkout removal from a person's plan.
     let mut journal = open_journal(&fixture.journal);
     let unattended = apply(
         &mut journal,

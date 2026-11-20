@@ -9,11 +9,11 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- **Scheduled runs can remove verified landed checkouts**.
+- **Reclaim records Git evidence for landed checkouts**.
 
-  Under the standing approval, a scheduled run can remove a clean, idle linked checkout that a client released with `--landed COMMIT`. Suds verifies at planning and removal that the head matches the release and that a local remote-tracking reference contains the commit. The journal records the reference used at removal. The plan keeps the checkout if it cannot verify the head.
+  A person's `suds reclaim --apply` can verify a matching landed release against a local remote-tracking reference. When Suds finds such a reference at removal, the journal records it. Removing a linked checkout requires a person's approval.
 
 ## [0.1.1] - 2026-11-20
 

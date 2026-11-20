@@ -166,8 +166,8 @@ pub struct ReclaimArgs {
     #[arg(long, value_name = "MINUTES", default_value_t = 60)]
     pub idle_minutes: u64,
 
-    /// Consider each linked checkout too. Suds has Git remove one only when
-    /// its tree is clean and a remote holds every commit of its head.
+    /// Consider all linked checkouts. By default, the plan considers only
+    /// released linked checkouts alongside derived state.
     #[arg(long)]
     pub checkouts: bool,
 

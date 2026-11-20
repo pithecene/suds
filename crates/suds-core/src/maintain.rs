@@ -21,7 +21,7 @@ use crate::pressure::{self, Measurement, Pressure, Thresholds};
 use crate::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
-use crate::reclaim::plan::{Observed, Policy, plan_reclaim};
+use crate::reclaim::plan::{CheckoutScope, Observed, Policy, plan_reclaim};
 use crate::registry;
 use crate::state::{Directories, Settings};
 use crate::stores::{self, Budgets, Inputs, Programs, StoresReport};
@@ -107,9 +107,8 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     let standings = registry::reading(&registry_path);
     let policy = Policy {
         idle_seconds,
-        checkouts: false,
+        checkouts: CheckoutScope::DerivedOnly,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
-        admit_landed: false,
     };
     let observed = Observed {
         liveness: &Liveness::observe(),

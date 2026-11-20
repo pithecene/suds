@@ -17,6 +17,3 @@ branches:
   pattern: "{user}/{type}/{scope}/{slug}"
   worktrees: .claude/worktrees
   stack: routed
-# The baseline holds the findings that Suds held when a check first read it (records/contracts/CONFIG.md §16).
-adoption:
-  baseline: bosun.baseline.json

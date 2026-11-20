@@ -24,6 +24,16 @@ fn inspect(roots: &[&Path]) -> (Value, i32) {
     (report, output.status.code().expect("exit code"))
 }
 
+/// Inspects `dir` and returns its root's report. The inspection must end
+/// with status 0 and a complete root.
+fn complete_root(dir: &Path) -> Value {
+    let (mut report, code) = inspect(&[dir]);
+    assert_eq!(code, 0);
+    let root = report["roots"][0].take();
+    assert_eq!(root["status"], "complete");
+    root
+}
+
 fn write(path: &Path, size: usize) {
     fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
     fs::write(path, vec![b'x'; size]).expect("write fixture");
@@ -54,10 +64,7 @@ fn nested_files_aggregate_into_root_and_child() {
     write(&dir.path().join("a/d.txt"), 50);
     write(&dir.path().join("e.txt"), 10);
 
-    let (report, code) = inspect(&[dir.path()]);
-    assert_eq!(code, 0);
-    let root = &report["roots"][0];
-    assert_eq!(root["status"], "complete");
+    let root = &complete_root(dir.path());
     assert_eq!(root["logical_bytes"], 160);
     assert_eq!(root["files"], 3);
     assert_eq!(root["directories"], 2);
@@ -124,10 +131,7 @@ fn broken_symlink_is_counted_without_aborting() {
     symlink(dir.path().join("missing"), dir.path().join("broken")).unwrap();
     write(&dir.path().join("present.txt"), 5);
 
-    let (report, code) = inspect(&[dir.path()]);
-    assert_eq!(code, 0);
-    let root = &report["roots"][0];
-    assert_eq!(root["status"], "complete");
+    let root = &complete_root(dir.path());
     assert_eq!(root["symlinks"], 1);
     assert_eq!(root["files"], 1);
     assert_eq!(root["error_count"], 0);

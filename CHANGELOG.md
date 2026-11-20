@@ -31,6 +31,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The systemd unit accepts a partial run**: `suds maintain` ends with status 1 when it refuses a removal or cannot read an entry, and systemd then marked each such run as failed. The unit from `suds schedule` now names that status as a success.
 - **A run removes a checkout and its build state together**: a run removed a checkout's build state first, which changed the checkout, so the checkout counted as recently modified and waited for the next run. Git now removes the checkout first, with the build state in it.
 - **A plan keeps what another user owns**: a container that runs as the administrator leaves directories that the user cannot remove, and each run tried and failed. The plan now keeps such a directory with the reason `owned_by_another_user`.
 - **A repository inside a candidate needs proof of its fetch**: only CMake's own layout now proves that a build fetched a repository. Any other repository in build state is a checkout, so the build state stays. A fetched repository counts as work when it holds a local branch, tag, stash, or second worktree. A linked checkout stays while a fetched repository in its build state holds work, and a registration inside a candidate keeps the candidate.

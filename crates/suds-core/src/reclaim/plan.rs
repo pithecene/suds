@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::development::{Checkout, CheckoutKind, DevelopmentScan, Ecosystem, Survey};
+use crate::development::{self, Checkout, CheckoutKind, DevelopmentScan, Ecosystem, Survey};
 use crate::inspection::EntryRevision;
 use crate::model::Measure;
 use crate::organize::native::NativePath;
@@ -252,12 +252,14 @@ pub fn plan_reclaim(
         let subject = Subject::FetchedToolchain {
             ecosystem: store.ecosystem,
         };
+        let (_, survey, repositories) = development::survey_tree(&store.path);
         let (kept, evidence) = judge.fetched_toolchain(
             &owner.path,
             &store.path,
             store.ecosystem,
             store.measure.newest_modified.as_deref(),
-            &Survey::default(),
+            &survey,
+            &repositories,
         );
         candidates.extend(candidate(
             &store.path,
@@ -310,7 +312,14 @@ fn judge_linked(
         .chain([&checkout.own])
         .filter_map(|measure| measure.newest_modified.as_deref())
         .max();
-    judge.checkout(&checkout.path, newest, &Survey::default())
+    // Git removes a checkout with everything that it ignores, so each
+    // repository inside its build state must hold nothing of its own.
+    let repositories: Vec<PathBuf> = checkout
+        .build_state
+        .iter()
+        .flat_map(|build| build.repositories.iter().cloned())
+        .collect();
+    judge.checkout(&checkout.path, newest, &Survey::default(), &repositories)
 }
 
 /// The facts that every judgment shares. The planner and the executor judge
@@ -339,6 +348,7 @@ impl Judge<'_> {
             ecosystem.label()
         )];
         let kept = surveyed(survey, &mut evidence)
+            .or_else(|| self.held_beneath(path, &mut evidence))
             .or_else(|| self.fetched(repositories, &mut evidence))
             .or_else(|| self.in_use(checkout, &mut evidence))
             .or_else(|| self.recent(measure.newest_modified.as_deref(), &mut evidence))
@@ -357,15 +367,28 @@ impl Judge<'_> {
         ecosystem: Ecosystem,
         newest: Option<&str>,
         survey: &Survey,
+        repositories: &[PathBuf],
     ) -> (Option<Kept>, Vec<String>) {
         let mut evidence = vec![format!(
             "the layout of {} proves that the checkout's build fetches the directory",
             ecosystem.label()
         )];
+        // No layout proves that the toolchain fetched a repository beneath
+        // it, so such a repository may hold work.
+        let nested = repositories.first().map(|nested| {
+            evidence.push(format!(
+                "the repository {} lies beneath it",
+                nested.display()
+            ));
+            Kept::HoldsCheckout
+        });
         let kept = surveyed(survey, &mut evidence)
+            .or(nested)
+            .or_else(|| self.held_beneath(path, &mut evidence))
             .or_else(|| self.in_use(checkout, &mut evidence))
             .or_else(|| self.recent(newest, &mut evidence))
-            .or_else(|| self.fetched(&[path.to_path_buf()], &mut evidence));
+            .or_else(|| self.fetched(&[path.to_path_buf()], &mut evidence))
+            .or_else(|| self.tracked(checkout, path, &mut evidence));
         (kept, evidence)
     }
 
@@ -377,11 +400,14 @@ impl Judge<'_> {
         path: &Path,
         newest: Option<&str>,
         survey: &Survey,
+        repositories: &[PathBuf],
     ) -> (Option<Kept>, Vec<String>) {
         let mut evidence = Vec::new();
         let kept = surveyed(survey, &mut evidence)
+            .or_else(|| self.held_beneath(path, &mut evidence))
             .or_else(|| self.in_use(path, &mut evidence))
             .or_else(|| self.recent(newest, &mut evidence))
+            .or_else(|| self.fetched(repositories, &mut evidence))
             .or_else(|| unsaved_work(self.git, path, &mut evidence));
         (kept, evidence)
     }
@@ -461,6 +487,20 @@ impl Judge<'_> {
         }
     }
 
+    /// Keeps a candidate when a client registered it or a directory beneath
+    /// it. [`Judge::in_use`] reports a registry that Suds cannot read, and
+    /// it covers a registration above the candidate.
+    fn held_beneath(&self, path: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
+        let (held, standing) = registry::held_beneath(self.registry.as_ref().ok()?, path)?;
+        evidence.push(format!(
+            "the client {} registered {} at {} and has not released it",
+            standing.client,
+            held.display(),
+            standing.at
+        ));
+        Some(Kept::Registered)
+    }
+
     /// Keeps build state that holds a repository with work of its own. A
     /// build fetches some dependencies as repositories, and such a
     /// repository holds only what a remote holds.
@@ -470,7 +510,7 @@ impl Judge<'_> {
                 Ok(true) => {}
                 Ok(false) => {
                     evidence.push(format!(
-                        "the repository {} beneath it holds a change or a commit that no remote holds",
+                        "the repository {} holds a change, a commit that no remote holds, or a second worktree",
                         repository.display()
                     ));
                     return Some(Kept::HoldsCheckout);
@@ -516,6 +556,13 @@ impl Judge<'_> {
 /// Keeps a directory that holds more than derived state, or whose
 /// measurement could not read an entry.
 fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
+    if survey.checkouts_beneath > 0 {
+        evidence.push(format!(
+            "{} repositories lie beneath it, and no build's layout proves them fetched",
+            survey.checkouts_beneath
+        ));
+        return Some(Kept::HoldsCheckout);
+    }
     if survey.skipped_mount_count > 0 {
         evidence.push(format!(
             "{} mount points lie beneath it, and Suds measured nothing behind them",

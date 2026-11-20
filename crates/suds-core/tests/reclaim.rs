@@ -644,19 +644,7 @@ fn reads_a_plan_that_an_earlier_release_recorded() {
 #[test]
 fn removes_build_state_that_holds_a_repository_that_a_build_fetched() {
     let fixture = Fixture::new();
-    // A build clones a dependency into its own directory, in CMake's way.
-    let remote = fixture.workspace.parent().unwrap().join("remote.git");
-    let fetched = fixture.repo.join("target/_deps/dependency-src");
-    fs::create_dir_all(fetched.parent().unwrap()).unwrap();
-    git(
-        fetched.parent().unwrap(),
-        &[
-            "clone",
-            "--quiet",
-            remote.to_str().unwrap(),
-            "dependency-src",
-        ],
-    );
+    let (build, fetched) = cmake_build(&fixture, &fixture.repo);
 
     let scan = inspect(
         std::slice::from_ref(&fixture.workspace),
@@ -669,10 +657,15 @@ fn removes_build_state_that_holds_a_repository_that_a_build_fetched() {
             .all(|checkout| checkout.path != fetched)
     );
     let plan = fixture.plan(&nobody(), false);
-    let target = find(&plan, &fixture.repo.join("target"));
-    assert_eq!(target.decision, Decision::Remove);
+    let candidate = find(&plan, &build);
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
+    );
     assert!(
-        target
+        candidate
             .evidence
             .iter()
             .any(|fact| fact.contains("holds only what a remote holds"))
@@ -688,11 +681,30 @@ fn removes_build_state_that_holds_a_repository_that_a_build_fetched() {
     assert_eq!(report.status, RunStatus::Partial);
 }
 
-#[test]
-fn removes_a_toolchain_that_a_checkout_fetched_as_a_repository() {
-    let fixture = Fixture::new();
-    // The linked checkout clones a vcpkg checkout into its own tree, which
-    // Git ignores there.
+/// A CMake build directory in `checkout` that Git ignores. Its build cloned
+/// one dependency in CMake's way, beside the bookkeeping of that fetch. The
+/// result is the build directory and the dependency's repository.
+fn cmake_build(fixture: &Fixture, checkout: &Path) -> (PathBuf, PathBuf) {
+    let remote = fixture.workspace.parent().unwrap().join("remote.git");
+    let build = checkout.join("build");
+    write(&build.join("CMakeCache.txt"), "");
+    write(&build.join("_deps/dependency-subbuild/CMakeLists.txt"), "");
+    git(
+        &build.join("_deps"),
+        &[
+            "clone",
+            "--quiet",
+            remote.to_str().unwrap(),
+            "dependency-src",
+        ],
+    );
+    write(&fixture.repo.join(".git/info/exclude"), "build/\n.vcpkg/\n");
+    (build.clone(), build.join("_deps/dependency-src"))
+}
+
+/// A vcpkg checkout that the linked checkout cloned into its own tree, which
+/// Git ignores there.
+fn fetched_toolchain(fixture: &Fixture) -> PathBuf {
     let remote = fixture.workspace.parent().unwrap().join("remote.git");
     git(
         &fixture.linked,
@@ -700,9 +712,18 @@ fn removes_a_toolchain_that_a_checkout_fetched_as_a_repository() {
     );
     let toolchain = fixture.linked.join(".vcpkg");
     write(&toolchain.join(".vcpkg-root"), "");
-    write(&toolchain.join(".git/info/exclude"), ".vcpkg-root\n");
-    // Every checkout of the repository ignores the toolchain's directory.
-    write(&fixture.repo.join(".git/info/exclude"), ".vcpkg/\n");
+    write(
+        &toolchain.join(".git/info/exclude"),
+        ".vcpkg-root\nbuildtrees/\n",
+    );
+    write(&fixture.repo.join(".git/info/exclude"), "build/\n.vcpkg/\n");
+    toolchain
+}
+
+#[test]
+fn removes_a_toolchain_that_a_checkout_fetched_as_a_repository() {
+    let fixture = Fixture::new();
+    let toolchain = fetched_toolchain(&fixture);
 
     let plan = fixture.plan(&nobody(), false);
     let candidate = find(&plan, &toolchain);
@@ -793,4 +814,155 @@ fn removes_each_cache_that_a_project_points_into_its_checkout() {
     assert!(!cache.join("go-mod").exists());
     assert!(!cache.join("ccache").exists());
     assert!(fixture.linked.join("docs/README").exists());
+}
+
+#[test]
+fn a_fetched_repository_holds_no_branch_tag_stash_or_worktree_of_its_own() {
+    let fixture = Fixture::new();
+    let (_, fetched) = cmake_build(&fixture, &fixture.repo);
+    let git_adapter = Git::default();
+    let only_fetched = || git_adapter.holds_only_fetched(&fetched).unwrap();
+    assert!(only_fetched());
+
+    // A commit on another local branch is work, though a remote holds the head.
+    git(&fetched, &["checkout", "--quiet", "-b", "local"]);
+    write(&fetched.join("patch.txt"), "local");
+    git(&fetched, &["add", "."]);
+    git(&fetched, &["commit", "-m", "local patch"]);
+    git(&fetched, &["checkout", "--quiet", "main"]);
+    assert!(!only_fetched());
+
+    // A local tag proves no fetch.
+    git(&fetched, &["tag", "kept", "local"]);
+    git(&fetched, &["branch", "--quiet", "-D", "local"]);
+    assert!(!only_fetched());
+    git(&fetched, &["tag", "-d", "kept"]);
+    assert!(only_fetched());
+
+    // A second worktree borrows the repository.
+    let other = fixture.workspace.join("borrower");
+    git(
+        &fetched,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            other.to_str().unwrap(),
+        ],
+    );
+    assert!(!only_fetched());
+    git(&fetched, &["worktree", "remove", other.to_str().unwrap()]);
+    assert!(only_fetched());
+
+    // A directory inside another checkout is no repository of its own.
+    assert!(
+        !git_adapter
+            .holds_only_fetched(&fixture.linked.join("src"))
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_shallow_fetch_at_a_tag_holds_only_what_it_fetched() {
+    let fixture = Fixture::new();
+    let remote = fixture.workspace.parent().unwrap().join("remote.git");
+    git(&fixture.repo, &["tag", "v1"]);
+    git(&fixture.repo, &["push", "--quiet", "origin", "v1"]);
+    let url = format!("file://{}", remote.display());
+    git(
+        &fixture.workspace,
+        &[
+            "clone", "--quiet", "--depth", "1", "--branch", "v1", &url, "shallow",
+        ],
+    );
+    let shallow = fixture.workspace.join("shallow");
+    let git_adapter = Git::default();
+    assert!(git_adapter.holds_only_fetched(&shallow).unwrap());
+
+    write(&shallow.join("patch.txt"), "local");
+    git(&shallow, &["add", "."]);
+    git(&shallow, &["commit", "-m", "local patch"]);
+    assert!(!git_adapter.holds_only_fetched(&shallow).unwrap());
+}
+
+#[test]
+fn a_repository_that_no_layout_proves_fetched_stays_a_checkout() {
+    let fixture = Fixture::new();
+    let (build, _) = cmake_build(&fixture, &fixture.repo);
+    // A person cloned a repository into the build directory.
+    let remote = fixture.workspace.parent().unwrap().join("remote.git");
+    write(&build.join("tools/.keep"), "");
+    git(
+        &build.join("tools"),
+        &["clone", "--quiet", remote.to_str().unwrap(), "mine"],
+    );
+    let mine = build.join("tools/mine");
+
+    let scan = inspect(
+        std::slice::from_ref(&fixture.workspace),
+        &Environment::default(),
+    );
+    assert!(scan.checkouts.iter().any(|checkout| checkout.path == mine));
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &build).kept, Some(Kept::HoldsCheckout));
+    fixture.apply(&plan);
+    assert!(mine.join(".git").exists());
+}
+
+#[test]
+fn a_fetched_repository_with_work_keeps_its_linked_checkout() {
+    let fixture = Fixture::new();
+    let (_, fetched) = cmake_build(&fixture, &fixture.linked);
+    let plan = fixture.plan(&nobody(), true);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+
+    // Git would remove the ignored build directory with the checkout, so
+    // work in the dependency keeps the checkout at the removal too.
+    write(&fetched.join("notes.txt"), "untracked");
+    let kept = fixture.plan(&nobody(), true);
+    assert_eq!(find(&kept, &fixture.linked).kept, Some(Kept::HoldsCheckout));
+    fixture.apply(&plan);
+    assert!(fetched.join("notes.txt").exists());
+}
+
+#[test]
+fn a_registration_inside_a_candidate_keeps_the_candidate() {
+    let fixture = Fixture::new();
+    let (build, fetched) = cmake_build(&fixture, &fixture.repo);
+    let toolchain = fetched_toolchain(&fixture);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &build).decision, Decision::Remove);
+    assert_eq!(find(&plan, &toolchain).decision, Decision::Remove);
+
+    fixture.record(&fetched, registry::Event::Registered);
+    fixture.record(&toolchain, registry::Event::Registered);
+    let held = fixture.plan(&nobody(), false);
+    assert_eq!(find(&held, &build).kept, Some(Kept::Registered));
+    assert_eq!(find(&held, &toolchain).kept, Some(Kept::Registered));
+    // The earlier plan meets the registrations at its removals.
+    fixture.apply(&plan);
+    assert!(fetched.exists());
+    assert!(toolchain.exists());
+}
+
+#[test]
+fn keeps_a_toolchain_that_is_no_repository_or_that_holds_one() {
+    let fixture = Fixture::new();
+    let toolchain = fetched_toolchain(&fixture);
+    // A build tree of the toolchain holds a repository of its own.
+    let nested = toolchain.join("buildtrees/port");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+    write(&nested.join("work.txt"), "work");
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &toolchain).kept, Some(Kept::HoldsCheckout));
+    fs::remove_dir_all(&nested).unwrap();
+
+    // A checkout that tracks vcpkg's files holds no fetched repository.
+    fs::remove_dir_all(toolchain.join(".git")).unwrap();
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &toolchain).decision, Decision::Keep);
+    fixture.apply(&plan);
+    assert!(toolchain.join(".vcpkg-root").exists());
 }

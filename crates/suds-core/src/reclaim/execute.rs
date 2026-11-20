@@ -201,7 +201,7 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_build_state(path);
+            let (measure, survey, repositories) = development::survey_build_state(path, ecosystem);
             judge.build_state(
                 candidate.checkout.as_path(),
                 path,
@@ -212,8 +212,13 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
             )
         }
         Subject::LinkedCheckout => {
-            let (measure, survey) = development::survey_tree(path);
-            judge.checkout(path, measure.newest_modified.as_deref(), &survey)
+            let (measure, survey, repositories) = development::survey_tree(path);
+            judge.checkout(
+                path,
+                measure.newest_modified.as_deref(),
+                &survey,
+                &repositories,
+            )
         }
         Subject::FetchedToolchain { ecosystem } => {
             if development::toolchain_at(path) != Some(ecosystem) {
@@ -223,13 +228,14 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
                     path.display()
                 ));
             }
-            let (measure, survey) = development::survey_tree(path);
+            let (measure, survey, repositories) = development::survey_tree(path);
             judge.fetched_toolchain(
                 candidate.checkout.as_path(),
                 path,
                 ecosystem,
                 measure.newest_modified.as_deref(),
                 &survey,
+                &repositories,
             )
         }
     };

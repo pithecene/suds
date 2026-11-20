@@ -739,3 +739,58 @@ fn removes_a_toolchain_that_a_checkout_fetched_as_a_repository() {
     assert!(!toolchain.exists());
     assert!(fixture.linked.join("src/lib.rs").exists());
 }
+
+#[test]
+fn removes_each_cache_that_a_project_points_into_its_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    write(&fixture.repo.join(".git/info/exclude"), ".cache/\n");
+    let cache = fixture.linked.join(".cache");
+    write(
+        &cache.join("go-build/README"),
+        "This directory holds cached build artifacts from the Go build system.\n",
+    );
+    write(&cache.join("go-build/00/object-a"), "object");
+    write(
+        &cache.join("go-mod/cache/download/example.com/@v/list"),
+        "v1",
+    );
+    // Go lets no one write a module's directory.
+    let module = cache.join("go-mod/example.com@v1");
+    write(&module.join("lib.go"), "package lib");
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o555)).unwrap();
+    write(
+        &cache.join("ccache/0/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by ccache.\n",
+    );
+    write(&cache.join("ccache/0/stats"), "0");
+    // A directory with a README of its own is no cache.
+    write(&fixture.linked.join("docs/README"), "The documents.");
+
+    let plan = fixture.plan(&nobody(), false);
+    for (name, label) in [("go-build", "go"), ("go-mod", "go"), ("ccache", "ccache")] {
+        let candidate = find(&plan, &cache.join(name));
+        assert_eq!(
+            candidate.decision,
+            Decision::Remove,
+            "{:?}",
+            candidate.evidence
+        );
+        let Subject::BuildState { ecosystem } = candidate.subject else {
+            panic!("{name} is build state");
+        };
+        assert_eq!(ecosystem.label(), label);
+    }
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| candidate.path.as_path() != fixture.linked.join("docs"))
+    );
+
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);
+    assert!(!cache.join("go-build").exists());
+    assert!(!cache.join("go-mod").exists());
+    assert!(!cache.join("ccache").exists());
+    assert!(fixture.linked.join("docs/README").exists());
+}

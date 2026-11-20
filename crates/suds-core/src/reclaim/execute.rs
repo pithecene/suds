@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::development;
+use crate::development::{self, Ecosystem};
 use crate::inspection::EntryRevision;
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
@@ -240,13 +240,44 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
     }
 }
 
+/// Lets the owner write each directory beneath `path`, without following a
+/// symbolic link. A directory that refuses the change makes the removal
+/// fail, and the removal reports it.
+fn grant_owner_write(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        grant_owner_write(&entry.path());
+    }
+}
+
 fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
     let path = candidate.path.as_path();
     match candidate.subject {
         // The standard library removes a tree without following a symbolic
         // link, so a link inside build state loses only itself.
-        Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => fs::remove_dir_all(path)
-            .map_err(|err| format!("could not remove {}: {err}", path.display())),
+        Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => {
+            // Go writes each module beneath directories that no one may
+            // write, so the removal first grants the owner that right.
+            if matches!(candidate.subject, Subject::BuildState { ecosystem } if ecosystem == Ecosystem::Go)
+            {
+                grant_owner_write(path);
+            }
+            fs::remove_dir_all(path)
+                .map_err(|err| format!("could not remove {}: {err}", path.display()))
+        }
         Subject::LinkedCheckout => {
             let repository = candidate
                 .repository

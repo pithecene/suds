@@ -369,6 +369,24 @@ fn is_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
+fn is_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+/// Whether the file at `path` is a short text that holds `word`.
+fn names(path: &Path, word: &str) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() < 4096)
+        && fs::read_to_string(path).is_ok_and(|text| text.contains(word))
+}
+
+/// Whether `dir` is a build cache of Go, which holds Go's own notice.
+fn go_build_cache(dir: &Path) -> bool {
+    names(
+        &dir.join("README"),
+        "cached build artifacts from the Go build system",
+    )
+}
+
 /// Classifies `dir` from the entries that its ecosystem writes. Build state
 /// has an owner, so the profile claims it only beneath a checkout.
 fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
@@ -410,6 +428,10 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
         }
         Some("vcpkg_installed") if beside("vcpkg.json") => Ecosystem::Vcpkg,
         _ if is_file(&dir.join("CMakeCache.txt")) => Ecosystem::Cmake,
+        // A project may point a cache into its own checkout, where each
+        // checkout then fills a copy. The cache's program names it there.
+        _ if go_build_cache(dir) || is_dir(&dir.join("cache/download")) => Ecosystem::Go,
+        _ if names(&dir.join("0/CACHEDIR.TAG"), "ccache") => Ecosystem::Ccache,
         _ => return None,
     };
     Some(Claim::Build(ecosystem))

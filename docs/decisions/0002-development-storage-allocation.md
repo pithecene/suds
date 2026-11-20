@@ -23,10 +23,13 @@ person watches.
 
 ## Decision
 
-1. Suds allocates and reclaims a workstation's development storage. That
+1. Suds bounds and reclaims a workstation's development storage. That
    storage is an arena under a ceiling, and it holds the checkouts, the
    shared stores of each ecosystem, the toolchains, and the container
-   engine's data.
+   engine's data. Suds reserves no space and hands none out. The
+   filesystem allocates, and Suds records who holds a checkout and whether
+   a build can make a directory again. The word arena names the boundary
+   of the standing approval.
 2. Every program that develops is a client of Suds: an agent that a person
    drives, Bosun, and the person. Bosun manages no storage. A client
    registers a checkout, releases it, reads the arena's pressure, and

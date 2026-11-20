@@ -169,6 +169,8 @@ proves none:
 | Node build state | A `node_modules` directory beside a `package.json` or a `pnpm-workspace.yaml`, or one that holds the state file of pnpm or npm |
 | CMake build state | A directory that holds `CMakeCache.txt` |
 | vcpkg build state | A `vcpkg_installed` directory beside a `vcpkg.json` |
+| Go cache in a checkout | A directory that holds `README`, `trim.txt`, `00`, and `ff`, or one that holds `cache/download` |
+| ccache cache in a checkout | A directory whose `0` directory holds `CACHEDIR.TAG` and `stats` |
 | vcpkg checkout | A directory that holds `.vcpkg-root` |
 
 Suds claims build state only beneath a checkout, so build output that no

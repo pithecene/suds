@@ -31,6 +31,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A plan keeps what another user owns**: a container that runs as the administrator leaves directories that the user cannot remove, and each run tried and failed. The plan now keeps such a directory with the reason `owned_by_another_user`.
 - **A repository inside a candidate needs proof of its fetch**: only CMake's own layout now proves that a build fetched a repository. Any other repository in build state is a checkout, so the build state stays. A fetched repository counts as work when it holds a local branch, tag, stash, or second worktree. A linked checkout stays while a fetched repository in its build state holds work, and a registration inside a candidate keeps the candidate.
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.

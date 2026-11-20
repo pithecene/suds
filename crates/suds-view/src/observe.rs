@@ -8,6 +8,7 @@ use suds_core::registry;
 use suds_core::state::{Directories, Settings, load_settings};
 use suds_core::stores::Budgets;
 
+use crate::remote;
 use crate::workstation::{Workstation, workstation};
 
 /// What one reading of the workstation found.
@@ -64,11 +65,8 @@ pub fn observe(environment: &Environment, now: i64) -> Result<Observation, Strin
     );
     // The view states an unreadable registry, so no hold never reads as an empty registry.
     let registry = registry::reading(&directories.registry());
-    Ok(Observation::Measured(Box::new(workstation(
-        &scan,
-        now,
-        Some(&reading),
-        &registry,
-        &budgets_of(&settings),
-    ))))
+    let budgets = budgets_of(&settings);
+    let mut view = workstation(&scan, now, Some(&reading), &registry, &budgets);
+    remote::fill(&mut view.checkouts);
+    Ok(Observation::Measured(Box::new(view)))
 }

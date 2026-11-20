@@ -60,6 +60,9 @@ pub struct Checkout {
     pub linked: bool,
     /// The main checkout of a linked checkout's repository.
     pub repository: Option<String>,
+    /// The remote `origin` of the checkout's repository, as host, owner, and name. Each
+    /// clone of one repository states the same remote.
+    pub origin: Option<String>,
     pub own_bytes: u64,
     pub build_bytes: u64,
     pub build_state: Vec<BuildState>,
@@ -211,6 +214,7 @@ fn checkouts(scan: &DevelopmentScan, standings: &Standings) -> Vec<Checkout> {
                 parent,
                 linked: checkout.kind == CheckoutKind::Linked,
                 repository: checkout.repository.as_deref().map(shown),
+                origin: None,
                 own_bytes: checkout.own.allocated_bytes,
                 build_bytes: build_state.iter().map(|build| build.bytes).sum(),
                 build_state,

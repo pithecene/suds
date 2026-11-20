@@ -255,6 +255,11 @@ impl SharedScan {
     pub fn skipped_mount_count(&self) -> u64 {
         self.walker.mount_count
     }
+
+    /// The directories so far that belong to another user.
+    pub fn foreign_directory_count(&self) -> u64 {
+        self.walker.foreign_directory_count
+    }
 }
 
 /// The state that persists across one root's traversal.
@@ -281,6 +286,10 @@ struct Walker {
     error_count: u64,
     errors: Vec<ScanError>,
     mount_count: u64,
+    /// The directories that belong to another user than the one who runs
+    /// the scan. That user cannot remove what such a directory holds.
+    foreign_directory_count: u64,
+    user: u32,
     mounts: Vec<PathBuf>,
     /// Whether the scan stopped at a cancellation request.
     cancelled: bool,
@@ -294,6 +303,8 @@ impl Walker {
             error_count: 0,
             errors: Vec::new(),
             mount_count: 0,
+            foreign_directory_count: 0,
+            user: rustix::process::geteuid().as_raw(),
             mounts: Vec::new(),
             cancelled: false,
         }
@@ -415,6 +426,9 @@ impl Walker {
         let counts_storage = *kind != EntryKind::File
             || meta.nlink() <= 1
             || self.linked.insert((meta.dev(), meta.ino()));
+        if *kind == EntryKind::Directory && meta.uid() != self.user {
+            self.foreign_directory_count = self.foreign_directory_count.saturating_add(1);
+        }
         tally.count(*kind, meta, counts_storage);
         Some(EntryRevision::from_metadata(meta))
     }

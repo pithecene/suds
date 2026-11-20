@@ -98,6 +98,10 @@ pub struct Survey {
     pub skipped_mount_count: u64,
     /// The entries beneath it that the measurement could not read.
     pub error_count: u64,
+    /// The directories in it that belong to another user, whose entries the
+    /// user who runs Suds cannot remove.
+    #[serde(default)]
+    pub foreign_directory_count: u64,
 }
 
 impl Survey {
@@ -664,6 +668,7 @@ fn fetched_by(ecosystem: Ecosystem, build: &Path, dir: &Path) -> bool {
 /// `.git` entry is a checkout, so the measurement sets it aside.
 fn measure_build(scan: &mut SharedScan, path: &Path, ecosystem: Ecosystem) -> BuildMeasure {
     let (mounts, errors) = (scan.skipped_mount_count(), scan.error_count());
+    let foreign = scan.foreign_directory_count();
     let mut fetched = Vec::new();
     let bounded = scan.measure(path, &mut |dir| {
         if fs::symlink_metadata(dir.join(".git")).is_err() {
@@ -682,6 +687,7 @@ fn measure_build(scan: &mut SharedScan, path: &Path, ecosystem: Ecosystem) -> Bu
         checkouts_beneath: u64::try_from(unproven.len()).unwrap_or(u64::MAX),
         skipped_mount_count: scan.skipped_mount_count().saturating_sub(mounts),
         error_count: scan.error_count().saturating_sub(errors),
+        foreign_directory_count: scan.foreign_directory_count().saturating_sub(foreign),
     };
     BuildMeasure {
         measure,
@@ -718,6 +724,7 @@ pub(crate) fn survey_tree(path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
         checkouts_beneath: 0,
         skipped_mount_count: scan.skipped_mount_count(),
         error_count: scan.error_count(),
+        foreign_directory_count: scan.foreign_directory_count(),
     };
     let measure = bounded.map_or_else(Measure::default, |bounded| bounded.measure);
     (measure, survey, repositories)

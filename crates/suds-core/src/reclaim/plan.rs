@@ -139,6 +139,9 @@ pub enum Kept {
     Registered,
     /// Suds could not establish a fact that a removal needs.
     Unverified,
+    /// Another user owns a directory in it, so the user who runs Suds
+    /// cannot remove it.
+    OwnedByAnotherUser,
 }
 
 /// What the machine reports at planning: the processes' working
@@ -161,6 +164,7 @@ impl Kept {
             Kept::HoldsCheckout => "holds_checkout",
             Kept::HoldsMountPoint => "holds_mount_point",
             Kept::Registered => "registered",
+            Kept::OwnedByAnotherUser => "owned_by_another_user",
             Kept::Unverified => "unverified",
         }
     }
@@ -570,6 +574,13 @@ fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
         ));
         return Some(Kept::HoldsMountPoint);
     }
+    if survey.foreign_directory_count > 0 {
+        evidence.push(format!(
+            "another user owns {} directories in it, and Suds removes nothing with an administrator's rights",
+            survey.foreign_directory_count
+        ));
+        return Some(Kept::OwnedByAnotherUser);
+    }
     if survey.error_count > 0 {
         evidence.push(format!(
             "Suds could not read {} entries beneath it",
@@ -639,4 +650,25 @@ fn candidate(
         kept,
         evidence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Kept, surveyed};
+    use crate::development::Survey;
+
+    #[test]
+    fn keeps_a_directory_that_another_user_owns() {
+        let survey = Survey {
+            foreign_directory_count: 2,
+            ..Survey::default()
+        };
+        let mut evidence = Vec::new();
+        assert_eq!(
+            surveyed(&survey, &mut evidence),
+            Some(Kept::OwnedByAnotherUser)
+        );
+        assert!(evidence[0].contains("another user owns 2 directories"));
+        assert_eq!(surveyed(&Survey::default(), &mut Vec::new()), None);
+    }
 }

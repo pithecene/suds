@@ -245,10 +245,12 @@ Suds keeps a directory of build state in each of these cases:
 - Git tracks a file in the directory, or would track one. Suds removes a
   directory only when Git ignores every file beneath it.
 - A repository beneath it holds a changed file, or a commit that no
-  remote-tracking branch and no tag holds. A build fetches some
-  dependencies as repositories, and one that holds only what it fetched
-  keeps nothing.
+  remote-tracking branch holds. A build fetches some dependencies as
+  repositories, and one that holds only what it fetched keeps nothing.
 - A mount point lies beneath it, or Suds could not read an entry there.
+- Another user owns a directory in it, as a container that runs as the
+  administrator leaves it. Suds removes nothing with an administrator's
+  rights, so an administrator removes such a directory.
 
 The plan also names each toolchain that a checkout fetched into its own
 tree as a repository, such as a vcpkg checkout, which the checkout's build

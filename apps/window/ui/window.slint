@@ -6,7 +6,7 @@ export struct ClassItem { label: string, detail: string, share: float, tint: col
 // One row of the outline: a project, or one of its checkouts beneath it.
 export struct RowItem { project: bool, open: bool, name: string, caption: string, total: string, build: string, modified: string, share: float, build-share: float, state: string, state-rank: int, tint: color }
 // A project's frame and a checkout's tile on the storage map. The second rectangle is the build state's part.
-export struct FrameItem { x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, name: string, tip: string, labelled: bool, detailed: bool }
+export struct FrameItem { id: int, x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, name: string, tip: string, labelled: bool, detailed: bool }
 export struct TileItem { x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, id: int, name: string, tip: string, tint: color }
 export struct BuildItem { path: string, ecosystem: string, size: string, modified: string }
 export struct FactItem { label: string, value: string }
@@ -143,7 +143,7 @@ export component Window inherits Window {
     in property <[FrameItem]> frames;
     in property <[TileItem]> tiles;
     in property <string> checkout-count;
-    // The selected checkout's position among the tiles' ids, and the selected project's among the frames.
+    // The identifiers of the selected checkout's tile and of the selected project's frame.
     in property <int> selected-tile: -1;
     in property <int> selected-frame: -1;
     in property <[StoreItem]> stores;
@@ -437,7 +437,7 @@ export component Window inherits Window {
                                             keys.focus();
                                         }
                                     }
-                                    for frame[position] in root.frames: Rectangle {
+                                    for frame in root.frames: Rectangle {
                                         x: frame.x;
                                         y: frame.y;
                                         width: max(0px, frame.w - 1px);
@@ -472,11 +472,11 @@ export component Window inherits Window {
                                                 }
                                             }
                                             clicked => {
-                                                root.pick-project(position);
+                                                root.pick-project(frame.id);
                                                 keys.focus();
                                             }
                                         }
-                                        if position == root.selected-frame: Rectangle {
+                                        if frame.id == root.selected-frame: Rectangle {
                                             border-width: 2px;
                                             border-color: Palette.foreground;
                                             border-radius: 2px;

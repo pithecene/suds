@@ -255,6 +255,8 @@ pub fn frame(frame: &Frame, project: &Project) -> FrameItem {
     let (x, y, w, h) = place(&frame.rect);
     let (bx, by, bw, bh) = place(&frame.build);
     FrameItem {
+        // The map draws no frame for an empty project, so a frame names its project itself.
+        id: i32::try_from(frame.project).unwrap_or(-1),
         x,
         y,
         w,
@@ -352,7 +354,7 @@ pub fn store(store: &Store) -> StoreItem {
 mod tests {
     use suds_core::pressure::Level;
     use suds_view::{
-        BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, projects,
+        BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, map, projects,
     };
 
     use super::{builds, checkout_row, facts, notice, pressure_facts, project_row, short, store};
@@ -444,6 +446,21 @@ mod tests {
         let row = project_row(&found[0], false, None);
         assert_eq!(row.name, "acme/main");
         assert_eq!(row.caption, "2 checkouts · 2 clones · github.com/acme/main");
+    }
+
+    #[test]
+    fn a_frame_names_its_project_beyond_an_empty_one() {
+        let mut empty = fixture();
+        empty.path = "/work/aaa".into();
+        empty.repository = None;
+        (empty.own_bytes, empty.build_bytes) = (0, 0);
+        let checkouts = [empty, fixture()];
+        // The order of names puts the empty project first, and the map draws no frame for it.
+        let found = projects(&checkouts, "", Sort::Name);
+        assert_eq!(found[0].total_bytes(), 0);
+        let drawn = map(&found, &checkouts, 400.0, 200.0);
+        assert_eq!(drawn.frames.len(), 1);
+        assert_eq!(super::frame(&drawn.frames[0], &found[1]).id, 1);
     }
 
     #[test]

@@ -11,6 +11,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`suds reclaim` removes a toolchain that a checkout fetched**: a vcpkg checkout inside a checkout's own tree enters the plan beside that checkout's build state. It leaves under the same protections, and only when Git reports that its repository holds only what a remote holds. The development report names the checkout that owns each such toolchain.
 - **`suds arena` audits the ceiling of development storage**: the command reports the ceiling, the root's filesystem, and whether a filesystem enforces the ceiling. Where none does, it prints the commands that would for APFS, btrfs, and XFS, and it runs none of them. Each pressure reading now states whether a filesystem enforces its ceiling.
 - **Clients register checkouts and read the pressure of development storage**: `suds register` and `suds release` record which client holds a checkout, and Suds removes nothing beneath a registered one. `suds maintain` records a pressure reading against the ceiling, and `suds pressure` prints it. Under the standing approval of the settings, `suds maintain` also reclaims build state and trims the stores without a person. `suds schedule` prints the units that run it for systemd and for launchd.
 
@@ -28,5 +29,6 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A repository inside a candidate needs proof of its fetch**: only CMake's own layout now proves that a build fetched a repository. Any other repository in build state is a checkout, so the build state stays. A fetched repository counts as work when it holds a local branch, tag, stash, or second worktree. A linked checkout stays while a fetched repository in its build state holds work, and a registration inside a candidate keeps the candidate.
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.

@@ -201,7 +201,7 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_build_state(path);
+            let (measure, survey, repositories) = development::survey_build_state(path, ecosystem);
             judge.build_state(
                 candidate.checkout.as_path(),
                 path,
@@ -212,8 +212,31 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
             )
         }
         Subject::LinkedCheckout => {
-            let (measure, survey) = development::survey_tree(path);
-            judge.checkout(path, measure.newest_modified.as_deref(), &survey)
+            let (measure, survey, repositories) = development::survey_tree(path);
+            judge.checkout(
+                path,
+                measure.newest_modified.as_deref(),
+                &survey,
+                &repositories,
+            )
+        }
+        Subject::FetchedToolchain { ecosystem } => {
+            if development::toolchain_at(path) != Some(ecosystem) {
+                return Err(format!(
+                    "the layout of {} no longer proves that {} is a fetched toolchain",
+                    ecosystem.label(),
+                    path.display()
+                ));
+            }
+            let (measure, survey, repositories) = development::survey_tree(path);
+            judge.fetched_toolchain(
+                candidate.checkout.as_path(),
+                path,
+                ecosystem,
+                measure.newest_modified.as_deref(),
+                &survey,
+                &repositories,
+            )
         }
     };
     match kept {
@@ -228,7 +251,7 @@ fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
     match candidate.subject {
         // The standard library removes a tree without following a symbolic
         // link, so a link inside build state loses only itself.
-        Subject::BuildState { .. } => fs::remove_dir_all(path)
+        Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => fs::remove_dir_all(path)
             .map_err(|err| format!("could not remove {}: {err}", path.display())),
         Subject::LinkedCheckout => {
             let repository = candidate

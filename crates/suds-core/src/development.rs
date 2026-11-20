@@ -80,9 +80,9 @@ pub struct BuildState {
     pub measure: Measure,
     /// What the directory holds besides derived state.
     pub survey: Survey,
-    /// Each directory beneath it that holds a `.git` entry. A build fetches
-    /// some dependencies as repositories, and a removal asks Git whether
-    /// each one holds work that no remote holds.
+    /// Each repository beneath it that the build's own layout proves
+    /// fetched. A removal asks Git whether each one holds work that no
+    /// remote holds.
     pub repositories: Vec<PathBuf>,
 }
 
@@ -91,8 +91,8 @@ pub struct BuildState {
 /// state as a whole only when every count is zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Survey {
-    /// The directories beneath it that hold a `.git` entry. A removal asks
-    /// Git about each one, and the count alone keeps nothing.
+    /// The directories beneath it that hold a `.git` entry and that no
+    /// layout proves fetched. Each one is a checkout.
     pub checkouts_beneath: u64,
     /// The mount points beneath it, which the measurement did not enter.
     pub skipped_mount_count: u64,
@@ -155,6 +155,9 @@ pub struct Store {
     pub path: PathBuf,
     pub status: StoreStatus,
     pub measure: Measure,
+    /// For a toolchain that a checkout fetched into its own tree, that
+    /// checkout. A store at a program's own location has no owner.
+    pub owner: Option<PathBuf>,
 }
 
 /// One directory that the caller named as a place to look for checkouts.
@@ -421,6 +424,15 @@ pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
     }
 }
 
+/// The ecosystem whose layout proves that `dir` is a toolchain that a
+/// checkout fetched into its own tree.
+pub(crate) fn toolchain_at(dir: &Path) -> Option<Ecosystem> {
+    match claim(dir, true) {
+        Some(Claim::Toolchain(ecosystem)) => Some(ecosystem),
+        _ => None,
+    }
+}
+
 /// The main checkout that the `.git` file of `dir` names, when the file
 /// names an entry of that checkout's `worktrees` directory.
 fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
@@ -455,12 +467,12 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             unclassified: Measure::default(),
         };
         if let Some(claimed) = claim(path, false) {
-            found.take(&mut scan, path.clone(), claimed);
+            found.take(&mut scan, path.clone(), claimed, None);
         } else if let Some(bounded) = scan.measure(path, &mut |dir| claim(dir, false).is_some()) {
             workspace.unclassified = bounded.measure;
             for dir in bounded.set_aside {
                 if let Some(claimed) = claim(&dir, false) {
-                    found.take(&mut scan, dir, claimed);
+                    found.take(&mut scan, dir, claimed, None);
                 }
             }
         } else {
@@ -474,19 +486,26 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             for dir in bounded.set_aside {
                 match claim(&dir, true) {
                     Some(Claim::Build(ecosystem)) => {
-                        // A repository inside build state belongs to the
-                        // build that fetched it, so the report lists it as
-                        // no checkout of its own.
-                        let (measure, survey, repositories) = measure_build(&mut scan, &dir);
+                        // A repository that the build fetched belongs to
+                        // the build. Any other one is a checkout, and the
+                        // report lists it as one.
+                        let build = measure_build(&mut scan, &dir, ecosystem);
+                        for path in build.unproven {
+                            if let Some(claimed) = claim(&path, false) {
+                                found.take(&mut scan, path, claimed, Some(&checkout.path));
+                            }
+                        }
                         checkout.build_state.push(BuildState {
                             path: dir,
                             ecosystem,
-                            measure,
-                            survey,
-                            repositories,
+                            measure: build.measure,
+                            survey: build.survey,
+                            repositories: build.fetched,
                         });
                     }
-                    Some(claimed) => found.take(&mut scan, dir, claimed),
+                    Some(claimed) => {
+                        found.take(&mut scan, dir, claimed, Some(&checkout.path));
+                    }
                     None => {}
                 }
             }
@@ -526,6 +545,7 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             path,
             status,
             measure,
+            owner: None,
         });
     }
     DevelopmentScan {
@@ -581,44 +601,98 @@ fn examine_store(path: &Path, home: Option<&Path>) -> io::Result<bool> {
     fs::symlink_metadata(path).map(|meta| meta.is_dir())
 }
 
-/// Measures one directory of build state and surveys it. The measurement
-/// counts each directory with a `.git` entry and returns its path.
-fn measure_build(scan: &mut SharedScan, path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
+/// What a measurement of build state found. The `fetched` repositories are
+/// those that the build's own layout proves fetched. The measurement set
+/// aside each `unproven` one, which is a checkout.
+struct BuildMeasure {
+    measure: Measure,
+    survey: Survey,
+    fetched: Vec<PathBuf>,
+    unproven: Vec<PathBuf>,
+}
+
+/// Whether the layout of `ecosystem` proves that its build fetched the
+/// repository at `dir` beneath the build state at `build`. CMake clones a
+/// dependency into `_deps/<name>-src` and keeps its own bookkeeping beside
+/// it in `_deps/<name>-subbuild`. No other layout proves a fetch.
+fn fetched_by(ecosystem: Ecosystem, build: &Path, dir: &Path) -> bool {
+    if ecosystem != Ecosystem::Cmake {
+        return false;
+    }
+    let name = dir.file_name().and_then(|name| name.to_str());
+    let (Some(parent), Some(name)) = (dir.parent(), name) else {
+        return false;
+    };
+    let Some(dependency) = name.strip_suffix("-src") else {
+        return false;
+    };
+    parent == build.join("_deps")
+        && fs::symlink_metadata(parent.join(format!("{dependency}-subbuild")))
+            .is_ok_and(|meta| meta.is_dir())
+}
+
+/// Measures one directory of build state and surveys it. A repository that
+/// the build fetched counts toward the measure. Any other directory with a
+/// `.git` entry is a checkout, so the measurement sets it aside.
+fn measure_build(scan: &mut SharedScan, path: &Path, ecosystem: Ecosystem) -> BuildMeasure {
     let (mounts, errors) = (scan.skipped_mount_count(), scan.error_count());
-    let mut nested = Vec::new();
+    let mut fetched = Vec::new();
     let bounded = scan.measure(path, &mut |dir| {
-        if fs::symlink_metadata(dir.join(".git")).is_ok() {
-            nested.push(dir.to_path_buf());
+        if fs::symlink_metadata(dir.join(".git")).is_err() {
+            return false;
         }
-        // The boundary claims nothing, so the measure holds the repository.
-        false
+        if fetched_by(ecosystem, path, dir) {
+            fetched.push(dir.to_path_buf());
+            return false;
+        }
+        true
     });
-    let measure = bounded.map_or_else(Measure::default, |bounded| bounded.measure);
+    let (measure, unproven) = bounded.map_or_else(Default::default, |bounded| {
+        (bounded.measure, bounded.set_aside)
+    });
     let survey = Survey {
-        checkouts_beneath: u64::try_from(nested.len()).unwrap_or(u64::MAX),
+        checkouts_beneath: u64::try_from(unproven.len()).unwrap_or(u64::MAX),
         skipped_mount_count: scan.skipped_mount_count().saturating_sub(mounts),
         error_count: scan.error_count().saturating_sub(errors),
     };
-    (measure, survey, nested)
+    BuildMeasure {
+        measure,
+        survey,
+        fetched,
+        unproven,
+    }
 }
 
 /// Measures and surveys the build state at `path` in a scan of its own, so
-/// that a removal can verify the directory as it stands.
-pub(crate) fn survey_build_state(path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
-    measure_build(&mut SharedScan::default(), path)
+/// that a removal can verify the directory as it stands. The result names
+/// each repository that the build fetched.
+pub(crate) fn survey_build_state(
+    path: &Path,
+    ecosystem: Ecosystem,
+) -> (Measure, Survey, Vec<PathBuf>) {
+    let found = measure_build(&mut SharedScan::default(), path, ecosystem);
+    (found.measure, found.survey, found.fetched)
 }
 
-/// Measures the tree at `path` in a scan of its own, and counts the mount
-/// points and the unreadable entries beneath it.
-pub(crate) fn survey_tree(path: &Path) -> (Measure, Survey) {
+/// Measures the tree at `path` in a scan of its own. The result counts the
+/// mount points and the unreadable entries beneath it, and it names each
+/// directory beneath it that holds a `.git` entry.
+pub(crate) fn survey_tree(path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
     let mut scan = SharedScan::default();
-    let measure = measure_whole(&mut scan, path);
+    let mut repositories = Vec::new();
+    let bounded = scan.measure(path, &mut |dir| {
+        if fs::symlink_metadata(dir.join(".git")).is_ok() {
+            repositories.push(dir.to_path_buf());
+        }
+        false
+    });
     let survey = Survey {
         checkouts_beneath: 0,
         skipped_mount_count: scan.skipped_mount_count(),
         error_count: scan.error_count(),
     };
-    (measure, survey)
+    let measure = bounded.map_or_else(Measure::default, |bounded| bounded.measure);
+    (measure, survey, repositories)
 }
 
 fn measure_whole(scan: &mut SharedScan, path: &Path) -> Measure {
@@ -640,7 +714,9 @@ struct Found {
 }
 
 impl Found {
-    fn take(&mut self, scan: &mut SharedScan, path: PathBuf, claimed: Claim) {
+    /// Records what `claimed` found at `path`. The `owner` is the checkout
+    /// whose tree holds the path, or none beneath a workspace alone.
+    fn take(&mut self, scan: &mut SharedScan, path: PathBuf, claimed: Claim, owner: Option<&Path>) {
         match claimed {
             Claim::Checkout(kind, repository) => {
                 if self.seen.insert(path.clone()) {
@@ -662,6 +738,7 @@ impl Found {
                     path,
                     status: StoreStatus::Present,
                     measure,
+                    owner: owner.map(Path::to_path_buf),
                 });
             }
             // Build state outside a checkout has no owner, so the profile
@@ -749,6 +826,9 @@ pub struct StoreResult {
     pub ecosystem: Ecosystem,
     pub path: String,
     pub status: StoreStatus,
+    /// For a toolchain that a checkout fetched into its own tree, that
+    /// checkout.
+    pub owner: Option<String>,
     #[serde(flatten)]
     pub measure: Measure,
 }
@@ -831,6 +911,7 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
                 ecosystem: store.ecosystem,
                 path: display(&store.path),
                 status: store.status,
+                owner: store.owner.as_deref().map(display),
                 measure: store.measure.clone(),
             })
             .collect(),

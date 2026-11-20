@@ -652,7 +652,7 @@ pub fn apply(
 /// engine's own figure for one of its stores.
 pub fn measure_after(entry: &Entry, docker: &Path) -> Result<u64, String> {
     if let Some(path) = &entry.path {
-        let (measure, survey) = development::survey_tree(path.as_path());
+        let (measure, survey, _) = development::survey_tree(path.as_path());
         // A measurement that could not read an entry states no size, so the
         // run records a failure and claims no freed space.
         if !survey.is_clear() {

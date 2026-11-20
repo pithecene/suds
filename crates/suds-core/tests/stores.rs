@@ -75,6 +75,7 @@ fn store(id: &str, ecosystem: Ecosystem, gib: u64, status: StoreStatus) -> Store
             newest_modified: Some("2026-01-01T00:00:00Z".to_owned()),
             ..Measure::default()
         },
+        owner: None,
     }
 }
 

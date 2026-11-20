@@ -73,6 +73,16 @@ pub fn holder<'a>(standings: &'a Standings, checkout: &Path) -> Option<(&'a Path
         .find(|(path, _)| checkout.starts_with(path))
 }
 
+/// The registration of `path` or of a path beneath it. A client that holds
+/// a directory inside a candidate holds the candidate too.
+pub fn held_beneath<'a>(standings: &'a Standings, path: &Path) -> Option<(&'a Path, &'a Standing)> {
+    standings
+        .iter()
+        .filter(|(_, standing)| standing.event == Event::Registered)
+        .map(|(held, standing)| (held.as_path(), standing))
+        .find(|(held, _)| held.starts_with(path))
+}
+
 /// Appends one record to the registry at `path`, and creates the file and
 /// its directory when they do not exist. The file opens without following a
 /// symbolic link, and one write holds the whole line.

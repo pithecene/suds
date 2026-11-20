@@ -248,6 +248,18 @@ Suds keeps a directory of build state in each of these cases:
   keeps nothing.
 - A mount point lies beneath it, or Suds could not read an entry there.
 
+The plan also names each toolchain that a checkout fetched into its own
+tree as a repository, such as a vcpkg checkout, which the checkout's build
+fetches again. The same protections hold, and Git must report that the
+repository holds only what a remote holds.
+
+A repository inside a candidate leaves with it only when a layout proves
+that a build fetched it. CMake's `_deps/<name>-src` beside
+`_deps/<name>-subbuild` is such a layout. Such a repository must hold a clean tree, no
+second worktree, and no commit, branch, tag, or stash that a remote lacks.
+Any other repository is a checkout, and it keeps the candidate. A
+registration of a directory inside a candidate keeps the candidate too.
+
 With `--checkouts`, the plan also considers each linked checkout, under
 the same two protections as build state. Suds has Git remove one only when
 Git reports no changed, staged, or untracked file there. A remote-tracking

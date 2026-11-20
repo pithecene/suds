@@ -102,27 +102,51 @@ impl Git {
         Ok(listed.is_empty())
     }
 
-    /// Whether the repository at `directory` holds nothing but what it
-    /// fetched: its tree is clean, and a remote-tracking branch or a tag
-    /// holds every commit of its head. A build fetches a dependency as such
-    /// a repository, often at a tag and on no branch.
+    /// Whether `directory` is the top of a repository of its own. A directory
+    /// inside another checkout answers Git's queries for that checkout, so
+    /// a judgment of a nested repository asks this first.
+    pub fn is_repository_root(&self, directory: &Path) -> Result<bool, String> {
+        let top = self.run(directory, &["rev-parse", "--show-toplevel"], None)?;
+        let resolve = |path: &Path| {
+            std::fs::canonicalize(path)
+                .map_err(|err| format!("could not resolve {}: {err}", path.display()))
+        };
+        Ok(resolve(Path::new(top.trim()))? == resolve(directory)?)
+    }
+
+    /// Whether `directory` is a repository of its own that holds only what
+    /// it fetched: a clean tree, no second worktree, and no commit of a
+    /// head, branch, tag, or stash that a remote-tracking branch lacks. A
+    /// local tag proves no fetch.
     pub fn holds_only_fetched(&self, directory: &Path) -> Result<bool, String> {
-        if !self.is_clean(directory)? {
+        if !self.is_repository_root(directory)? || !self.is_clean(directory)? {
             return Ok(false);
         }
-        let count = self.run(
+        let worktrees = self.run(directory, &["worktree", "list", "--porcelain"], None)?;
+        let count = worktrees
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count();
+        if count > 1 {
+            return Ok(false);
+        }
+        let local = self.run(
             directory,
-            &[
-                "rev-list",
-                "--count",
-                "HEAD",
-                "--not",
-                "--remotes",
-                "--tags",
-            ],
+            &["rev-list", "HEAD", "--all", "--not", "--remotes"],
             None,
         )?;
-        Ok(count.trim() == "0")
+        if local.trim().is_empty() {
+            return Ok(true);
+        }
+        // A shallow fetch records each commit at which it ended, and only a
+        // remote supplies such a commit.
+        let file = self.run(directory, &["rev-parse", "--git-path", "shallow"], None)?;
+        let Ok(ends) = std::fs::read_to_string(directory.join(file.trim())) else {
+            return Ok(false);
+        };
+        Ok(local
+            .lines()
+            .all(|commit| ends.lines().any(|end| end.trim() == commit.trim())))
     }
 
     /// Has Git remove the linked checkout at `checkout` from `repository`.

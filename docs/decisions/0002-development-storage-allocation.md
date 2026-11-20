@@ -67,6 +67,17 @@ person watches.
   because a quarantine frees no space.
 - Suds needs proof that a path holds derived state, so it classifies by
   each ecosystem's own layout and never by a name alone.
+- Under the standing approval, a release with `--landed COMMIT` names the
+  head of a linked checkout for Suds to verify. The head must still match,
+  the tree must have no changed, staged, or untracked file, and no client
+  may hold an unreleased registration. No process may work there, and no
+  entry may have changed within the idle time. Suds accepts a
+  remote-tracking branch that holds the commit or a reference that
+  `git ls-remote` finds at that commit. If the remote lookup fails or finds
+  no such reference, the checkout stays and the plan says why. A person's
+  own `suds reclaim --apply` can still accept the release as evidence.
+  Git removes a verified linked checkout without force and keeps its
+  branch. The journal records the reference that held the commit.
 - A hard ceiling needs a filesystem limit, which a privileged command
   creates once for each machine. Suds plans that command, and a person runs
   it. Until then Suds holds the ceiling by measurement and reports that no

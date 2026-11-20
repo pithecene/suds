@@ -274,11 +274,27 @@ second worktree, and no commit, branch, tag, or stash that a remote lacks.
 Any other repository is a checkout, and it keeps the candidate. A
 registration of a directory inside a candidate keeps the candidate too.
 
-With `--checkouts`, the plan also considers each linked checkout, under
-the same two protections as build state. Suds has Git remove one only when
-Git reports no changed, staged, or untracked file there. A remote-tracking
-branch must also hold every commit of its head. The branch and its commits
-stay in the repository. Suds never names a main checkout.
+With `--checkouts`, the plan also considers each linked checkout. Git must
+report no changed, staged, or untracked file there. No process may work in
+the checkout, no entry may have changed within the idle time, and no client
+may hold an unreleased registration. A remote-tracking branch can show
+that a remote holds the checkout's head. A checkout released with
+`--landed COMMIT` is a candidate in every run that may remove build state,
+including a scheduled run under the standing approval.
+
+At removal, the checkout's head must still be `COMMIT` and all the same
+protections apply. If a remote-tracking branch does not already hold the
+commit, Suds asks the repository's default remote with `git ls-remote`
+for a reference that points to it, such as a merged pull request's head
+reference. The release names the commit. Suds reads the
+remote once per repository in a run and records the reference
+that held the commit in the journal as evidence for the removal. If Suds
+cannot reach the remote or finds no reference that holds the commit, the
+checkout stays and the plan names the reason. A person's own
+`suds reclaim --apply` can still accept the client's report.
+
+Suds has Git remove the linked checkout without force. The branch and its
+commits stay in the repository. Suds never names a main checkout.
 
 With `--apply`, Suds records the plan in the journal and judges each
 candidate again immediately before its removal. The directory must be the
@@ -361,17 +377,16 @@ registration adds knowledge and no permission:
 
 - Suds removes nothing beneath a checkout that a client registered and has
   not released, and it reads the registry anew before each removal.
-- A released linked checkout enters each reclaim plan, before every other
-  checkout. Every other rule of [Reclamation](#reclamation) still decides
-  whether it leaves.
-- A release may report the checkout's head as landed, with
-  `--landed COMMIT`. A forge that squashes a branch and deletes it leaves
-  the head's own commits on no remote, and a client that asked the forge
-  knows that the change landed. A person's own `suds reclaim --apply` then
-  removes the checkout while its head is still that commit and its tree is
-  clean. A scheduled run reclaims the build state of a released checkout
-  and leaves the checkout itself, because an unpushed commit is no derived
-  state.
+- A release ends the registration for its client and attempt. A linked
+  checkout that its clients have released enters each reclaim plan before
+  other checkouts. The rules of [Reclamation](#reclamation) decide whether
+  it leaves.
+- A client can report delivery with `suds release --checkout DIR --client
+  bosun --attempt wf-12 --landed COMMIT`. A forge can keep the original
+  head in a pull request reference after it squashes and deletes the
+  branch. A scheduled run under the standing approval can remove the
+  linked checkout when Suds verifies the head and the other conditions of
+  [Reclamation](#reclamation).
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading

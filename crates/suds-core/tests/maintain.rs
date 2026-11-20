@@ -12,6 +12,8 @@ use suds_core::organize::journal::{Event, read};
 use suds_core::pressure::Level;
 use suds_core::reclaim::execute::Authority;
 use suds_core::reclaim::git::Git;
+use suds_core::reclaim::plan::{Candidate, Decision, Kept, ReclaimPlan, Subject};
+use suds_core::registry::{self, Event as RegistryEvent};
 use suds_core::state::{Directories, Settings};
 use suds_core::stores::Programs;
 use tempfile::TempDir;
@@ -19,6 +21,7 @@ use tempfile::TempDir;
 const GIB: u64 = 1024 * 1024 * 1024;
 /// A time long after the fixture's files changed.
 const LATER: i64 = 4_000_000_000;
+const PULL_HEAD: &str = "refs/pull/42/head";
 
 fn git(directory: &Path, arguments: &[&str]) {
     let output = Command::new("git")
@@ -112,6 +115,73 @@ impl Fixture {
             now: LATER,
         }
     }
+
+    fn remote(&self) -> PathBuf {
+        let root = self.repo.parent().unwrap().parent().unwrap();
+        let remote = root.join("remote.git");
+        git(root, &["init", "--bare", "remote.git"]);
+        git(
+            &self.repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&self.repo, &["push", "origin", "main"]);
+        remote
+    }
+
+    fn linked(&self, branch: &str) -> PathBuf {
+        let checkout = self.repo.with_file_name(branch);
+        git(
+            &self.repo,
+            &["worktree", "add", "-b", branch, checkout.to_str().unwrap()],
+        );
+        commit_change(&checkout, "feature");
+        fs::create_dir(checkout.join("target")).unwrap();
+        fs::write(checkout.join("target/CACHEDIR.TAG"), "Signature: cargo").unwrap();
+        fs::write(checkout.join("target/app"), "binary").unwrap();
+        checkout
+    }
+
+    fn release_landed(&self, checkout: &Path) -> String {
+        let head = Git::default().head(checkout).unwrap();
+        registry::append_landed(
+            &self.directories.registry(),
+            checkout,
+            "bosun",
+            Some("wf-1"),
+            &head,
+            0,
+        )
+        .unwrap();
+        head
+    }
+
+    fn reclaim_plan(&self) -> ReclaimPlan {
+        let report = maintain(&self.settings(true), &self.context(&Git::default())).unwrap();
+        assert_eq!(
+            report.reclaim.unwrap().authority,
+            Authority::StandingApproval
+        );
+        read(&self.directories.journal())
+            .unwrap()
+            .into_iter()
+            .find_map(|record| match record.event {
+                Event::ReclaimPlanned { plan } => Some(plan),
+                _ => None,
+            })
+            .unwrap()
+    }
+}
+
+fn commit_change(checkout: &Path, text: &str) {
+    fs::write(checkout.join("change.txt"), text).unwrap();
+    git(checkout, &["add", "change.txt"]);
+    git(checkout, &["commit", "-m", text]);
+}
+
+fn linked_candidate<'a>(plan: &'a ReclaimPlan, checkout: &Path) -> Option<&'a Candidate> {
+    plan.candidates.iter().find(|candidate| {
+        candidate.subject == Subject::LinkedCheckout && candidate.path.as_path() == checkout
+    })
 }
 
 #[test]
@@ -183,6 +253,181 @@ fn reclaims_under_the_standing_approval_and_records_that_authority() {
             ..
         }
     )));
+}
+
+#[test]
+fn removes_a_released_landed_checkout_held_by_a_pull_reference() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+    let head = fixture.release_landed(&checkout);
+    assert_eq!(Git::default().unpushed(&checkout).unwrap(), 1);
+
+    let plan = fixture.reclaim_plan();
+    let candidate = linked_candidate(&plan, &checkout).unwrap();
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
+    );
+    assert!(!checkout.exists());
+    assert!(fixture.repo.exists());
+    git(
+        &fixture.repo,
+        &["show-ref", "--verify", "refs/heads/feature"],
+    );
+
+    let evidence = format!("git ls-remote found {PULL_HEAD} at {head}");
+    assert!(read(&fixture.directories.journal()).unwrap().iter().any(|record| {
+        matches!(&record.event, Event::Removed { evidence: facts, .. } if facts.contains(&evidence))
+    }));
+}
+
+#[test]
+fn keeps_a_released_landed_checkout_when_the_remote_holds_no_reference() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    let head = fixture.release_landed(&checkout);
+
+    let plan = fixture.reclaim_plan();
+    let candidate = linked_candidate(&plan, &checkout).unwrap();
+    assert_eq!(candidate.kept, Some(Kept::UnpushedCommits));
+    assert_eq!(
+        candidate.evidence.last().unwrap(),
+        &format!("the remote holds no reference at {head}")
+    );
+    assert!(checkout.exists());
+}
+
+#[test]
+fn keeps_a_landed_checkout_whose_head_moved_even_when_the_new_head_is_pushed() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+    fixture.release_landed(&checkout);
+    commit_change(&checkout, "another change");
+    git(&checkout, &["push", "origin", "feature"]);
+
+    let plan = fixture.reclaim_plan();
+    assert_eq!(
+        linked_candidate(&plan, &checkout).unwrap().kept,
+        Some(Kept::LandedHeadChanged)
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("change.txt")).unwrap(),
+        "another change"
+    );
+}
+
+#[test]
+fn keeps_a_landed_checkout_with_an_untracked_file() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+    fixture.release_landed(&checkout);
+    let untracked = checkout.join("notes.txt");
+    fs::write(&untracked, "notes").unwrap();
+
+    let plan = fixture.reclaim_plan();
+    assert_eq!(
+        linked_candidate(&plan, &checkout).unwrap().kept,
+        Some(Kept::UncommittedChanges)
+    );
+    assert!(untracked.exists());
+}
+
+#[test]
+fn keeps_a_landed_checkout_that_a_second_client_still_holds() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+    for (client, attempt) in [("bosun", "wf-1"), ("editor", "edit-1")] {
+        registry::append(
+            &fixture.directories.registry(),
+            &checkout,
+            client,
+            Some(attempt),
+            RegistryEvent::Registered,
+            0,
+        )
+        .unwrap();
+    }
+    fixture.release_landed(&checkout);
+
+    let plan = fixture.reclaim_plan();
+    assert!(linked_candidate(&plan, &checkout).is_none());
+    let build = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path.as_path() == checkout.join("target"))
+        .unwrap();
+    assert_eq!(build.kept, Some(Kept::Registered));
+    assert!(checkout.join("target/app").exists());
+}
+
+#[test]
+fn keeps_all_landed_checkouts_when_the_remote_is_unreachable_and_reclaims_build_state() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let first = fixture.linked("first");
+    let second = fixture.linked("second");
+    git(&first, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+    git(&second, &["push", "origin", "HEAD:refs/pull/43/head"]);
+    fixture.release_landed(&first);
+    fixture.release_landed(&second);
+    fs::rename(&remote, remote.with_extension("offline")).unwrap();
+
+    let plan = fixture.reclaim_plan();
+    for checkout in [first, second] {
+        let candidate = linked_candidate(&plan, &checkout).unwrap();
+        assert_eq!(candidate.kept, Some(Kept::Unverified));
+        assert!(
+            candidate
+                .evidence
+                .last()
+                .unwrap()
+                .contains("git ls-remote failed")
+        );
+        assert!(checkout.exists());
+        assert!(!checkout.join("target").exists());
+    }
+    assert!(!fixture.repo.join("target").exists());
+}
+
+#[test]
+fn leaves_an_unreleased_checkout_out_of_the_landed_rule() {
+    let fixture = Fixture::new();
+    fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+
+    let plan = fixture.reclaim_plan();
+    assert!(linked_candidate(&plan, &checkout).is_none());
+    assert!(checkout.exists());
+}
+
+#[test]
+fn removes_a_released_landed_checkout_held_by_a_remote_tracking_branch() {
+    let fixture = Fixture::new();
+    let remote = fixture.remote();
+    let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", "feature"]);
+    let head = fixture.release_landed(&checkout);
+    fs::rename(&remote, remote.with_extension("offline")).unwrap();
+
+    let plan = fixture.reclaim_plan();
+    let candidate = linked_candidate(&plan, &checkout).unwrap();
+    assert_eq!(
+        candidate.evidence.last().unwrap(),
+        &format!("the remote-tracking branch refs/remotes/origin/feature holds {head}")
+    );
+    assert!(!checkout.exists());
 }
 
 #[test]

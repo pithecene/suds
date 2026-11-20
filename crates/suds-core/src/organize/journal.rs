@@ -140,6 +140,8 @@ pub enum Event {
         run: String,
         index: usize,
         freed_bytes: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<String>,
     },
     RemovalRefused {
         run: String,
@@ -770,6 +772,7 @@ impl JournalState {
                 run,
                 index,
                 freed_bytes,
+                ..
             } => {
                 let freed_bytes = *freed_bytes;
                 self.set_removal(run, *index, RemovalState::Removed { freed_bytes });

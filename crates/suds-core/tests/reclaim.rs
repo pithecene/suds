@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use suds_core::development::{Environment, inspect};
 use suds_core::organize::journal::{Event, Journal, JournalState, RunKind, RunStatus, read};
 use suds_core::reclaim::execute::{Authority, Conditions, ReclaimReport, apply};
-use suds_core::reclaim::git::Git;
+use suds_core::reclaim::git::{Git, RemoteRefs};
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{
     Candidate, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
@@ -134,6 +134,7 @@ impl Fixture {
         let observed = Observed {
             liveness,
             registry: &self.standings(),
+            remotes: &RemoteRefs::default(),
         };
         plan_reclaim(&scan, &observed, &Git::default(), policy, at)
     }
@@ -169,6 +170,7 @@ impl Fixture {
     ) -> ReclaimReport {
         let mut journal = open_journal(&self.journal);
         let conditions = Conditions {
+            remotes: &RemoteRefs::default(),
             authority: Authority::Person,
             observe,
             registry: &mut || self.standings(),
@@ -458,6 +460,7 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
     let plan = plan_reclaim(
         &scan,
         &Observed {
+            remotes: &RemoteRefs::default(),
             liveness: &hidden,
             registry: &Ok(Standings::new()),
         },
@@ -542,6 +545,7 @@ fn names_each_directory_once_when_roots_overlap() {
     let plan = plan_reclaim(
         &scan,
         &Observed {
+            remotes: &RemoteRefs::default(),
             liveness: &nobody(),
             registry: &Ok(Standings::new()),
         },
@@ -1080,13 +1084,13 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         candidate.evidence
     );
 
-    // The standing approval covers derived state alone, so a run under it
-    // refuses the checkout and leaves the commits for a person's run.
+    // A person's plan can accept a release that the standing approval cannot.
     let mut journal = open_journal(&fixture.journal);
     let unattended = apply(
         &mut journal,
         &plan,
         Conditions {
+            remotes: &RemoteRefs::default(),
             authority: Authority::StandingApproval,
             observe: &mut nobody,
             registry: &mut || fixture.standings(),

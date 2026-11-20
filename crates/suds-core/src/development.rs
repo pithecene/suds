@@ -467,7 +467,7 @@ pub(crate) fn toolchain_at(dir: &Path) -> Option<Ecosystem> {
 
 /// The main checkout that the `.git` file of `dir` names, when the file
 /// names an entry of that checkout's `worktrees` directory.
-fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
+pub(crate) fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())

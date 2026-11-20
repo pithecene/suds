@@ -19,7 +19,7 @@ use crate::organize::journal::Journal;
 use crate::organize::plan::new_id;
 use crate::pressure::{self, Measurement, Pressure, Thresholds};
 use crate::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
-use crate::reclaim::git::Git;
+use crate::reclaim::git::{Git, RemoteRefs};
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Observed, Policy, plan_reclaim};
 use crate::registry;
@@ -105,6 +105,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     let idle_seconds = settings.idle_minutes.saturating_mul(60);
     let registry_path = context.directories.registry();
     let standings = registry::reading(&registry_path);
+    let remotes = RemoteRefs::default();
     let policy = Policy {
         idle_seconds,
         checkouts: false,
@@ -114,6 +115,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     let observed = Observed {
         liveness: &Liveness::observe(),
         registry: &standings,
+        remotes: &remotes,
     };
     let plan = plan_reclaim(&scan, &observed, context.git, policy, context.now);
     let mut journal =
@@ -123,6 +125,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         observe: &mut Liveness::observe,
         registry: &mut || registry::reading(&registry_path),
         git: context.git,
+        remotes: &remotes,
         now: context.now,
     };
     report.reclaim =

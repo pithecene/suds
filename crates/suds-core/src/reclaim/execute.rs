@@ -17,7 +17,7 @@ use crate::inspection::EntryRevision;
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
-use crate::reclaim::git::Git;
+use crate::reclaim::git::{Git, RemoteRefs};
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
 use crate::registry::Reading;
@@ -73,6 +73,7 @@ pub struct Conditions<'a> {
     /// checkout.
     pub registry: &'a mut dyn FnMut() -> Reading,
     pub git: &'a Git,
+    pub remotes: &'a RemoteRefs,
     pub now: i64,
 }
 
@@ -89,6 +90,7 @@ pub fn apply(
         observe,
         registry,
         git,
+        remotes,
         now,
     } = conditions;
     journal.append(Event::ReclaimPlanned { plan: plan.clone() })?;
@@ -119,6 +121,7 @@ pub fn apply(
                 run: run.clone(),
                 index,
                 freed_bytes: candidate.allocated_bytes,
+                evidence: Vec::new(),
             })?;
             removals.push(Removal {
                 index,
@@ -137,13 +140,13 @@ pub fn apply(
             git,
             idle_since: idle_since(now, plan.idle_seconds),
             tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
-            // The standing approval covers derived state alone, and a
-            // landed head still holds commits that no remote holds.
             admit_landed: authority == Authority::Person,
+            remotes,
+            query_remote: false,
         };
         let outcome = match check(journal.directory(), candidate, &judge) {
             Err(reason) => Err(reason),
-            Ok(()) => {
+            Ok(evidence) => {
                 journal.append(Event::RemovalStarted {
                     run: run.clone(),
                     index,
@@ -155,22 +158,28 @@ pub fn apply(
                         grant_owner_write(cache);
                     }
                 }
-                remove(candidate, git)
+                remove(candidate, git).map(|()| evidence)
             }
         };
-        let refusal = outcome.err();
-        journal.append(match &refusal {
-            None => Event::Removed {
-                run: run.clone(),
-                index,
-                freed_bytes: candidate.allocated_bytes,
-            },
-            Some(reason) => Event::RemovalRefused {
-                run: run.clone(),
-                index,
-                reason: reason.clone(),
-            },
-        })?;
+        let refusal = match outcome {
+            Ok(evidence) => {
+                journal.append(Event::Removed {
+                    run: run.clone(),
+                    index,
+                    freed_bytes: candidate.allocated_bytes,
+                    evidence,
+                })?;
+                None
+            }
+            Err(reason) => {
+                journal.append(Event::RemovalRefused {
+                    run: run.clone(),
+                    index,
+                    reason: reason.clone(),
+                })?;
+                Some(reason)
+            }
+        };
         if refusal.is_none() && candidate.subject == Subject::LinkedCheckout {
             gone.push(candidate.path.as_path());
         }
@@ -209,7 +218,7 @@ pub fn apply(
 /// Verifies every precondition of one removal. The directory must be the
 /// entry that the plan measured, and the plan's own rules must still decide
 /// to remove it as it stands now.
-fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(), String> {
+fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<Vec<String>, String> {
     let path = candidate.path.as_path();
     if journal.starts_with(path) {
         return Err(format!("{} holds the journal", path.display()));
@@ -252,9 +261,19 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
             )
         }
         Subject::LinkedCheckout => {
+            let repository = candidate.repository.as_ref().map(NativePath::as_path);
+            if repository.is_none()
+                || development::linked_repository(path, &path.join(".git")).as_deref() != repository
+            {
+                return Err(format!(
+                    "{} is no longer a linked checkout of the repository in the plan",
+                    path.display()
+                ));
+            }
             let (measure, survey, repositories) = development::survey_tree(path);
             judge.checkout(
                 path,
+                repository,
                 measure.newest_modified.as_deref(),
                 &survey,
                 &repositories,
@@ -282,7 +301,8 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
     match kept {
         // The judgment's last fact is the one that keeps the directory.
         Some(_) => Err(evidence.pop().unwrap_or_default()),
-        None => Ok(()),
+        None if candidate.subject == Subject::LinkedCheckout => Ok(evidence),
+        None => Ok(Vec::new()),
     }
 }
 

@@ -9,6 +9,7 @@ mod format;
 mod map;
 mod observe;
 mod project;
+mod remote;
 mod workstation;
 
 pub use format::{bytes, day};

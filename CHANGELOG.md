@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Virtual machines count toward development storage**: the development profile classifies each Lima and Colima machine from its layout. It finds one at the program's own location and inside a checkout. The pressure counts each machine's disk. `suds stores` reports a machine beyond 60 GiB and each machine that a checkout holds, and it trims none.
+
 ## [0.1.1] - 2026-11-20
 
 ### Added

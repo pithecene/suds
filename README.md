@@ -182,6 +182,7 @@ proves none:
 | Go cache in a checkout | A directory that holds `README`, `trim.txt`, `00`, and `ff`, or one that holds `cache/download` |
 | ccache cache in a checkout | A directory whose `0` directory holds `CACHEDIR.TAG` and `stats` |
 | vcpkg checkout | A directory that holds `.vcpkg-root` |
+| Virtual machine | A directory that holds Lima's `lima.yaml` beside a `diffdisk` or a `basedisk`, or one that holds a `datadisk` |
 
 Suds claims build state only beneath a checkout, so build output that no
 checkout owns stays unclassified. A submodule stays a part of its parent
@@ -202,6 +203,8 @@ its default beneath the home directory otherwise.
 | `ccache.cache` | `CCACHE_DIR` | `~/.cache/ccache` |
 | `vcpkg.binary-cache` | `VCPKG_DEFAULT_BINARY_CACHE` | `~/.cache/vcpkg/archives` |
 | `mise.installs` | `MISE_DATA_DIR` | `~/.local/share/mise/installs` |
+| `lima.machines` | `LIMA_HOME` | `~/.lima` |
+| `colima.machines` | `COLIMA_HOME` | `~/.colima` |
 
 On macOS, the cache directory is `~/Library/Caches`, pnpm's store lies in
 `~/Library/pnpm/store`, and sccache's cache lies in
@@ -211,6 +214,13 @@ exists without the entry that its program writes there. A store is
 `unreadable` when Suds cannot examine its location, or when a symbolic link
 stands on its path beneath the home directory. Suds follows no such link,
 and the report's errors name the path.
+
+A virtual machine's disk holds its container engine's images and volumes.
+The profile counts each one toward the development storage, beside the
+stores or inside a checkout. `suds stores` reports a
+machine whose disk exceeds 60 GiB, and it trims none, because no build
+makes a volume again. With `--root DIR`, the plan also looks beneath that
+directory and reports each machine inside a checkout.
 
 A root may be a mount point, and Suds enters no mount point beneath a root.
 When one root lies beneath another, Suds inspects the outer root alone, so

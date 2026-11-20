@@ -336,3 +336,72 @@ fn locates_the_pnpm_store_beneath_its_home_variable() {
     assert_eq!(store.path, pnpm.join("store"));
     assert_eq!(store.status, StoreStatus::Present);
 }
+
+#[test]
+fn reports_each_virtual_machine_with_the_checkout_that_holds_it() {
+    let fixture = Fixture::new();
+    let repo = fixture.workspace.join("repo");
+    // A checkout that runs a container engine of its own, as Colima lays
+    // one out, and the same layout at Colima's own location.
+    let own = repo.join(".colima/_lima/colima");
+    write(&own.join("lima.yaml"), 30);
+    write(&own.join("diffdisk"), 5000);
+    write(&repo.join(".colima/_lima/_disks/colima/datadisk"), 7000);
+    write(&fixture.home.join(".colima/_lima/colima/lima.yaml"), 30);
+    write(&fixture.home.join(".colima/_lima/colima/diffdisk"), 900);
+    // A file named for a disk proves no machine without its configuration.
+    write(&repo.join("notes/diffdisk"), 10);
+
+    let scan = fixture.scan();
+    let held: Vec<_> = scan
+        .stores
+        .iter()
+        .filter(|store| store.id == "lima.machine")
+        .collect();
+    assert_eq!(held.len(), 2);
+    for machine in &held {
+        assert_eq!(machine.class, StoreClass::Machine);
+        assert_eq!(machine.owner.as_deref(), Some(repo.as_path()));
+    }
+    assert!(held.iter().any(|machine| machine.path == own));
+    let shared = scan
+        .stores
+        .iter()
+        .find(|store| store.id == "colima.machines")
+        .unwrap();
+    assert_eq!(shared.status, StoreStatus::Present);
+    assert_eq!(shared.owner, None);
+    assert_eq!(shared.measure.logical_bytes, 930);
+
+    // A machines directory inside a workspace counts once: each machine in
+    // it stands in the report, and the directory as a whole does not.
+    let inside = fixture.workspace.join("engines");
+    write(&inside.join("_lima/colima/lima.yaml"), 30);
+    write(&inside.join("_lima/colima/diffdisk"), 600);
+    let mut environment = fixture.environment();
+    environment
+        .variables
+        .insert("COLIMA_HOME".to_owned(), inside.clone().into_os_string());
+    let moved = inspect(std::slice::from_ref(&fixture.workspace), &environment);
+    assert!(
+        moved
+            .stores
+            .iter()
+            .all(|store| store.id != "colima.machines")
+    );
+    let counted: u64 = moved
+        .stores
+        .iter()
+        .filter(|store| store.path.starts_with(&inside))
+        .map(|store| store.measure.logical_bytes)
+        .sum();
+    assert_eq!(counted, 630);
+
+    // The checkout's own size leaves its machines out, and the report sums
+    // them in a class of their own.
+    let main = scan.checkouts.iter().find(|c| c.path == repo).unwrap();
+    assert!(main.own.logical_bytes < 5000);
+    let report = build_report(&scan, 0);
+    assert_eq!(report.totals.machines.count, 3);
+    assert_eq!(report.totals.machines.logical_bytes, 30 + 5000 + 7000 + 930);
+}

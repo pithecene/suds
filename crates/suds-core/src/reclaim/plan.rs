@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::development::{self, Checkout, CheckoutKind, DevelopmentScan, Ecosystem, Survey};
+use crate::development::{
+    self, Checkout, CheckoutKind, DevelopmentScan, Ecosystem, StoreClass, Survey,
+};
 use crate::inspection::EntryRevision;
 use crate::model::Measure;
 use crate::organize::native::NativePath;
@@ -256,7 +258,7 @@ pub fn plan_reclaim(
         let Some(owner) = owner else {
             continue;
         };
-        if !named.insert(store.path.clone()) {
+        if store.class != StoreClass::Toolchain || !named.insert(store.path.clone()) {
             continue;
         }
         let subject = Subject::FetchedToolchain {

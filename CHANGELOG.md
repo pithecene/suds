@@ -9,6 +9,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-20
+
 ### Added
 
 - **A release reports a landed head**: `suds release --landed COMMIT` records that a remote holds the change at the checkout's head, though by another commit. A forge that squashes a branch and deletes it left such a checkout in place for good, because no remote held its commits. A person's own `suds reclaim --apply` now removes it while its head is still that commit and its tree is clean. A scheduled run reclaims its build state and leaves the checkout.
@@ -45,5 +47,6 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.
 
-[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/pithecene/suds/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pithecene/suds/releases/tag/v0.1.0

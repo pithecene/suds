@@ -145,6 +145,13 @@ pub fn apply(
                     run: run.clone(),
                     index,
                 })?;
+                if candidate.subject == Subject::LinkedCheckout {
+                    // Git removes the checkout's Go caches with it, and Git
+                    // cannot enter a directory that no one may write.
+                    for cache in go_caches_beneath(plan, candidate.path.as_path()) {
+                        grant_owner_write(cache);
+                    }
+                }
                 remove(candidate, git)
             }
         };
@@ -274,6 +281,20 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
         Some(_) => Err(evidence.pop().unwrap_or_default()),
         None => Ok(()),
     }
+}
+
+/// Each Go cache of the plan that lies beneath `checkout`.
+fn go_caches_beneath<'a>(
+    plan: &'a ReclaimPlan,
+    checkout: &'a Path,
+) -> impl Iterator<Item = &'a Path> {
+    plan.candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(candidate.subject, Subject::BuildState { ecosystem } if ecosystem == Ecosystem::Go)
+        })
+        .map(|candidate| candidate.path.as_path())
+        .filter(move |path| path.starts_with(checkout))
 }
 
 /// Lets the owner write each directory beneath `path`, without following a

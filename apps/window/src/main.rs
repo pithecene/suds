@@ -25,7 +25,8 @@ enum Row {
     Checkout(usize),
 }
 
-/// What the window has selected, by path. A position names another entry after a new reading.
+/// What the window has selected: a project by its key, or a checkout by its path. A position
+/// names another entry after a new reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pick {
     Project(String),
@@ -42,7 +43,7 @@ struct State {
     /// The projects that the filter keeps, in the order of the sort.
     projects: Vec<Project>,
     rows: Vec<Row>,
-    /// The paths of the projects whose checkouts the outline shows.
+    /// The keys of the projects whose checkouts the outline shows.
     open: BTreeSet<String>,
     /// Whether the query holds text. The outline then shows each kept checkout.
     filtered: bool,
@@ -82,7 +83,7 @@ impl State {
         let mut rows = Vec::new();
         for (position, project) in self.projects.iter().enumerate() {
             rows.push(Row::Project(position));
-            if self.shows(&project.path) {
+            if self.shows(&project.key) {
                 rows.extend(project.members.iter().map(|member| Row::Checkout(*member)));
             }
         }
@@ -92,7 +93,7 @@ impl State {
     /// What the outline's row at `row` selects.
     fn pick_at(&self, row: i32) -> Option<Pick> {
         Some(match *self.rows.get(usize::try_from(row).ok()?)? {
-            Row::Project(position) => Pick::Project(self.projects.get(position)?.path.clone()),
+            Row::Project(position) => Pick::Project(self.projects.get(position)?.key.clone()),
             Row::Checkout(position) => Pick::Checkout(self.checkouts().get(position)?.path.clone()),
         })
     }
@@ -100,7 +101,7 @@ impl State {
     /// The row of the outline that shows `pick`. A checkout of a closed project has none.
     fn row_of(&self, pick: &Pick) -> Option<i32> {
         let row = self.rows.iter().position(|row| match (row, pick) {
-            (Row::Project(position), Pick::Project(path)) => self.projects[*position].path == *path,
+            (Row::Project(position), Pick::Project(path)) => self.projects[*position].key == *path,
             (Row::Checkout(position), Pick::Checkout(path)) => {
                 self.checkouts()[*position].path == *path
             }
@@ -163,11 +164,11 @@ fn show_pick(window: &Window, state: &mut State) {
     let home = state.home.as_deref();
     let found = state.pick.as_ref().and_then(|pick| match pick {
         Pick::Project(path) => {
-            let position = state.projects.iter().position(|p| p.path == *path)?;
+            let position = state.projects.iter().position(|p| p.key == *path)?;
             let project = &state.projects[position];
             window.set_detail_kind("PROJECT".into());
             window.set_detail_name(project.name.as_str().into());
-            window.set_detail_path(present::short(&project.path, home).into());
+            window.set_detail_path(present::short(&project.key, home).into());
             window.set_detail_facts(model(present::project_facts(project)));
             window.set_detail_builds(model(Vec::new()));
             Some((-1, i32::try_from(position).ok()?))
@@ -204,7 +205,7 @@ fn show_rows(window: &Window, state: &State) {
     let rows = state.rows.iter().map(|row| match *row {
         Row::Project(position) => {
             let project = &state.projects[position];
-            present::project_row(project, state.shows(&project.path), home)
+            present::project_row(project, state.shows(&project.key), home)
         }
         Row::Checkout(position) => {
             present::checkout_row(&state.checkouts()[position], largest.unwrap_or(0), home)
@@ -360,7 +361,7 @@ fn open(window: &Window, state: &mut State, row: i32, open: bool) {
             let position = state.checkouts().iter().position(|c| c.path == path);
             let project = position.and_then(|position| state.project_of(position));
             if let Some(project) = project {
-                state.pick = Some(Pick::Project(state.projects[project].path.clone()));
+                state.pick = Some(Pick::Project(state.projects[project].key.clone()));
             }
         }
         _ => return,
@@ -382,7 +383,7 @@ fn pick(window: &Window, state: &mut State, checkout: i32) {
     };
     state.toggle(Pick::Checkout(path));
     // The outline opens the project, so the selected checkout has a row.
-    let project = state.projects[project].path.clone();
+    let project = state.projects[project].key.clone();
     state.set_open(&project, true);
     show_rows(window, state);
     show_pick(window, state);
@@ -393,7 +394,7 @@ fn pick(window: &Window, state: &mut State, checkout: i32) {
 fn pick_project(window: &Window, state: &mut State, frame: i32) {
     let position = usize::try_from(frame).ok();
     if let Some(project) = position.and_then(|position| state.projects.get(position)) {
-        state.toggle(Pick::Project(project.path.clone()));
+        state.toggle(Pick::Project(project.key.clone()));
         show_pick(window, state);
         reveal(window);
     }
@@ -450,7 +451,9 @@ fn main() -> Result<(), slint::PlatformError> {
         state.pick = None;
         show_pick(&window, state);
     }));
-    window.on_pick(on!(|window, state, checkout| pick(&window, state, checkout)));
+    window.on_pick(on!(|window, state, checkout| pick(
+        &window, state, checkout
+    )));
     window.on_pick_project(on!(|window, state, frame| pick_project(
         &window, state, frame
     )));

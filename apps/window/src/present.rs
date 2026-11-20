@@ -151,6 +151,9 @@ pub fn counts(projects: usize, kept: usize, all: usize) -> String {
 /// A project's row of the outline.
 pub fn project_row(project: &Project, open: bool, home: Option<&str>) -> RowItem {
     let mut caption = count(project.members.len(), "checkout", "checkouts");
+    if project.clones > 1 {
+        caption.push_str(&format!(" · {} clones", project.clones));
+    }
     if project.held > 0 {
         caption.push_str(&format!(" · {} in use", project.held));
     }
@@ -158,7 +161,7 @@ pub fn project_row(project: &Project, open: bool, home: Option<&str>) -> RowItem
         project: true,
         open,
         name: project.name.as_str().into(),
-        caption: format!("{caption} · {}", short(&project.path, home)).into(),
+        caption: format!("{caption} · {}", short(&project.key, home)).into(),
         total: bytes(project.total_bytes()).into(),
         build: build(project.build_bytes).into(),
         modified: day(&project.newest_modified).into(),
@@ -181,7 +184,7 @@ pub fn checkout_row(checkout: &Checkout, largest: u64, home: Option<&str>) -> Ro
         caption: if checkout.linked {
             format!("worktree · {}", short(&checkout.parent, home))
         } else {
-            "the repository's own checkout".to_owned()
+            format!("clone · {}", short(&checkout.parent, home))
         }
         .into(),
         total: bytes(checkout.total_bytes()).into(),
@@ -210,7 +213,7 @@ pub fn facts(checkout: &Checkout, home: Option<&str>) -> Vec<FactItem> {
             if checkout.linked {
                 "Worktree: a second checkout of its repository"
             } else {
-                "The repository's own checkout"
+                "Clone: the repository's own checkout"
             }
             .to_owned(),
         ),
@@ -230,7 +233,11 @@ pub fn project_facts(project: &Project) -> Vec<FactItem> {
     vec![
         fact(
             "Checkouts",
-            count(project.members.len(), "checkout", "checkouts"),
+            format!(
+                "{} in {}",
+                count(project.members.len(), "checkout", "checkouts"),
+                count(project.clones, "clone", "clones")
+            ),
         ),
         fact("In use", format!("{} of them", project.held)),
         fact("Source", bytes(project.own_bytes)),
@@ -344,7 +351,9 @@ pub fn store(store: &Store) -> StoreItem {
 #[cfg(test)]
 mod tests {
     use suds_core::pressure::Level;
-    use suds_view::{BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, projects};
+    use suds_view::{
+        BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, projects,
+    };
 
     use super::{builds, checkout_row, facts, notice, pressure_facts, project_row, short, store};
 
@@ -370,6 +379,7 @@ mod tests {
             parent: "/work".into(),
             linked: true,
             repository: Some("/work/main".into()),
+            origin: None,
             own_bytes: 1024,
             build_bytes: 2048,
             build_state: vec![BuildState {
@@ -408,7 +418,7 @@ mod tests {
         held.linked = false;
         let row = checkout_row(&held, 6144, None);
         assert_eq!(row.state, "");
-        assert_eq!(row.caption, "the repository's own checkout");
+        assert_eq!(row.caption, "clone · /work");
     }
 
     #[test]
@@ -422,6 +432,18 @@ mod tests {
         assert_eq!(row.name, "main");
         assert_eq!(row.caption, "2 checkouts · 1 in use · ~/main");
         assert_eq!(row.total, "6.0 KiB");
+
+        // A second clone of one remote joins the project, which then takes the remote's name.
+        let mut clone = fixture();
+        clone.repository = Some("/old/main".into());
+        let mut checkouts = [fixture(), clone];
+        for checkout in &mut checkouts {
+            checkout.origin = Some("github.com/acme/main".into());
+        }
+        let found = projects(&checkouts, "", Sort::Size);
+        let row = project_row(&found[0], false, None);
+        assert_eq!(row.name, "acme/main");
+        assert_eq!(row.caption, "2 checkouts · 2 clones · github.com/acme/main");
     }
 
     #[test]

@@ -25,6 +25,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A scan reads each entry's metadata once**: the walk asked the system about each entry twice, once for the boundary and once for the count. One call now serves both, and an inspection of a 770 GiB development tree took 17 seconds in place of 25.
 - **The journal has a default directory on Linux**: it lies in `~/.local/state/suds/journal`, and `XDG_STATE_HOME` moves it. The option `--journal` still names another directory.
 - **A shared `suds-core` crate holds the inspection code**: the `suds` command and the desktop application each call it. The scan records native paths and names. The `suds inspect` command's JSON report, terminal table, and exit statuses remain unchanged.
 

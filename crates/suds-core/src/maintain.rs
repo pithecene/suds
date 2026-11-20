@@ -3,8 +3,8 @@
 //!
 //! A schedule starts this run with no person present. The run always
 //! measures the development storage and records the pressure. It removes
-//! derived state and trims stores only under the standing approval of
-//! decision 0002, and the journal records that authority with each run.
+//! derived state and eligible landed checkouts and trims stores under the
+//! standing approval of decision 0002. The journal records that authority.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -107,7 +107,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     let standings = registry::reading(&registry_path);
     let policy = Policy {
         idle_seconds,
-        checkouts: CheckoutScope::DerivedOnly,
+        checkouts: CheckoutScope::Landed,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
     };
     let observed = Observed {

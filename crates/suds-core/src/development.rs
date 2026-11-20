@@ -17,7 +17,7 @@ use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::inspection::ScanError;
-use crate::model::{Measure, Platform, ReportStatus, TraversalError};
+use crate::model::{EntryKind, Measure, Platform, ReportStatus, TraversalError};
 use crate::roots::normalize;
 use crate::scan::SharedScan;
 use crate::timestamp;
@@ -712,12 +712,20 @@ pub(crate) fn survey_build_state(
 /// mount points and the unreadable entries beneath it, and it names each
 /// directory beneath it that holds a `.git` entry.
 pub(crate) fn survey_tree(path: &Path) -> (Measure, Survey, Vec<PathBuf>) {
-    let mut scan = SharedScan::default();
+    survey_tree_with(path, &mut SharedScan::default(), &mut |_, _| {})
+}
+
+pub(crate) fn survey_tree_with(
+    path: &Path,
+    scan: &mut SharedScan,
+    visit: &mut dyn FnMut(&Path, EntryKind),
+) -> (Measure, Survey, Vec<PathBuf>) {
     let mut repositories = Vec::new();
-    let bounded = scan.measure(path, &mut |dir| {
-        if fs::symlink_metadata(dir.join(".git")).is_ok() {
-            repositories.push(dir.to_path_buf());
+    let bounded = scan.measure_with(path, &mut |entry, kind| {
+        if kind == EntryKind::Directory && fs::symlink_metadata(entry.join(".git")).is_ok() {
+            repositories.push(entry.to_path_buf());
         }
+        visit(entry, kind);
         false
     });
     let survey = Survey {

@@ -12,7 +12,7 @@ use suds_core::organize::journal::{Event, read};
 use suds_core::pressure::Level;
 use suds_core::reclaim::execute::Authority;
 use suds_core::reclaim::git::Git;
-use suds_core::reclaim::plan::{Kept, ReclaimPlan, Subject};
+use suds_core::reclaim::plan::{Candidate, Decision, Kept, ReclaimPlan, Subject};
 use suds_core::registry::{self, Event as RegistryEvent};
 use suds_core::state::{Directories, Settings};
 use suds_core::stores::Programs;
@@ -155,6 +155,19 @@ impl Fixture {
         .unwrap();
     }
 
+    fn landed_checkout(&self) -> PathBuf {
+        self.add_remote();
+        let checkout = self.linked("feature");
+        let tracked_ref = "refs/remotes/origin/pull/42/head";
+        git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
+        git(
+            &checkout,
+            &["fetch", "origin", &format!("{PULL_HEAD}:{tracked_ref}")],
+        );
+        self.release_landed(&checkout);
+        checkout
+    }
+
     fn reclaim_plan(&self) -> ReclaimPlan {
         let report = maintain(&self.settings(true), &self.context(&Git::default())).unwrap();
         assert_eq!(
@@ -170,6 +183,16 @@ impl Fixture {
             })
             .unwrap()
     }
+}
+
+fn linked_candidate<'a>(plan: &'a ReclaimPlan, checkout: &Path) -> (usize, &'a Candidate) {
+    plan.candidates
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| {
+            candidate.subject == Subject::LinkedCheckout && candidate.path.as_path() == checkout
+        })
+        .unwrap()
 }
 
 #[test]
@@ -244,17 +267,41 @@ fn reclaims_under_the_standing_approval_and_records_that_authority() {
 }
 
 #[test]
-fn keeps_a_landed_checkout_even_with_a_local_tracking_reference() {
+fn removes_a_landed_checkout_with_tracked_files_and_build_state() {
     let fixture = Fixture::new();
-    fixture.add_remote();
-    let checkout = fixture.linked("feature");
-    let tracked_ref = "refs/remotes/origin/pull/42/head";
-    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
-    git(
-        &checkout,
-        &["fetch", "origin", &format!("{PULL_HEAD}:{tracked_ref}")],
+    let checkout = fixture.landed_checkout();
+    let head = Git::default().head(&checkout).unwrap();
+    let plan = fixture.reclaim_plan();
+    let (index, candidate) = linked_candidate(&plan, &checkout);
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
     );
-    fixture.release_landed(&checkout);
+    assert!(!checkout.exists());
+    git(
+        &fixture.repo,
+        &["show-ref", "--verify", "refs/heads/feature"],
+    );
+    let proof =
+        format!("the remote-tracking reference refs/remotes/origin/pull/42/head holds {head}");
+    assert!(candidate.evidence.contains(&proof));
+    assert!(
+        read(&fixture.directories.journal())
+            .unwrap()
+            .iter()
+            .any(|record| {
+                matches!(&record.event, Event::Removed { index: removed, evidence, .. }
+            if *removed == index && evidence.contains(&proof))
+            })
+    );
+}
+
+#[test]
+fn keeps_a_landed_checkout_with_an_ignored_file() {
+    let fixture = Fixture::new();
+    let checkout = fixture.landed_checkout();
     let ignored = checkout.join("secrets.local");
     fs::write(&ignored, "local work").unwrap();
     let git = Git::default();
@@ -262,13 +309,56 @@ fn keeps_a_landed_checkout_even_with_a_local_tracking_reference() {
     assert_eq!(git.unpushed(&checkout).unwrap(), 0);
 
     let plan = fixture.reclaim_plan();
-    assert!(
-        plan.candidates
-            .iter()
-            .all(|candidate| candidate.subject != Subject::LinkedCheckout)
+    let (_, candidate) = linked_candidate(&plan, &checkout);
+    assert_eq!(candidate.kept, Some(Kept::UnaccountedContent));
+    assert_eq!(
+        candidate.evidence.last(),
+        Some(&format!("Suds could not account for {}", ignored.display()))
     );
     assert_eq!(fs::read_to_string(ignored).unwrap(), "local work");
     assert!(!checkout.join("target").exists());
+}
+
+#[test]
+fn keeps_a_landed_checkout_with_an_ignored_empty_directory() {
+    let fixture = Fixture::new();
+    let checkout = fixture.landed_checkout();
+    let ignored = checkout.join("empty.local");
+    fs::create_dir(&ignored).unwrap();
+    assert!(Git::default().is_clean(&checkout).unwrap());
+
+    let plan = fixture.reclaim_plan();
+    let (_, candidate) = linked_candidate(&plan, &checkout);
+    assert_eq!(candidate.kept, Some(Kept::UnaccountedContent));
+    assert_eq!(
+        candidate.evidence.last(),
+        Some(&format!("Suds could not account for {}", ignored.display()))
+    );
+    assert!(ignored.is_dir());
+}
+
+#[test]
+fn keeps_a_landed_checkout_with_a_linked_checkout_beneath_it() {
+    let fixture = Fixture::new();
+    let checkout = fixture.landed_checkout();
+    let nested = checkout.join("target/nested");
+    git(
+        &fixture.repo,
+        &["worktree", "add", "--detach", nested.to_str().unwrap()],
+    );
+    assert!(Git::default().is_clean(&checkout).unwrap());
+
+    let plan = fixture.reclaim_plan();
+    let (_, candidate) = linked_candidate(&plan, &checkout);
+    assert_eq!(candidate.kept, Some(Kept::HoldsCheckout));
+    assert_eq!(
+        candidate.evidence.last(),
+        Some(&format!(
+            "the checkout {} lies beneath it",
+            nested.display()
+        ))
+    );
+    assert!(nested.join(".git").is_file());
 }
 
 #[test]
@@ -288,10 +378,9 @@ fn keeps_a_pushed_checkout_after_an_ordinary_release() {
     .unwrap();
 
     let plan = fixture.reclaim_plan();
-    assert!(
-        plan.candidates
-            .iter()
-            .all(|candidate| candidate.subject != Subject::LinkedCheckout)
+    assert_eq!(
+        linked_candidate(&plan, &checkout).1.kept,
+        Some(Kept::NoLandedRelease)
     );
     assert!(checkout.join("change.txt").exists());
     assert!(!checkout.join("target").exists());
@@ -315,10 +404,9 @@ fn keeps_a_landed_checkout_that_a_second_client_still_holds() {
     fixture.release_landed(&checkout);
 
     let plan = fixture.reclaim_plan();
-    assert!(
-        plan.candidates
-            .iter()
-            .all(|candidate| candidate.subject != Subject::LinkedCheckout)
+    assert_eq!(
+        linked_candidate(&plan, &checkout).1.kept,
+        Some(Kept::Registered)
     );
     let build = plan
         .candidates

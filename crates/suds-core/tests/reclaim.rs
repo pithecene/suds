@@ -123,17 +123,27 @@ impl Fixture {
         checkouts: bool,
         at: i64,
     ) -> ReclaimPlan {
+        let scope = if checkouts {
+            CheckoutScope::AllLinked
+        } else {
+            CheckoutScope::Released
+        };
+        self.plan_with_scope(liveness, scope, at)
+    }
+
+    fn plan_with_scope(
+        &self,
+        liveness: &Result<Liveness, String>,
+        scope: CheckoutScope,
+        at: i64,
+    ) -> ReclaimPlan {
         let scan = inspect(
             std::slice::from_ref(&self.workspace),
             &Environment::default(),
         );
         let policy = Policy {
             idle_seconds: IDLE,
-            checkouts: if checkouts {
-                CheckoutScope::AllLinked
-            } else {
-                CheckoutScope::Released
-            },
+            checkouts: scope,
             tolerate_unreadable_processes: false,
         };
         let observed = Observed {
@@ -154,6 +164,12 @@ impl Fixture {
 
     fn record(&self, checkout: &Path, event: registry::Event) {
         registry::append(&self.registry(), checkout, "bosun", Some("wf-1"), event, 0).unwrap();
+    }
+
+    fn release_landed(&self) -> String {
+        let head = Git::default().head(&self.linked).unwrap();
+        registry::append_landed(&self.registry(), &self.linked, "bosun", None, &head, 0).unwrap();
+        head
     }
 
     /// Applies `plan` at the time for which `plan` planned, with the
@@ -185,6 +201,21 @@ impl Fixture {
 
     fn apply(&self, plan: &ReclaimPlan) -> ReclaimReport {
         self.apply_with(plan, &mut nobody)
+    }
+
+    fn apply_unattended(&self, plan: &ReclaimPlan, at: i64) -> ReclaimReport {
+        apply(
+            &mut open_journal(&self.journal),
+            plan,
+            Conditions {
+                authority: Authority::StandingApproval,
+                observe: &mut nobody,
+                registry: &mut || self.standings(),
+                git: &Git::default(),
+                now: at,
+            },
+        )
+        .unwrap()
     }
 }
 
@@ -1048,51 +1079,38 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
 }
 
 #[test]
-fn a_persons_plan_with_a_verified_head_still_requires_personal_approval() {
+fn refuses_an_ignored_file_that_appeared_after_planning() {
     let fixture = Fixture::new();
-    let git_adapter = Git::default();
-    let head = git_adapter.head(&fixture.linked).unwrap();
-    registry::append_landed(
-        &fixture.registry(),
-        &fixture.linked,
-        "bosun",
-        Some("wf-1"),
-        &head,
-        0,
-    )
-    .unwrap();
-    let plan = fixture.plan(&nobody(), false);
+    let head = fixture.release_landed();
+    let at = now() + 2 * IDLE_SECONDS;
+    let plan = fixture.plan_with_scope(&nobody(), CheckoutScope::Landed, at);
     let candidate = find(&plan, &fixture.linked);
     assert_eq!(candidate.decision, Decision::Remove);
     let proof = format!("the remote-tracking reference refs/remotes/origin/feature holds {head}");
-    assert_eq!(candidate.evidence.last(), Some(&proof));
+    assert!(candidate.evidence.contains(&proof));
 
-    let mut journal = open_journal(&fixture.journal);
-    let report = apply(
-        &mut journal,
-        &plan,
-        Conditions {
-            authority: Authority::StandingApproval,
-            observe: &mut nobody,
-            registry: &mut || fixture.standings(),
-            git: &git_adapter,
-            now: now() + 2 * IDLE_SECONDS,
-        },
-    )
-    .unwrap();
+    let added = fixture.linked.join(".worktrees/history.jsonl");
+    write(&added, "workflow history");
+    assert!(Git::default().is_clean(&fixture.linked).unwrap());
+    let reason = format!(
+        "Suds could not account for {}",
+        added.parent().unwrap().display()
+    );
+
+    let report = fixture.apply_unattended(&plan, at);
     let removal = report
         .removals
         .iter()
         .find(|removal| removal.path.as_path() == fixture.linked)
         .unwrap();
     assert!(!removal.removed);
-    assert_eq!(
-        removal.refusal.as_deref(),
-        Some("removing a linked checkout requires a person's approval")
-    );
-    assert!(fixture.linked.exists());
+    assert_eq!(removal.refusal.as_deref(), Some(reason.as_str()));
+    assert_eq!(fs::read_to_string(added).unwrap(), "workflow history");
     assert!(!fixture.linked.join("target").exists());
-    drop(journal);
+    assert!(read(&fixture.journal).unwrap().iter().any(|record| {
+        matches!(&record.event, Event::RemovalRefused { run, reason: recorded, .. }
+            if run == &report.run && recorded == &reason)
+    }));
 
     let plan = fixture.plan(&nobody(), false);
     let approved = fixture.apply(&plan);
@@ -1101,6 +1119,33 @@ fn a_persons_plan_with_a_verified_head_still_requires_personal_approval() {
         matches!(&record.event, Event::Removed { run, evidence, .. }
             if run == &approved.run && evidence.contains(&proof))
     }));
+}
+
+#[test]
+fn refuses_a_landed_checkout_when_its_tracking_reference_disappears() {
+    let fixture = Fixture::new();
+    let head = fixture.release_landed();
+    let at = now() + 2 * IDLE_SECONDS;
+    let plan = fixture.plan_with_scope(&nobody(), CheckoutScope::Landed, at);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    git(
+        &fixture.repo,
+        &["update-ref", "-d", "refs/remotes/origin/feature"],
+    );
+
+    let report = fixture.apply_unattended(&plan, at);
+    let removal = report
+        .removals
+        .iter()
+        .find(|removal| removal.path.as_path() == fixture.linked)
+        .unwrap();
+    assert_eq!(
+        removal.refusal,
+        Some(format!(
+            "no remote-tracking reference holds the released head {head}"
+        ))
+    );
+    assert!(fixture.linked.join("src/lib.rs").is_file());
 }
 
 #[test]
@@ -1120,16 +1165,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         Some(Kept::UnpushedCommits)
     );
 
-    let head = Git::default().head(&fixture.linked).unwrap();
-    registry::append_landed(
-        &fixture.registry(),
-        &fixture.linked,
-        "bosun",
-        None,
-        &head,
-        0,
-    )
-    .unwrap();
+    let head = fixture.release_landed();
     let plan = fixture.plan(&nobody(), false);
     let candidate = find(&plan, &fixture.linked);
     assert_eq!(
@@ -1139,27 +1175,19 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         candidate.evidence
     );
 
-    // Standing approval cannot apply the checkout removal from a person's plan.
-    let mut journal = open_journal(&fixture.journal);
-    let unattended = apply(
-        &mut journal,
-        &plan,
-        Conditions {
-            authority: Authority::StandingApproval,
-            observe: &mut nobody,
-            registry: &mut || fixture.standings(),
-            git: &Git::default(),
-            now: now() + 2 * IDLE_SECONDS,
-        },
-    )
-    .unwrap();
-    drop(journal);
+    // Standing approval needs a reference that contains the released head.
+    let unattended = fixture.apply_unattended(&plan, now() + 2 * IDLE_SECONDS);
     assert!(fixture.linked.exists());
-    assert!(
-        unattended
-            .removals
-            .iter()
-            .any(|removal| { removal.path.as_path() == fixture.linked && !removal.removed })
+    let removal = unattended
+        .removals
+        .iter()
+        .find(|removal| removal.path.as_path() == fixture.linked)
+        .unwrap();
+    assert_eq!(
+        removal.refusal,
+        Some(format!(
+            "no remote-tracking reference holds the released head {head}"
+        ))
     );
 
     // A commit after the report is work that no remote holds.
@@ -1171,16 +1199,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
     assert_ne!(report.status, RunStatus::Complete);
 
     // A report of the new head lets the checkout leave.
-    let head = Git::default().head(&fixture.linked).unwrap();
-    registry::append_landed(
-        &fixture.registry(),
-        &fixture.linked,
-        "bosun",
-        None,
-        &head,
-        0,
-    )
-    .unwrap();
+    fixture.release_landed();
     let plan = fixture.plan(&nobody(), false);
     fixture.apply(&plan);
     assert!(!fixture.linked.exists());

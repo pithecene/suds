@@ -8,7 +8,7 @@
 //! linked checkout.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub const RECLAIM_RUN_SCHEMA: &str = "suds.reclaim-run/v1";
 pub enum Authority {
     /// A person ran the command and asked it to apply the plan.
     Person,
-    /// The owner's standing approval for derived state admitted the plan.
+    /// The owner's standing approval admitted the plan.
     StandingApproval,
 }
 
@@ -141,7 +141,7 @@ pub fn apply(
         };
         let outcome = match check(journal.directory(), candidate, authority, &judge) {
             Err(reason) => Err(reason),
-            Ok(evidence) => {
+            Ok(checked) => {
                 journal.append(Event::RemovalStarted {
                     run: run.clone(),
                     index,
@@ -149,11 +149,20 @@ pub fn apply(
                 if candidate.subject == Subject::LinkedCheckout {
                     // Git removes the checkout's Go caches with it, and Git
                     // cannot enter a directory that no one may write.
-                    for cache in go_caches_beneath(plan, candidate.path.as_path()) {
-                        grant_owner_write(cache);
+                    match authority {
+                        Authority::Person => {
+                            for cache in go_caches_beneath(plan, candidate.path.as_path()) {
+                                grant_owner_write(cache);
+                            }
+                        }
+                        Authority::StandingApproval => {
+                            for cache in &checked.go_caches {
+                                grant_owner_write(cache);
+                            }
+                        }
                     }
                 }
-                remove(candidate, git).map(|()| evidence)
+                remove(candidate, git).map(|()| checked.evidence)
             }
         };
         let refusal = match outcome {
@@ -210,6 +219,12 @@ pub fn apply(
     })
 }
 
+#[derive(Default)]
+struct CheckedRemoval {
+    evidence: Vec<String>,
+    go_caches: Vec<PathBuf>,
+}
+
 /// Verifies every precondition of one removal. The directory must be the
 /// entry that the plan measured, and the plan's own rules must still decide
 /// to remove it as it stands now.
@@ -218,10 +233,7 @@ fn check(
     candidate: &Candidate,
     authority: Authority,
     judge: &Judge<'_>,
-) -> Result<Vec<String>, String> {
-    if candidate.subject == Subject::LinkedCheckout && authority == Authority::StandingApproval {
-        return Err("removing a linked checkout requires a person's approval".to_owned());
-    }
+) -> Result<CheckedRemoval, String> {
     let path = candidate.path.as_path();
     if journal.starts_with(path) {
         return Err(format!("{} holds the journal", path.display()));
@@ -265,6 +277,16 @@ fn check(
         }
         Subject::LinkedCheckout => {
             let repository = candidate.repository.as_ref().map(NativePath::as_path);
+            if authority == Authority::StandingApproval {
+                let mut evidence = Vec::new();
+                let go_caches = judge
+                    .landed_checkout(path, repository, &mut evidence)
+                    .map_err(|_| evidence.last().cloned().unwrap_or_default())?;
+                return Ok(CheckedRemoval {
+                    evidence,
+                    go_caches,
+                });
+            }
             if repository.is_none()
                 || development::linked_repository(path, &path.join(".git")).as_deref() != repository
             {
@@ -303,8 +325,11 @@ fn check(
     match kept {
         // The judgment's last fact is the one that keeps the directory.
         Some(_) => Err(evidence.pop().unwrap_or_default()),
-        None if candidate.subject == Subject::LinkedCheckout => Ok(evidence),
-        None => Ok(Vec::new()),
+        None if candidate.subject == Subject::LinkedCheckout => Ok(CheckedRemoval {
+            evidence,
+            ..CheckedRemoval::default()
+        }),
+        None => Ok(CheckedRemoval::default()),
     }
 }
 

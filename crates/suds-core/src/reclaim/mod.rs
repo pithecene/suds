@@ -7,6 +7,7 @@
 //! build state, and a remote holds a removed checkout's work, so a removal
 //! here is permanent.
 
+mod accounted;
 pub mod execute;
 pub mod git;
 pub mod liveness;

@@ -11,15 +11,21 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Reclaim records Git evidence for landed checkouts**.
+- **Scheduled runs can reclaim landed checkouts**.
 
-  A person's `suds reclaim --apply` can verify a matching landed release against a local remote-tracking reference. When Suds finds such a reference at removal, the journal records it. Removing a linked checkout requires a person's approval.
+  With standing approval, a scheduled run removes a clean, idle linked
+  checkout when its head matches a client's landed release and a local
+  remote-tracking reference contains it. At planning and before removal,
+  Suds verifies the head, the reference, and every entry. The landed tree
+  and ignored build state must account for the contents. A nested checkout,
+  a mount point, or an unreadable entry keeps the checkout. The journal
+  records the reference or the first path that keeps the checkout.
 
 ## [0.1.1] - 2026-11-20
 
 ### Added
 
-- **A release reports a landed head**: `suds release --landed COMMIT` records that a remote holds the change at the checkout's head, though by another commit. A forge that squashes a branch and deletes it left such a checkout in place for good, because no remote held its commits. A person's own `suds reclaim --apply` now removes it while its head is still that commit and its tree is clean. A scheduled run reclaims its build state and leaves the checkout.
+- **A release reports a landed head**: `suds release --landed COMMIT` records that a remote holds the change at the checkout's head, though by another commit. A forge that squashes a branch and deletes it left such a checkout in place for good, because no remote held its commits. A person's own `suds reclaim --apply` can remove it while its head is still that commit and its tree is clean.
 
 ## [0.1.0] - 2026-11-20
 

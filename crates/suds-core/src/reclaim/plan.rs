@@ -16,6 +16,7 @@ use crate::inspection::EntryRevision;
 use crate::model::Measure;
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
+use crate::reclaim::accounted;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::registry::{self, Reading};
@@ -47,6 +48,8 @@ pub enum CheckoutScope {
     Released,
     /// Also consider every linked checkout.
     AllLinked,
+    /// Consider linked checkouts under the owner's standing approval.
+    Landed,
 }
 
 /// A plan to reclaim development storage.
@@ -140,8 +143,12 @@ pub enum Kept {
     UncommittedChanges,
     /// The checkout's head holds a commit that no remote holds.
     UnpushedCommits,
-    /// Retained for plans that recorded a mismatch with the released head.
+    /// The checkout's head differs from the commit its client released.
     LandedHeadChanged,
+    /// No client release reports the checkout's head as landed.
+    NoLandedRelease,
+    /// An entry is outside the landed Git tree and the proven build state.
+    UnaccountedContent,
     /// Git tracks a file in the build state, or would track one.
     TrackedFiles,
     /// A checkout lies beneath the directory.
@@ -174,6 +181,8 @@ impl Kept {
             Kept::UncommittedChanges => "uncommitted_changes",
             Kept::UnpushedCommits => "unpushed_commits",
             Kept::LandedHeadChanged => "landed_head_changed",
+            Kept::NoLandedRelease => "no_landed_release",
+            Kept::UnaccountedContent => "unaccounted_content",
             Kept::TrackedFiles => "tracked_files",
             Kept::HoldsCheckout => "holds_checkout",
             Kept::HoldsMountPoint => "holds_mount_point",
@@ -243,10 +252,22 @@ pub fn plan_reclaim(
             && match policy.checkouts {
                 CheckoutScope::DerivedOnly => false,
                 CheckoutScope::Released => released(checkout),
-                CheckoutScope::AllLinked => true,
+                CheckoutScope::AllLinked | CheckoutScope::Landed => true,
             };
         if linked && named.insert(checkout.path.clone()) {
-            let (kept, evidence) = judge_linked(&judge, checkout, scan);
+            let (kept, evidence) = if policy.checkouts == CheckoutScope::Landed {
+                let mut evidence = Vec::new();
+                let kept = judge
+                    .landed_checkout(
+                        &checkout.path,
+                        checkout.repository.as_deref(),
+                        &mut evidence,
+                    )
+                    .err();
+                (kept, evidence)
+            } else {
+                judge_linked(&judge, checkout, scan)
+            };
             let subject = Subject::LinkedCheckout;
             candidates.extend(candidate(
                 &checkout.path,
@@ -433,6 +454,70 @@ impl Judge<'_> {
         (kept, evidence)
     }
 
+    /// Judges a linked checkout under standing approval and names the Go
+    /// caches whose permissions Git needs changed for removal.
+    pub(super) fn landed_checkout(
+        &self,
+        path: &Path,
+        repository: Option<&Path>,
+        evidence: &mut Vec<String>,
+    ) -> Result<Vec<PathBuf>, Kept> {
+        if let Some(kept) = self
+            .held_beneath(path, evidence)
+            .or_else(|| self.in_use(path, evidence))
+        {
+            return Err(kept);
+        }
+        let Some(commit) = self.landed(path) else {
+            evidence.push(format!("no client reported {} as landed", path.display()));
+            return Err(Kept::NoLandedRelease);
+        };
+        if repository.is_none()
+            || development::linked_repository(path, &path.join(".git")).as_deref() != repository
+        {
+            evidence.push(format!(
+                "{} is no longer a linked checkout of the repository in the plan",
+                path.display()
+            ));
+            return Err(Kept::Unverified);
+        }
+        let head = self.git.head(path).map_err(|reason| {
+            evidence.push(reason);
+            Kept::Unverified
+        })?;
+        if head != commit {
+            evidence.push(format!(
+                "the head is {head}, but the client released {commit}"
+            ));
+            return Err(Kept::LandedHeadChanged);
+        }
+        if !self.record_tracking_ref(path, commit, evidence) {
+            return Err(Kept::Unverified);
+        }
+        let contents = accounted::survey(self.git, path, commit).map_err(|(kept, reason)| {
+            evidence.push(reason);
+            kept
+        })?;
+        evidence.push("the landed tree and proven build state account for the checkout".to_owned());
+        if let Some(kept) = self.recent(contents.measure.newest_modified.as_deref(), evidence) {
+            return Err(kept);
+        }
+        match self.git.is_clean_for_removal(path) {
+            Ok(true) => {
+                evidence.push("Git reports no changed, staged, or untracked file".to_owned());
+                Ok(contents.go_caches)
+            }
+            Ok(false) => {
+                evidence.push("Git reports a changed, staged, or untracked file".to_owned());
+                Err(Kept::UncommittedChanges)
+            }
+            Err(reason) => {
+                evidence.push(reason);
+                Err(Kept::Unverified)
+            }
+        }
+    }
+
     /// The head that a client's release of `checkout` reported as landed.
     fn landed(&self, checkout: &Path) -> Option<&str> {
         let standing = self.registry.as_ref().ok()?.get(checkout)?;
@@ -458,7 +543,11 @@ impl Judge<'_> {
         if let Some(commit) = self.landed(checkout)
             && self.git.head(checkout).is_ok_and(|head| head == commit)
         {
-            self.record_landed(checkout, commit, evidence);
+            if !self.record_tracking_ref(checkout, commit, evidence) {
+                evidence.push(format!(
+                    "its client reported the head {commit} as landed on a remote"
+                ));
+            }
             return None;
         }
         match self.git.unpushed(checkout) {
@@ -479,24 +568,30 @@ impl Judge<'_> {
         }
     }
 
-    fn record_landed(&self, checkout: &Path, commit: &str, evidence: &mut Vec<String>) {
+    fn record_tracking_ref(
+        &self,
+        checkout: &Path,
+        commit: &str,
+        evidence: &mut Vec<String>,
+    ) -> bool {
         match self.git.remote_tracking_ref(checkout, commit) {
             Ok(Some(reference)) => {
                 evidence.push(format!(
                     "the remote-tracking reference {reference} holds {commit}"
                 ));
-                return;
+                true
             }
             Ok(None) => {
                 evidence.push(format!(
                     "no remote-tracking reference holds the released head {commit}"
                 ));
+                false
             }
-            Err(reason) => evidence.push(reason),
+            Err(reason) => {
+                evidence.push(reason);
+                false
+            }
         }
-        evidence.push(format!(
-            "its client reported the head {commit} as landed on a remote"
-        ));
     }
 
     /// Keeps a candidate when a process works in its checkout, or when Suds

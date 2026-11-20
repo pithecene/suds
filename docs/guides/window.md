@@ -44,7 +44,25 @@ journal, and removes no file.
 | :--- | :--- |
 | Control and F | Moves to the filter |
 | Control and R | Measures again |
-| Up and Down | Move through the checkout list |
+| Up and Down | Move through the outline |
+| Right and Left | Open and close the selected project |
+| Escape | Lets the selection go |
+
+A click on a project's row opens or closes it. A second click on a selected
+checkout, or a click on the map's empty space, also lets the selection go.
+
+### Storage Map
+
+The map follows the squarified layout of Bruls, Huizing, and van Wijk. A
+rectangle's area is the entry's size on disk. A project's frame holds a tile
+for each of its checkouts, and a tile shows its build state's part in the
+color of build state. The outline's bars use the same colors and measure
+every row against the largest project, so a checkout's bar is a part of its
+project's bar. The function `suds_view::map` computes each rectangle, and
+`window.slint` only places them.
+
+A selection in the map and a selection in the outline are one selection.
+The window names it by path, so it follows its entry into a new reading.
 
 ## Check
 
@@ -104,6 +122,8 @@ command line.
   a screen reader's access have no measurement.
 - The window shows one view. The registry's records, the journal, a
   reclaim plan, and the stores' trims have no view yet.
+- The map has no key of its own. A person reaches each of its entries
+  through the outline.
 - A release publishes no archive of the window.
 - The desktop application of decision 0001 still holds the inspection of a
   root and the moves of Downloads entries. It leaves once the window holds

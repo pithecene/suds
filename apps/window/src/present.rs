@@ -2,9 +2,11 @@
 
 use slint::{Color, SharedString};
 use suds_core::pressure::Level;
-use suds_view::{Checkout, Class, PressureCard, Store, StoreStanding, bytes, day};
+use suds_view::{
+    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, bytes, day,
+};
 
-use crate::{BuildItem, CheckoutItem, ClassItem, FactItem, StoreItem};
+use crate::{BuildItem, ClassItem, FactItem, FrameItem, RowItem, StoreItem, TileItem};
 
 /// One tint for each class, in the order of the view model's classes.
 const TINTS: [u32; 6] = [0x4c7fe0, 0x8a72f0, 0xe0951c, 0x2f9e6b, 0xd9659a, 0x3fb1c4];
@@ -66,19 +68,40 @@ pub fn class(position: usize, class: &Class) -> ClassItem {
     }
 }
 
-fn hold(checkout: &Checkout) -> SharedString {
+/// A checkout's standing with the client that registered it, in a few words, and the standing's rank.
+/// The ranks are 0 for none, 1 for a checkout in use, 2 for one whose work landed, and 3 for one let go.
+fn state(checkout: &Checkout) -> (String, i32) {
     match &checkout.hold {
-        None => SharedString::new(),
-        Some(hold) if hold.released => "released".into(),
-        Some(hold) => hold.client.as_str().into(),
+        None => (String::new(), 0),
+        Some(hold) if !hold.released => (format!("in use by {}", hold.client), 1),
+        Some(hold) if hold.landed.is_some() => ("landed".to_owned(), 2),
+        Some(_) => ("finished".to_owned(), 3),
     }
 }
 
-fn build(checkout: &Checkout) -> String {
-    if checkout.build_state.is_empty() {
+/// A checkout's standing as a sentence, for the detail pane.
+fn standing(checkout: &Checkout) -> String {
+    match &checkout.hold {
+        None => "Not in use by any tool.".to_owned(),
+        Some(hold) if !hold.released => format!(
+            "In use by {} since {}. Suds leaves it untouched.",
+            hold.client,
+            day(&hold.since)
+        ),
+        Some(hold) if hold.landed.is_some() => format!(
+            "{} finished with it on {}, and its work has landed. Suds can remove it once it is clean and idle.",
+            hold.client,
+            day(&hold.since)
+        ),
+        Some(hold) => format!("{} finished with it on {}.", hold.client, day(&hold.since)),
+    }
+}
+
+fn build(bytes: u64) -> String {
+    if bytes == 0 {
         "no build state".to_owned()
     } else {
-        format!("{} build", bytes(checkout.build_bytes))
+        format!("{} build", suds_view::bytes(bytes))
     }
 }
 
@@ -90,61 +113,184 @@ pub fn short(path: &str, home: Option<&str>) -> String {
     }
 }
 
-pub fn checkout(checkout: &Checkout, home: Option<&str>) -> CheckoutItem {
-    CheckoutItem {
+fn share(part: u64, whole: u64) -> f32 {
+    if whole == 0 {
+        0.0
+    } else {
+        (part as f64 / whole as f64) as f32
+    }
+}
+
+fn count(number: usize, one: &str, many: &str) -> String {
+    format!("{number} {}", if number == 1 { one } else { many })
+}
+
+/// The tint of a checkout's source: one for a repository's main checkout, one for a worktree.
+fn source_tint(linked: bool) -> Color {
+    tint(usize::from(linked))
+}
+
+/// The count beside the outline's heading: the projects, and the checkouts that the filter keeps.
+pub fn counts(projects: usize, kept: usize, all: usize) -> String {
+    let checkouts = if kept == all {
+        count(all, "checkout", "checkouts")
+    } else {
+        format!("{kept} of {all} checkouts")
+    };
+    format!("{} · {checkouts}", count(projects, "project", "projects"))
+}
+
+/// A project's row of the outline.
+pub fn project_row(project: &Project, open: bool, home: Option<&str>) -> RowItem {
+    let mut caption = count(project.members.len(), "checkout", "checkouts");
+    if project.held > 0 {
+        caption.push_str(&format!(" · {} in use", project.held));
+    }
+    RowItem {
+        project: true,
+        open,
+        name: project.name.as_str().into(),
+        caption: format!("{caption} · {}", short(&project.path, home)).into(),
+        total: bytes(project.total_bytes()).into(),
+        build: build(project.build_bytes).into(),
+        modified: day(&project.newest_modified).into(),
+        share: project.share,
+        build_share: share(project.build_bytes, project.total_bytes()),
+        state: SharedString::new(),
+        state_rank: 0,
+        tint: source_tint(false),
+    }
+}
+
+/// A checkout's row of the outline, beneath its project's. Each bar of the outline measures
+/// against `largest`, the size of the largest project.
+pub fn checkout_row(checkout: &Checkout, largest: u64, home: Option<&str>) -> RowItem {
+    let (state, state_rank) = state(checkout);
+    RowItem {
+        project: false,
+        open: false,
         name: checkout.name.as_str().into(),
-        parent: short(&checkout.parent, home).into(),
-        kind: if checkout.linked { "linked" } else { "main" }.into(),
+        caption: if checkout.linked {
+            format!("worktree · {}", short(&checkout.parent, home))
+        } else {
+            "the repository's own checkout".to_owned()
+        }
+        .into(),
         total: bytes(checkout.total_bytes()).into(),
-        build: build(checkout).into(),
+        build: build(checkout.build_bytes).into(),
         modified: day(&checkout.newest_modified).into(),
-        share: checkout.share,
-        hold: hold(checkout),
+        share: share(checkout.total_bytes(), largest),
+        build_share: share(checkout.build_bytes, checkout.total_bytes()),
+        state: state.into(),
+        state_rank,
+        tint: source_tint(checkout.linked),
+    }
+}
+
+fn fact(label: &str, value: String) -> FactItem {
+    FactItem {
+        label: label.into(),
+        value: value.into(),
     }
 }
 
 /// The facts of one checkout, each with its label, for the detail pane.
-pub fn facts(checkout: &Checkout) -> Vec<FactItem> {
-    let fact = |label: &str, value: String| FactItem {
-        label: label.into(),
-        value: value.into(),
-    };
+pub fn facts(checkout: &Checkout, home: Option<&str>) -> Vec<FactItem> {
     let mut facts = vec![
         fact(
             "Kind",
             if checkout.linked {
-                "Linked checkout"
+                "Worktree: a second checkout of its repository"
             } else {
-                "Main checkout"
+                "The repository's own checkout"
             }
             .to_owned(),
         ),
         fact("Source", bytes(checkout.own_bytes)),
-        fact("Build state", build(checkout)),
+        fact("Build state", build(checkout.build_bytes)),
         fact("Last change", day(&checkout.newest_modified).to_owned()),
+        fact("Status", standing(checkout)),
     ];
     if let Some(repository) = &checkout.repository {
-        facts.insert(1, fact("Repository", repository.clone()));
+        facts.insert(1, fact("Repository", short(repository, home)));
     }
-    facts.push(match &checkout.hold {
-        None => fact("Hold", "No client holds it".to_owned()),
-        Some(hold) if hold.released => fact(
-            "Hold",
-            match &hold.landed {
-                Some(_) => format!(
-                    "{} released it as landed, {}",
-                    hold.client,
-                    day(&hold.since)
-                ),
-                None => format!("{} released it, {}", hold.client, day(&hold.since)),
-            },
-        ),
-        Some(hold) => fact(
-            "Hold",
-            format!("{} holds it since {}", hold.client, day(&hold.since)),
-        ),
-    });
     facts
+}
+
+/// The facts of one project, each with its label, for the detail pane.
+pub fn project_facts(project: &Project) -> Vec<FactItem> {
+    vec![
+        fact(
+            "Checkouts",
+            count(project.members.len(), "checkout", "checkouts"),
+        ),
+        fact("In use", format!("{} of them", project.held)),
+        fact("Source", bytes(project.own_bytes)),
+        fact("Build state", build(project.build_bytes)),
+        fact("Last change", day(&project.newest_modified).to_owned()),
+    ]
+}
+
+fn place(rect: &Rect) -> (f32, f32, f32, f32) {
+    (rect.x, rect.y, rect.width, rect.height)
+}
+
+/// One project's frame on the storage map.
+pub fn frame(frame: &Frame, project: &Project) -> FrameItem {
+    let (x, y, w, h) = place(&frame.rect);
+    let (bx, by, bw, bh) = place(&frame.build);
+    FrameItem {
+        x,
+        y,
+        w,
+        h,
+        bx,
+        by,
+        bw,
+        bh,
+        name: project.name.as_str().into(),
+        tip: format!(
+            "{} · {} · {} · {}",
+            project.name,
+            count(project.members.len(), "checkout", "checkouts"),
+            bytes(project.total_bytes()),
+            build(project.build_bytes)
+        )
+        .into(),
+        labelled: frame.labelled,
+        detailed: frame.detailed,
+    }
+}
+
+/// One checkout's tile on the storage map.
+pub fn tile(tile: &Tile, checkout: &Checkout, project: &Project) -> TileItem {
+    let (x, y, w, h) = place(&tile.rect);
+    let (bx, by, bw, bh) = place(&tile.build);
+    let (state, _) = state(checkout);
+    let mut tip = format!(
+        "{} / {} · {} · {}",
+        project.name,
+        checkout.name,
+        bytes(checkout.total_bytes()),
+        build(checkout.build_bytes)
+    );
+    if !state.is_empty() {
+        tip.push_str(&format!(" · {state}"));
+    }
+    TileItem {
+        x,
+        y,
+        w,
+        h,
+        bx,
+        by,
+        bw,
+        bh,
+        id: i32::try_from(tile.checkout).unwrap_or(-1),
+        name: checkout.name.as_str().into(),
+        tip: tip.into(),
+        tint: source_tint(checkout.linked),
+    }
 }
 
 pub fn builds(checkout: &Checkout) -> Vec<BuildItem> {
@@ -190,9 +336,9 @@ pub fn store(store: &Store) -> StoreItem {
 #[cfg(test)]
 mod tests {
     use suds_core::pressure::Level;
-    use suds_view::{BuildState, Checkout, Hold, PressureCard, Store, StoreStanding};
+    use suds_view::{BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, projects};
 
-    use super::{builds, checkout, facts, notice, pressure_facts, short, store};
+    use super::{builds, checkout_row, facts, notice, pressure_facts, project_row, short, store};
 
     #[test]
     fn a_path_beneath_the_home_directory_opens_with_a_tilde() {
@@ -230,23 +376,45 @@ mod tests {
     }
 
     #[test]
-    fn a_row_states_its_size_its_build_state_and_its_hold() {
-        let row = checkout(&fixture(), Some("/work"));
-        assert_eq!(row.parent, "~");
-        assert_eq!(row.kind, "linked");
+    fn a_row_states_its_size_its_build_state_and_its_standing() {
+        let row = checkout_row(&fixture(), 6144, Some("/work"));
+        assert_eq!(row.caption, "worktree · ~");
         assert_eq!(row.total, "3.0 KiB");
         assert_eq!(row.build, "2.0 KiB build");
         assert_eq!(row.modified, "2026-11-19");
-        assert_eq!(row.hold, "released");
+        assert_eq!((row.state.as_str(), row.state_rank), ("landed", 2));
+        // The bar measures against the largest project, and two thirds of it are build state.
+        assert_eq!(row.share, 0.5);
+        assert!((row.build_share - 2.0 / 3.0).abs() < 0.001);
+
+        let mut held = fixture();
+        held.hold.as_mut().unwrap().released = false;
+        assert_eq!(checkout_row(&held, 6144, None).state, "in use by bosun");
+        held.hold = None;
+        held.linked = false;
+        let row = checkout_row(&held, 6144, None);
+        assert_eq!(row.state, "");
+        assert_eq!(row.caption, "the repository's own checkout");
     }
 
     #[test]
-    fn the_detail_names_the_repository_the_release_and_each_build_directory() {
+    fn a_project_row_counts_its_checkouts_and_those_in_use() {
+        let mut held = fixture();
+        held.hold.as_mut().unwrap().released = false;
+        let checkouts = [held, fixture()];
+        let found = projects(&checkouts, "", Sort::Size);
+        let row = project_row(&found[0], true, Some("/work"));
+        assert!(row.project && row.open);
+        assert_eq!(row.name, "main");
+        assert_eq!(row.caption, "2 checkouts · 1 in use · ~/main");
+        assert_eq!(row.total, "6.0 KiB");
+    }
+
+    #[test]
+    fn the_detail_names_the_repository_the_standing_and_each_build_directory() {
         let checkout = fixture();
-        let labels: Vec<String> = facts(&checkout)
-            .iter()
-            .map(|f| f.label.to_string())
-            .collect();
+        let found = facts(&checkout, Some("/work"));
+        let labels: Vec<String> = found.iter().map(|f| f.label.to_string()).collect();
         assert_eq!(
             labels,
             [
@@ -255,11 +423,14 @@ mod tests {
                 "Source",
                 "Build state",
                 "Last change",
-                "Hold"
+                "Status"
             ]
         );
-        let hold = facts(&checkout).pop().unwrap();
-        assert_eq!(hold.value, "bosun released it as landed, 2026-11-18");
+        assert_eq!(found[1].value, "~/main");
+        assert_eq!(
+            found[5].value,
+            "bosun finished with it on 2026-11-18, and its work has landed. Suds can remove it once it is clean and idle."
+        );
         let build = &builds(&checkout)[0];
         assert_eq!(build.path, "target");
         assert_eq!(build.size, "2.0 KiB");

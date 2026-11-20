@@ -5,7 +5,7 @@
 //! permission: Suds still verifies every fact before it removes anything.
 //! The registry is an append-only file with one JSON record on each line.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -32,9 +32,7 @@ pub struct Record {
     /// The client's own name for the work, such as a workflow's identifier.
     pub attempt: Option<String>,
     pub event: Event,
-    /// On a release, the commit at the checkout's head that the client
-    /// reports as landed: a remote holds its change, though perhaps by
-    /// another commit, as after a squash.
+    /// On a release, the head that the client reports as landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed: Option<String>,
 }
@@ -46,7 +44,7 @@ pub enum Event {
     Released,
 }
 
-/// What the registry's latest record says of one checkout.
+/// The newest outstanding registration of a checkout, or its latest release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Standing {
     pub event: Event,
@@ -226,21 +224,32 @@ fn committed_length(bytes: &[u8]) -> usize {
         .map_or(0, |last| last + 1)
 }
 
-/// The latest standing of each checkout, from records in their order.
+/// One client can release only its own registration for an attempt.
 pub fn standings(records: &[Record]) -> Standings {
-    records
-        .iter()
-        .map(|record| {
-            let standing = Standing {
+    let mut seen = HashSet::new();
+    let mut standings = Standings::new();
+    for record in records.iter().rev() {
+        let path = record.checkout.as_path();
+        if !seen.insert((path, record.client.as_str(), record.attempt.as_deref())) {
+            continue;
+        }
+        if let Some(current) = standings.get(path)
+            && (current.event == Event::Registered || record.event == Event::Released)
+        {
+            continue;
+        }
+        standings.insert(
+            path.to_path_buf(),
+            Standing {
                 event: record.event,
                 client: record.client.clone(),
                 attempt: record.attempt.clone(),
                 at: record.at.clone(),
                 landed: record.landed.clone(),
-            };
-            (record.checkout.as_path().to_path_buf(), standing)
-        })
-        .collect()
+            },
+        );
+    }
+    standings
 }
 
 #[cfg(test)]

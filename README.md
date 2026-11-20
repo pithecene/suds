@@ -284,20 +284,38 @@ second worktree, and no commit, branch, tag, or stash that a remote lacks.
 Any other repository is a checkout, and it keeps the candidate. A
 registration of a directory inside a candidate keeps the candidate too.
 
-With `--checkouts`, the plan also considers each linked checkout, under
-the same two protections as build state. Suds has Git remove one only when
-Git reports no changed, staged, or untracked file there. A remote-tracking
-branch must also hold every commit of its head. The branch and its commits
-stay in the repository. Suds never names a main checkout.
+The `suds reclaim` plan considers released linked checkouts by default and
+considers all linked checkouts with `--checkouts`. Git must report no
+changed, staged, or untracked file there. No process may work in the
+checkout, no entry may have changed within the idle time, and no client may
+hold an unreleased registration.
+
+A remote-tracking branch can show that a remote holds the checkout's
+head. A person who runs `suds reclaim --apply` can also use a release with
+`--landed COMMIT` as evidence while the head still matches `COMMIT`.
+
+A scheduled run with standing approval requires a release with
+`--landed COMMIT`. At planning and before removal, Suds checks that the
+head matches the release and that a local remote-tracking reference
+contains it. Suds accounts for every entry in the checkout. The landed
+tree accounts for tracked files and their directories. The build-state
+rules above account for ignored build output. Any other file or directory
+keeps the checkout, as does a checkout beneath it, a mount point, or an
+entry Suds could not read. The plan or journal names the first path that
+keeps the checkout.
+
+Suds has Git remove the linked checkout without force. The branch and its
+commits stay in the repository. Suds never names a main checkout.
 
 With `--apply`, Suds records the plan in the journal and judges each
 candidate again immediately before its removal. The directory must be the
 entry that the plan measured, with no symbolic link in its path. Suds then
 observes the processes, measures the directory, and asks Git anew, and it
 applies every rule of the plan to what it finds. One refusal leaves the other candidates to proceed. The journal records the
-plan, the authority for the run, and each removal or refusal, and
-`suds journal` lists the run with its removals. A removal has no undo, because a build regenerates build state and the remote holds a
-removed checkout's work.
+plan, the authority for the run, and each removal or refusal. When Suds
+finds a local remote-tracking reference that contains the released head at
+removal, the journal records it. The `suds journal` command lists the run
+with its removals. A removal has no undo.
 
 ## Store Budgets
 
@@ -371,17 +389,15 @@ registration adds knowledge and no permission:
 
 - Suds removes nothing beneath a checkout that a client registered and has
   not released, and it reads the registry anew before each removal.
-- A released linked checkout enters each reclaim plan, before every other
-  checkout. Every other rule of [Reclamation](#reclamation) still decides
-  whether it leaves.
-- A release may report the checkout's head as landed, with
-  `--landed COMMIT`. A forge that squashes a branch and deletes it leaves
-  the head's own commits on no remote, and a client that asked the forge
-  knows that the change landed. A person's own `suds reclaim --apply` then
-  removes the checkout while its head is still that commit and its tree is
-  clean. A scheduled run reclaims the build state of a released checkout
-  and leaves the checkout itself, because an unpushed commit is no derived
-  state.
+- A release ends the registration for its client and attempt. In
+  `suds reclaim`, a linked checkout that its clients have released takes
+  priority over other checkouts. The rules of [Reclamation](#reclamation)
+  decide whether it leaves.
+- A client can report delivery with `suds release --checkout DIR --client
+  bosun --attempt wf-12 --landed COMMIT`. After a squash merge, a pull
+  request's head can serve as evidence if Git fetched it into a local
+  remote-tracking reference. A person can also approve removal based on a
+  matching release when no local reference contains the released head.
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading
@@ -402,10 +418,9 @@ the greater of half of the disk and 100 GiB unless the settings name
 another. Each reading says in its `enforced` field whether a filesystem
 limit enforces the ceiling, as [Arena](#arena) describes.
 
-The `maintain` command changes nothing unless the settings hold the
-owner's standing approval. With it, the command reclaims build state and
-trims the stores as `suds reclaim --apply` and `suds stores --apply` do,
-and the journal records the standing approval as each run's authority.
+With the owner's standing approval in the settings, `maintain` reclaims
+derived state, removes eligible landed linked checkouts, and trims the
+stores. The journal records the standing approval as the run's authority.
 
 Suds reads its settings from the file `settings.json`. On Linux the file
 lies in `~/.config/suds`, and on macOS it lies in

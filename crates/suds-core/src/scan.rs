@@ -190,6 +190,8 @@ pub struct SharedScan {
     walker: Walker,
 }
 
+type EntryVisitor<'a> = dyn FnMut(&Path, EntryKind) -> bool + 'a;
+
 /// One measurement of a shared scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedMeasure {
@@ -210,6 +212,12 @@ impl Default for SharedScan {
 }
 
 impl SharedScan {
+    pub(crate) fn for_removal() -> Self {
+        let mut scan = Self::default();
+        scan.walker.check_file_mounts = true;
+        scan
+    }
+
     /// Measures the entry at `start` and everything beneath it on its
     /// filesystem. The measurement asks `boundary` about each directory
     /// beneath `start` and sets aside each one that the boundary claims. It
@@ -218,6 +226,18 @@ impl SharedScan {
         &mut self,
         start: &Path,
         boundary: &mut dyn FnMut(&Path) -> bool,
+    ) -> Option<BoundedMeasure> {
+        self.measure_with(start, &mut |path, kind| {
+            kind == EntryKind::Directory && boundary(path)
+        })
+    }
+
+    /// Measures a tree and calls the visitor for each entry on its filesystem.
+    /// A visitor can set a directory aside before the scan enters it.
+    pub(crate) fn measure_with(
+        &mut self,
+        start: &Path,
+        visitor: &mut EntryVisitor<'_>,
     ) -> Option<BoundedMeasure> {
         match fs::symlink_metadata(start) {
             Ok(meta) => self.walker.device = meta.dev(),
@@ -230,7 +250,7 @@ impl SharedScan {
         let mut set_aside = Vec::new();
         let never = AtomicBool::new(false);
         self.walker
-            .walk_within(start, &mut tally, &never, Some(boundary), &mut set_aside)?;
+            .walk_within(start, &mut tally, &never, Some(visitor), &mut set_aside)?;
         Some(BoundedMeasure {
             measure: tally.into_measure(),
             set_aside,
@@ -256,6 +276,14 @@ impl SharedScan {
         self.walker.mount_count
     }
 
+    pub(crate) fn first_mount(&self) -> Option<&Path> {
+        self.walker.mounts.first().map(PathBuf::as_path)
+    }
+
+    pub(crate) fn first_foreign_directory(&self) -> Option<&Path> {
+        self.walker.first_foreign_directory.as_deref()
+    }
+
     /// The directories so far that belong to another user.
     pub fn foreign_directory_count(&self) -> u64 {
         self.walker.foreign_directory_count
@@ -270,16 +298,10 @@ struct Probed {
     mount: bool,
 }
 
-impl Probed {
-    /// Whether the entry is a directory of the scanned filesystem.
-    fn is_directory_here(&self) -> bool {
-        self.kind == EntryKind::Directory && !self.mount
-    }
-}
-
 struct Walker {
     /// The root's device, which bounds the traversal to one filesystem.
     device: u64,
+    check_file_mounts: bool,
     /// Each hard-linked regular file whose storage the scan has counted under
     /// the root.
     linked: HashSet<(u64, u64)>,
@@ -289,6 +311,7 @@ struct Walker {
     /// The directories that belong to another user than the one who runs
     /// the scan. That user cannot remove what such a directory holds.
     foreign_directory_count: u64,
+    first_foreign_directory: Option<PathBuf>,
     user: u32,
     mounts: Vec<PathBuf>,
     /// Whether the scan stopped at a cancellation request.
@@ -299,11 +322,13 @@ impl Walker {
     fn new(device: u64) -> Self {
         Walker {
             device,
+            check_file_mounts: false,
             linked: HashSet::new(),
             error_count: 0,
             errors: Vec::new(),
             mount_count: 0,
             foreign_directory_count: 0,
+            first_foreign_directory: None,
             user: rustix::process::geteuid().as_raw(),
             mounts: Vec::new(),
             cancelled: false,
@@ -329,7 +354,7 @@ impl Walker {
         start: &Path,
         tally: &mut Tally,
         cancel: &AtomicBool,
-        mut boundary: Option<&mut dyn FnMut(&Path) -> bool>,
+        mut boundary: Option<&mut EntryVisitor<'_>>,
         set_aside: &mut Vec<PathBuf>,
     ) -> Option<EntryRevision> {
         // A bounded measurement starts where its caller chose, so its start
@@ -366,8 +391,8 @@ impl Walker {
                         continue;
                     };
                     if let Some(boundary) = boundary.as_deref_mut()
-                        && probed.is_directory_here()
-                        && boundary(&path)
+                        && !probed.mount
+                        && boundary(&path, probed.kind)
                     {
                         set_aside.push(path);
                         continue;
@@ -396,7 +421,7 @@ impl Walker {
         };
         let kind = entry_kind(meta.file_type());
         let mut mount = !chosen && meta.dev() != self.device;
-        if !chosen && !mount && kind == EntryKind::Directory {
+        if !chosen && !mount && (kind == EntryKind::Directory || self.check_file_mounts) {
             // A failed check leaves the entry unmeasured and the root partial,
             // because the scan cannot rule out a mount boundary.
             match is_mount_root(path) {
@@ -428,6 +453,8 @@ impl Walker {
             || self.linked.insert((meta.dev(), meta.ino()));
         if *kind == EntryKind::Directory && meta.uid() != self.user {
             self.foreign_directory_count = self.foreign_directory_count.saturating_add(1);
+            self.first_foreign_directory
+                .get_or_insert_with(|| path.to_path_buf());
         }
         tally.count(*kind, meta, counts_storage);
         Some(EntryRevision::from_metadata(meta))
@@ -468,6 +495,16 @@ impl Walker {
             });
         }
     }
+}
+
+/// Checks the root of a removal, which a bounded measurement may enter even
+/// when it is a mount point.
+pub(crate) fn mount_at(path: &Path) -> io::Result<bool> {
+    let Some(parent) = path.parent() else {
+        return Ok(true);
+    };
+    let meta = fs::symlink_metadata(path)?;
+    Ok(meta.dev() != fs::symlink_metadata(parent)?.dev() || is_mount_root(path)?)
 }
 
 /// Reports whether a directory is a mount point, including a bind mount on

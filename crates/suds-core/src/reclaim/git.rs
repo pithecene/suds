@@ -4,8 +4,13 @@
 //! has Git remove a linked checkout. Each call passes its arguments as a
 //! list, and no call passes a shell string.
 
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::model::EntryKind;
 
 /// The Git program that Suds runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,12 +36,25 @@ impl Git {
         arguments: &[&str],
         path: Option<&Path>,
     ) -> Result<String, String> {
+        self.run_bytes(directory, arguments, path)
+            .map(|output| String::from_utf8_lossy(&output).into_owned())
+    }
+
+    fn run_bytes(
+        &self,
+        directory: &Path,
+        arguments: &[&str],
+        path: Option<&Path>,
+    ) -> Result<Vec<u8>, String> {
         let mut command = Command::new(&self.program);
         command
             .arg("--no-optional-locks")
             .arg("-C")
             .arg(directory)
-            .args(arguments);
+            .args(arguments)
+            // Object traversal in a partial clone must stay local.
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "");
         if let Some(path) = path {
             command.arg("--").arg(path);
         }
@@ -61,7 +79,7 @@ impl Git {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output.stdout)
     }
 
     /// Whether the checkout holds no changed, staged, or untracked file.
@@ -72,6 +90,86 @@ impl Git {
             None,
         )?;
         Ok(status.is_empty())
+    }
+
+    pub(crate) fn is_clean_for_removal(&self, checkout: &Path) -> Result<bool, String> {
+        let status = self.run(
+            checkout,
+            &[
+                "-c",
+                "core.fsmonitor=false",
+                "--no-replace-objects",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            None,
+        )?;
+        Ok(status.is_empty())
+    }
+
+    /// The entries that Git records in the landed tree and checks for changes.
+    pub(crate) fn tracked_at(
+        &self,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<HashMap<PathBuf, EntryKind>, String> {
+        let tree = self.run_bytes(
+            checkout,
+            &[
+                "--no-replace-objects",
+                "ls-tree",
+                "-rtz",
+                "--full-tree",
+                commit,
+            ],
+            None,
+        )?;
+        let malformed = || {
+            format!(
+                "Git printed an invalid tree entry for {}",
+                checkout.display()
+            )
+        };
+        let mut tracked = HashMap::new();
+        for record in tree
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let mut fields = record.splitn(2, |byte| *byte == b'\t');
+            let mode = fields
+                .next()
+                .and_then(|header| header.split(|byte| *byte == b' ').next());
+            let name = fields.next().ok_or_else(malformed)?;
+            let kind = match mode {
+                Some(b"100644" | b"100755") => EntryKind::File,
+                Some(b"120000") => EntryKind::Symlink,
+                Some(b"040000") => EntryKind::Directory,
+                // Git records a submodule commit without recording its files.
+                Some(b"160000") => continue,
+                _ => return Err(malformed()),
+            };
+            tracked.insert(PathBuf::from(OsStr::from_bytes(name)), kind);
+        }
+
+        // Git's clean status skips paths marked assume-unchanged or skip-worktree.
+        let indexed = self.run_bytes(checkout, &["ls-files", "-vz"], None)?;
+        for record in indexed
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let [tag, b' ', name @ ..] = record else {
+                return Err(format!(
+                    "Git printed an invalid index entry for {}",
+                    checkout.display()
+                ));
+            };
+            if *tag == b'S' || tag.is_ascii_lowercase() {
+                tracked.remove(Path::new(OsStr::from_bytes(name)));
+            }
+        }
+        Ok(tracked)
     }
 
     /// The full name of the commit at the checkout's head.
@@ -96,15 +194,59 @@ impl Git {
         })
     }
 
+    /// The name of a local remote-tracking reference that contains `commit`.
+    pub(crate) fn remote_tracking_ref(
+        &self,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<Option<String>, String> {
+        let output = self.run(
+            checkout,
+            &[
+                "--no-replace-objects",
+                "for-each-ref",
+                &format!("--contains={commit}"),
+                "--count=1",
+                "--format=%(refname)",
+                "refs/remotes/",
+            ],
+            None,
+        )?;
+        Ok(output.lines().next().map(str::to_owned))
+    }
+
     /// Whether Git ignores every file beneath `directory` of `checkout`.
     /// A tracked file there, or one that Git would track, is no derived
     /// state.
     pub fn ignores_all(&self, checkout: &Path, directory: &Path) -> Result<bool, String> {
-        let listed = self.run(
-            checkout,
-            &["ls-files", "--cached", "--others", "--exclude-standard"],
-            Some(directory),
-        )?;
+        self.ignores_contents(checkout, directory, &[])
+    }
+
+    /// A whole checkout also needs proof for empty directories, which Git
+    /// leaves out of a file listing.
+    pub(crate) fn ignores_all_entries(
+        &self,
+        checkout: &Path,
+        directory: &Path,
+    ) -> Result<bool, String> {
+        self.ignores_contents(checkout, directory, &["--directory"])
+    }
+
+    fn ignores_contents(
+        &self,
+        checkout: &Path,
+        directory: &Path,
+        options: &[&str],
+    ) -> Result<bool, String> {
+        let mut arguments = vec![
+            "--literal-pathspecs",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ];
+        arguments.extend_from_slice(options);
+        let listed = self.run(checkout, &arguments, Some(directory))?;
         Ok(listed.is_empty())
     }
 

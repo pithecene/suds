@@ -35,15 +35,22 @@ person watches.
    registers a checkout, releases it, reads the arena's pressure, and
    requests a reclamation.
 3. Authority for a removal follows the class of the state and never its
-   author. Suds removes derived state inside the arena under one standing
-   approval of the owner. Unique state, which includes an uncommitted
-   change, an unpushed commit, and every file outside the arena, needs a
-   person's approval of each plan.
+   author. The owner's standing approval covers derived state inside the
+   arena and released linked checkouts there with proof for every entry.
+   Unique state, which includes an uncommitted change, an
+   unpushed commit, and every file outside the arena, needs a person's
+   approval of each plan.
 4. A main checkout belongs to the owner. Suds never proposes its removal,
    and it treats the build output inside it as derived state.
 5. Suds removes nothing because of its age. A shared store leaves by its
-   budget, and a checkout leaves on evidence that no client uses it and
-   that a remote holds its work.
+   budget. A scheduled run can remove a clean, idle linked checkout when
+   no client still holds it and a client's release with `--landed COMMIT`
+   matches its head. At planning and before removal, Suds verifies that a
+   local remote-tracking reference contains that commit. Suds also checks
+   that Git tracks the files at that commit or that Git ignores them and
+   the build-state rules prove that a build regenerates them. Any other
+   entry keeps the checkout, as does a checkout beneath it, a mount point,
+   or an entry Suds could not read.
 6. The ceiling and each budget are settings. The default ceiling is the
    greater of half of the disk and 100 GB.
 
@@ -56,6 +63,10 @@ person watches.
   creates a bounded volume once and never observes or reclaims it.
 - **A person's approval of every removal.** Build output would then outgrow
   the disk between approvals, as the incident showed.
+- **Use a remote-tracking reference as the sole proof of delivery.**
+  Git can discard ignored files and nested worktrees even when it reports
+  a clean checkout. The reference accounts for commits, and Suds needs
+  evidence for the contents of the checkout too.
 - **Removal by age.** An old checkout may hold the only copy of a change,
   and a recent cache entry may be the largest waste.
 
@@ -67,6 +78,15 @@ person watches.
   because a quarantine frees no space.
 - Suds needs proof that a path holds derived state, so it classifies by
   each ecosystem's own layout and never by a name alone.
+- A person's `suds reclaim --apply` can accept a release with
+  `--landed COMMIT` as evidence while the linked checkout's head still
+  matches. The tree must have no changed, staged, or untracked file, and
+  no client may hold an unreleased registration. No process may work
+  there, and no entry may have changed within the idle time.
+- Git removes a linked checkout without force and keeps its branch. The
+  journal records the local remote-tracking reference when Suds finds one
+  that contains the released head at removal. The plan and journal name
+  the first path that keeps a checkout when Suds cannot account for it.
 - A hard ceiling needs a filesystem limit, which a privileged command
   creates once for each machine. Suds plans that command, and a person runs
   it. Until then Suds holds the ceiling by measurement and reports that no

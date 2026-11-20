@@ -135,7 +135,7 @@ fn write_maintenance(out: &mut impl Write, report: &MaintenanceReport) -> io::Re
     let trimmed = report.stores.as_ref().map_or(0, |run| run.freed_bytes);
     writeln!(
         out,
-        "Suds removed about {} of build state and trimmed about {} from the stores. The journal records each change.",
+        "Suds reclaimed about {} from development directories and trimmed about {} from the stores. The journal records each change.",
         format_bytes(reclaimed),
         format_bytes(trimmed)
     )

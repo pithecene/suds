@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Suds
+Comment=Bounded development storage for one workstation
+Exec=suds-window
+Icon=suds
+Terminal=false
+Categories=Development;System;
+StartupWMClass=suds

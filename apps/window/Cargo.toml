@@ -19,6 +19,9 @@ suds-view.workspace = true
 # desktop applications. The window shows the toolkit's attribution in About.
 slint.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 slint-build.workspace = true
 

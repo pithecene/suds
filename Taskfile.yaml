@@ -42,6 +42,12 @@ tasks:
     desc: Run the native window on this workstation's development storage
     cmd: cargo run --locked --release -p suds-window
 
+  window:install:
+    desc: Install the native window, its desktop entry, and its icon for this user
+    cmds:
+      - cargo build --locked --release -p suds-window
+      - sh apps/window/install.sh target/release/suds-window
+
   window:check:
     desc: Build, test, and lint the native window and its view model
     cmds:

@@ -403,10 +403,10 @@ the greater of half of the disk and 100 GiB unless the settings name
 another. Each reading says in its `enforced` field whether a filesystem
 limit enforces the ceiling, as [Arena](#arena) describes.
 
-The `maintain` command changes nothing unless the settings hold the
-owner's standing approval. With it, the command reclaims build state and
-trims the stores as `suds reclaim --apply` and `suds stores --apply` do,
-and the journal records the standing approval as each run's authority.
+The `maintain` command reclaims build state, removes eligible released
+linked checkouts, and trims the stores only when the settings hold the
+owner's standing approval. The journal records the standing approval as
+each run's authority.
 
 Suds reads its settings from the file `settings.json`. On Linux the file
 lies in `~/.config/suds`, and on macOS it lies in

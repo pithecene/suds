@@ -71,13 +71,13 @@ person watches.
   head of a linked checkout for Suds to verify. The head must still match,
   the tree must have no changed, staged, or untracked file, and no client
   may hold an unreleased registration. No process may work there, and no
-  entry may have changed within the idle time. Suds accepts a
-  remote-tracking branch that holds the commit or a reference that
-  `git ls-remote` finds at that commit. If the remote lookup fails or finds
-  no such reference, the checkout stays and the plan says why. A person's
-  own `suds reclaim --apply` can still accept the release as evidence.
+  entry may have changed within the idle time. A local remote-tracking
+  reference must contain the commit at planning and again at removal. If
+  Suds cannot verify the commit from the local references, the checkout
+  stays and the plan or journal names the reason. A person's own
+  `suds reclaim --apply` can still accept a matching release as evidence.
   Git removes a verified linked checkout without force and keeps its
-  branch. The journal records the reference that held the commit.
+  branch. The journal records the reference used at removal.
 - A hard ceiling needs a filesystem limit, which a privileged command
   creates once for each machine. Suds plans that command, and a person runs
   it. Until then Suds holds the ceiling by measurement and reports that no

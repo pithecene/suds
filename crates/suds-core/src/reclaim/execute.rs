@@ -17,7 +17,7 @@ use crate::inspection::EntryRevision;
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
-use crate::reclaim::git::{Git, RemoteRefs};
+use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
 use crate::registry::Reading;
@@ -73,7 +73,6 @@ pub struct Conditions<'a> {
     /// checkout.
     pub registry: &'a mut dyn FnMut() -> Reading,
     pub git: &'a Git,
-    pub remotes: &'a RemoteRefs,
     pub now: i64,
 }
 
@@ -90,7 +89,6 @@ pub fn apply(
         observe,
         registry,
         git,
-        remotes,
         now,
     } = conditions;
     journal.append(Event::ReclaimPlanned { plan: plan.clone() })?;
@@ -141,8 +139,6 @@ pub fn apply(
             idle_since: idle_since(now, plan.idle_seconds),
             tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
             admit_landed: authority == Authority::Person,
-            remotes,
-            query_remote: false,
         };
         let outcome = match check(journal.directory(), candidate, &judge) {
             Err(reason) => Err(reason),
@@ -273,7 +269,6 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<Vec
             let (measure, survey, repositories) = development::survey_tree(path);
             judge.checkout(
                 path,
-                repository,
                 measure.newest_modified.as_deref(),
                 &survey,
                 &repositories,

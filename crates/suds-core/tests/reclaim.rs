@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use suds_core::development::{Environment, inspect};
 use suds_core::organize::journal::{Event, Journal, JournalState, RunKind, RunStatus, read};
 use suds_core::reclaim::execute::{Authority, Conditions, ReclaimReport, apply};
-use suds_core::reclaim::git::{Git, RemoteRefs};
+use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{
     Candidate, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
@@ -30,6 +30,8 @@ fn git(directory: &Path, arguments: &[&str]) {
             "user.email=suds@example.invalid",
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
             "-c",
             "init.defaultBranch=main",
             // Git's own maintenance removes files in the background after
@@ -134,7 +136,6 @@ impl Fixture {
         let observed = Observed {
             liveness,
             registry: &self.standings(),
-            remotes: &RemoteRefs::default(),
         };
         plan_reclaim(&scan, &observed, &Git::default(), policy, at)
     }
@@ -170,7 +171,6 @@ impl Fixture {
     ) -> ReclaimReport {
         let mut journal = open_journal(&self.journal);
         let conditions = Conditions {
-            remotes: &RemoteRefs::default(),
             authority: Authority::Person,
             observe,
             registry: &mut || self.standings(),
@@ -460,7 +460,6 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
     let plan = plan_reclaim(
         &scan,
         &Observed {
-            remotes: &RemoteRefs::default(),
             liveness: &hidden,
             registry: &Ok(Standings::new()),
         },
@@ -545,7 +544,6 @@ fn names_each_directory_once_when_roots_overlap() {
     let plan = plan_reclaim(
         &scan,
         &Observed {
-            remotes: &RemoteRefs::default(),
             liveness: &nobody(),
             registry: &Ok(Standings::new()),
         },
@@ -1049,6 +1047,79 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
 }
 
 #[test]
+fn keeps_a_landed_checkout_when_its_tracking_reference_disappears_after_planning() {
+    let fixture = Fixture::new();
+    let git_adapter = Git::default();
+    let head = git_adapter.head(&fixture.linked).unwrap();
+    registry::append_landed(
+        &fixture.registry(),
+        &fixture.linked,
+        "bosun",
+        Some("wf-1"),
+        &head,
+        0,
+    )
+    .unwrap();
+    let at = now() + 2 * IDLE_SECONDS;
+    let plan = plan_reclaim(
+        &inspect(
+            std::slice::from_ref(&fixture.workspace),
+            &Environment::default(),
+        ),
+        &Observed {
+            liveness: &nobody(),
+            registry: &fixture.standings(),
+        },
+        &git_adapter,
+        Policy {
+            idle_seconds: IDLE,
+            checkouts: false,
+            tolerate_unreadable_processes: false,
+            admit_landed: false,
+        },
+        at,
+    );
+    let candidate = find(&plan, &fixture.linked);
+    assert_eq!(candidate.decision, Decision::Remove);
+    assert_eq!(
+        candidate.evidence.last().unwrap(),
+        &format!("the remote-tracking reference refs/remotes/origin/feature holds {head}")
+    );
+
+    git(
+        &fixture.repo,
+        &["update-ref", "-d", "refs/remotes/origin/feature"],
+    );
+    let mut journal = open_journal(&fixture.journal);
+    let report = apply(
+        &mut journal,
+        &plan,
+        Conditions {
+            authority: Authority::StandingApproval,
+            observe: &mut nobody,
+            registry: &mut || fixture.standings(),
+            git: &git_adapter,
+            now: at,
+        },
+    )
+    .unwrap();
+    let removal = report
+        .removals
+        .iter()
+        .find(|removal| removal.path.as_path() == fixture.linked)
+        .unwrap();
+    assert!(!removal.removed);
+    assert_eq!(
+        removal.refusal,
+        Some(format!(
+            "no remote-tracking reference holds the released head {head}"
+        ))
+    );
+    assert!(fixture.linked.exists());
+    assert!(!fixture.linked.join("target").exists());
+}
+
+#[test]
 fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
     let fixture = Fixture::new();
     // The forge squashed the branch and deleted it, so no remote holds the
@@ -1090,7 +1161,6 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         &mut journal,
         &plan,
         Conditions {
-            remotes: &RemoteRefs::default(),
             authority: Authority::StandingApproval,
             observe: &mut nobody,
             registry: &mut || fixture.standings(),

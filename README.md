@@ -282,16 +282,12 @@ that a remote holds the checkout's head. A checkout released with
 `--landed COMMIT` is a candidate in every run that may remove build state,
 including a scheduled run under the standing approval.
 
-At removal, the checkout's head must still be `COMMIT` and all the same
-protections apply. If a remote-tracking branch does not already hold the
-commit, Suds asks the repository's default remote with `git ls-remote`
-for a reference that points to it, such as a merged pull request's head
-reference. The release names the commit. Suds reads the
-remote once per repository in a run and records the reference
-that held the commit in the journal as evidence for the removal. If Suds
-cannot reach the remote or finds no reference that holds the commit, the
-checkout stays and the plan names the reason. A person's own
-`suds reclaim --apply` can still accept the client's report.
+Under the standing approval, the checkout's head must match `COMMIT` and
+a local remote-tracking reference must contain it. Suds checks both at
+planning and again before removal, then records the reference it used in
+the journal. If Suds cannot verify the commit from the local references,
+the checkout stays and the plan or journal names the reason. A person's
+own `suds reclaim --apply` can still accept a matching release as evidence.
 
 Suds has Git remove the linked checkout without force. The branch and its
 commits stay in the repository. Suds never names a main checkout.
@@ -382,11 +378,11 @@ registration adds knowledge and no permission:
   other checkouts. The rules of [Reclamation](#reclamation) decide whether
   it leaves.
 - A client can report delivery with `suds release --checkout DIR --client
-  bosun --attempt wf-12 --landed COMMIT`. A forge can keep the original
-  head in a pull request reference after it squashes and deletes the
-  branch. A scheduled run under the standing approval can remove the
-  linked checkout when Suds verifies the head and the other conditions of
-  [Reclamation](#reclamation).
+  bosun --attempt wf-12 --landed COMMIT`. After a squash merge, a pull
+  request's head can serve as evidence if it has been fetched into a local
+  remote-tracking reference. A scheduled run under the standing approval
+  can remove the linked checkout when Suds verifies the head and the other
+  conditions of [Reclamation](#reclamation).
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading

@@ -13,7 +13,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Scheduled runs can remove verified landed checkouts**.
 
-  Under the standing approval, a scheduled run can remove a clean, idle linked checkout that a client released with `--landed COMMIT`. Suds verifies that its head matches the release and that a remote or remote-tracking reference holds the commit. The journal records that reference. The plan says why the checkout stays if Suds cannot reach the remote or finds no matching reference.
+  Under the standing approval, a scheduled run can remove a clean, idle linked checkout that a client released with `--landed COMMIT`. Suds verifies at planning and removal that the head matches the release and that a local remote-tracking reference contains the commit. The journal records the reference used at removal. The plan keeps the checkout if it cannot verify the head.
 
 ## [0.1.1] - 2026-11-20
 

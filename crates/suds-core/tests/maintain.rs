@@ -256,13 +256,18 @@ fn reclaims_under_the_standing_approval_and_records_that_authority() {
 }
 
 #[test]
-fn removes_a_released_landed_checkout_held_by_a_pull_reference() {
+fn removes_a_released_landed_checkout_held_by_a_fetched_pull_reference() {
     let fixture = Fixture::new();
     fixture.remote();
     let checkout = fixture.linked("feature");
     git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
     let head = fixture.release_landed(&checkout);
     assert_eq!(Git::default().unpushed(&checkout).unwrap(), 1);
+    let tracking = "refs/remotes/origin/pull/42/head";
+    git(
+        &checkout,
+        &["fetch", "origin", &format!("{PULL_HEAD}:{tracking}")],
+    );
 
     let plan = fixture.reclaim_plan();
     let candidate = linked_candidate(&plan, &checkout).unwrap();
@@ -279,27 +284,29 @@ fn removes_a_released_landed_checkout_held_by_a_pull_reference() {
         &["show-ref", "--verify", "refs/heads/feature"],
     );
 
-    let evidence = format!("git ls-remote found {PULL_HEAD} at {head}");
+    let evidence = format!("the remote-tracking reference {tracking} holds {head}");
     assert!(read(&fixture.directories.journal()).unwrap().iter().any(|record| {
         matches!(&record.event, Event::Removed { evidence: facts, .. } if facts.contains(&evidence))
     }));
 }
 
 #[test]
-fn keeps_a_released_landed_checkout_when_the_remote_holds_no_reference() {
+fn keeps_a_released_landed_checkout_when_the_pull_reference_has_not_been_fetched() {
     let fixture = Fixture::new();
     fixture.remote();
     let checkout = fixture.linked("feature");
+    git(&checkout, &["push", "origin", &format!("HEAD:{PULL_HEAD}")]);
     let head = fixture.release_landed(&checkout);
 
     let plan = fixture.reclaim_plan();
     let candidate = linked_candidate(&plan, &checkout).unwrap();
-    assert_eq!(candidate.kept, Some(Kept::UnpushedCommits));
+    assert_eq!(candidate.kept, Some(Kept::Unverified));
     assert_eq!(
         candidate.evidence.last().unwrap(),
-        &format!("the remote holds no reference at {head}")
+        &format!("no remote-tracking reference holds the released head {head}")
     );
     assert!(checkout.exists());
+    assert!(!checkout.join("target").exists());
 }
 
 #[test]
@@ -392,7 +399,7 @@ fn keeps_all_landed_checkouts_when_the_remote_is_unreachable_and_reclaims_build_
                 .evidence
                 .last()
                 .unwrap()
-                .contains("git ls-remote failed")
+                .starts_with("no remote-tracking reference holds the released head")
         );
         assert!(checkout.exists());
         assert!(!checkout.join("target").exists());
@@ -425,7 +432,7 @@ fn removes_a_released_landed_checkout_held_by_a_remote_tracking_branch() {
     let candidate = linked_candidate(&plan, &checkout).unwrap();
     assert_eq!(
         candidate.evidence.last().unwrap(),
-        &format!("the remote-tracking branch refs/remotes/origin/feature holds {head}")
+        &format!("the remote-tracking reference refs/remotes/origin/feature holds {head}")
     );
     assert!(!checkout.exists());
 }

@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use suds_core::development::{self, Environment};
 use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
-use suds_core::reclaim::git::{Git, RemoteRefs};
+use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
 use suds_core::reclaim::plan::{Candidate, Decision, Observed, Policy, ReclaimPlan, plan_reclaim};
 use suds_core::registry::{self, Reading, Standings};
@@ -32,7 +32,6 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     // inspection measures the checkouts alone.
     let scan = development::inspect(&workspaces, &Environment::default());
     let git = Git::default();
-    let remotes = RemoteRefs::default();
     let policy = Policy {
         idle_seconds: args.idle_minutes.saturating_mul(60),
         checkouts: args.checkouts,
@@ -42,7 +41,6 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
     let observed = Observed {
         liveness: &Liveness::observe(),
         registry: &standings(),
-        remotes: &remotes,
     };
     let plan = plan_reclaim(&scan, &observed, &git, policy, now_seconds());
 
@@ -57,7 +55,6 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
         observe: &mut Liveness::observe,
         registry: &mut standings,
         git: &git,
-        remotes: &remotes,
         now: now_seconds(),
     };
     let report = execute::apply(&mut journal, &plan, conditions).map_err(|err| err.to_string())?;

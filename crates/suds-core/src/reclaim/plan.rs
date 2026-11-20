@@ -16,7 +16,7 @@ use crate::inspection::EntryRevision;
 use crate::model::Measure;
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
-use crate::reclaim::git::{Git, RemoteRefs};
+use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::registry::{self, Reading};
 use crate::timestamp;
@@ -155,7 +155,6 @@ pub enum Kept {
 pub struct Observed<'a> {
     pub liveness: &'a Result<Liveness, String>,
     pub registry: &'a Reading,
-    pub remotes: &'a RemoteRefs,
 }
 
 impl Kept {
@@ -195,8 +194,6 @@ pub fn plan_reclaim(
         idle_since: idle_since(now, policy.idle_seconds),
         tolerate_unreadable_processes: policy.tolerate_unreadable_processes,
         admit_landed: policy.admit_landed,
-        remotes: observed.remotes,
-        query_remote: true,
     };
     let released = |checkout: &Checkout| {
         observed.registry.as_ref().is_ok_and(|standings| {
@@ -333,13 +330,7 @@ fn judge_linked(
         .iter()
         .flat_map(|build| build.repositories.iter().cloned())
         .collect();
-    judge.checkout(
-        &checkout.path,
-        checkout.repository.as_deref(),
-        newest,
-        &Survey::default(),
-        &repositories,
-    )
+    judge.checkout(&checkout.path, newest, &Survey::default(), &repositories)
 }
 
 /// The facts that every judgment shares. The planner and the executor judge
@@ -351,8 +342,6 @@ pub(crate) struct Judge<'a> {
     pub(crate) idle_since: String,
     pub(crate) tolerate_unreadable_processes: bool,
     pub(crate) admit_landed: bool,
-    pub(crate) remotes: &'a RemoteRefs,
-    pub(crate) query_remote: bool,
 }
 
 impl Judge<'_> {
@@ -421,7 +410,6 @@ impl Judge<'_> {
     pub(crate) fn checkout(
         &self,
         path: &Path,
-        repository: Option<&Path>,
         newest: Option<&str>,
         survey: &Survey,
         repositories: &[PathBuf],
@@ -432,7 +420,7 @@ impl Judge<'_> {
             .or_else(|| self.in_use(path, &mut evidence))
             .or_else(|| self.recent(newest, &mut evidence))
             .or_else(|| self.fetched(repositories, &mut evidence))
-            .or_else(|| self.unsaved_work(path, repository, &mut evidence));
+            .or_else(|| self.unsaved_work(path, &mut evidence));
         (kept, evidence)
     }
 
@@ -444,12 +432,7 @@ impl Judge<'_> {
             .flatten()
     }
 
-    fn unsaved_work(
-        &self,
-        checkout: &Path,
-        repository: Option<&Path>,
-        evidence: &mut Vec<String>,
-    ) -> Option<Kept> {
+    fn unsaved_work(&self, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
         match self.git.is_clean(checkout) {
             Ok(true) => {
                 evidence.push("Git reports no changed, staged, or untracked file".to_owned())
@@ -466,7 +449,7 @@ impl Judge<'_> {
         if let Some(commit) = self.landed(checkout) {
             match self.git.head(checkout) {
                 Ok(head) if head == commit => {
-                    return self.verify_landed(checkout, repository, commit, evidence);
+                    return self.verify_landed(checkout, commit, evidence);
                 }
                 Ok(head) if !self.admit_landed => {
                     evidence.push(format!(
@@ -502,47 +485,30 @@ impl Judge<'_> {
     fn verify_landed(
         &self,
         checkout: &Path,
-        repository: Option<&Path>,
         commit: &str,
         evidence: &mut Vec<String>,
     ) -> Option<Kept> {
         match self.git.remote_tracking_ref(checkout, commit) {
             Ok(Some(reference)) => {
                 evidence.push(format!(
-                    "the remote-tracking branch {reference} holds {commit}"
+                    "the remote-tracking reference {reference} holds {commit}"
                 ));
                 return None;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                evidence.push(format!(
+                    "no remote-tracking reference holds the released head {commit}"
+                ));
+            }
             Err(reason) => evidence.push(reason),
         }
-        let reference = repository
-            .ok_or_else(|| "the plan names no repository for the checkout".to_owned())
-            .and_then(|repo| {
-                self.remotes
-                    .reference(self.git, repo, commit, self.query_remote)
-            });
-        let kept = match reference {
-            Ok(Some(reference)) => {
-                evidence.push(format!("git ls-remote found {reference} at {commit}"));
-                return None;
-            }
-            Ok(None) => {
-                evidence.push(format!("the remote holds no reference at {commit}"));
-                Kept::UnpushedCommits
-            }
-            Err(reason) => {
-                evidence.push(reason);
-                Kept::Unverified
-            }
-        };
         if self.admit_landed {
             evidence.push(format!(
                 "its client reported the head {commit} as landed on a remote"
             ));
             return None;
         }
-        Some(kept)
+        Some(Kept::Unverified)
     }
 
     /// Keeps a candidate when a process works in its checkout, or when Suds

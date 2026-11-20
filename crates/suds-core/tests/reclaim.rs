@@ -687,3 +687,55 @@ fn removes_build_state_that_holds_a_repository_that_a_build_fetched() {
     assert!(!fixture.linked.join("target").exists());
     assert_eq!(report.status, RunStatus::Partial);
 }
+
+#[test]
+fn removes_a_toolchain_that_a_checkout_fetched_as_a_repository() {
+    let fixture = Fixture::new();
+    // The linked checkout clones a vcpkg checkout into its own tree, which
+    // Git ignores there.
+    let remote = fixture.workspace.parent().unwrap().join("remote.git");
+    git(
+        &fixture.linked,
+        &["clone", "--quiet", remote.to_str().unwrap(), ".vcpkg"],
+    );
+    let toolchain = fixture.linked.join(".vcpkg");
+    write(&toolchain.join(".vcpkg-root"), "");
+    write(&toolchain.join(".git/info/exclude"), ".vcpkg-root\n");
+    // Every checkout of the repository ignores the toolchain's directory.
+    write(&fixture.repo.join(".git/info/exclude"), ".vcpkg/\n");
+
+    let plan = fixture.plan(&nobody(), false);
+    let candidate = find(&plan, &toolchain);
+    assert!(matches!(
+        candidate.subject,
+        Subject::FetchedToolchain { .. }
+    ));
+    assert_eq!(candidate.checkout.as_path(), fixture.linked);
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
+    );
+
+    // A local commit in the toolchain keeps it.
+    write(&toolchain.join("port.txt"), "patched");
+    git(&toolchain, &["add", "port.txt"]);
+    git(&toolchain, &["commit", "-m", "local port"]);
+    let report = fixture.apply(&plan);
+    assert!(toolchain.join("port.txt").exists());
+    let kept = report
+        .removals
+        .iter()
+        .find(|removal| removal.path.as_path() == toolchain)
+        .unwrap();
+    assert!(!kept.removed);
+
+    // Without the commit, the run removes it.
+    git(&toolchain, &["reset", "--quiet", "--hard", "origin/main"]);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &toolchain).decision, Decision::Remove);
+    fixture.apply(&plan);
+    assert!(!toolchain.exists());
+    assert!(fixture.linked.join("src/lib.rs").exists());
+}

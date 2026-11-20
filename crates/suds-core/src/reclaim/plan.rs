@@ -88,8 +88,16 @@ pub struct Candidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Subject {
-    BuildState { ecosystem: Ecosystem },
+    BuildState {
+        ecosystem: Ecosystem,
+    },
     LinkedCheckout,
+    /// A toolchain that a checkout fetched into its own tree as a
+    /// repository, such as a vcpkg checkout. The checkout's build fetches
+    /// it again.
+    FetchedToolchain {
+        ecosystem: Ecosystem,
+    },
 }
 
 impl Subject {
@@ -97,6 +105,7 @@ impl Subject {
         match self {
             Subject::BuildState { ecosystem } => ecosystem.label(),
             Subject::LinkedCheckout => "checkout",
+            Subject::FetchedToolchain { .. } => "toolchain",
         }
     }
 }
@@ -228,6 +237,37 @@ pub fn plan_reclaim(
             ));
         }
     }
+    for store in &scan.stores {
+        let owner = store.owner.as_ref().and_then(|owner| {
+            scan.checkouts
+                .iter()
+                .find(|checkout| checkout.path == *owner)
+        });
+        let Some(owner) = owner else {
+            continue;
+        };
+        if !named.insert(store.path.clone()) {
+            continue;
+        }
+        let subject = Subject::FetchedToolchain {
+            ecosystem: store.ecosystem,
+        };
+        let (kept, evidence) = judge.fetched_toolchain(
+            &owner.path,
+            &store.path,
+            store.ecosystem,
+            store.measure.newest_modified.as_deref(),
+            &Survey::default(),
+        );
+        candidates.extend(candidate(
+            &store.path,
+            subject,
+            owner,
+            &store.measure,
+            kept,
+            evidence,
+        ));
+    }
     ReclaimPlan {
         schema: RECLAIM_SCHEMA.to_owned(),
         id: new_id("reclaim"),
@@ -303,6 +343,29 @@ impl Judge<'_> {
             .or_else(|| self.in_use(checkout, &mut evidence))
             .or_else(|| self.recent(measure.newest_modified.as_deref(), &mut evidence))
             .or_else(|| self.tracked(checkout, path, &mut evidence));
+        (kept, evidence)
+    }
+
+    /// Judges a toolchain that a checkout fetched into its own tree. The
+    /// checkout's build fetches it again, so it leaves when no process works
+    /// in the checkout, nothing in it changed within the idle time, and its
+    /// repository holds only what a remote holds.
+    pub(crate) fn fetched_toolchain(
+        &self,
+        checkout: &Path,
+        path: &Path,
+        ecosystem: Ecosystem,
+        newest: Option<&str>,
+        survey: &Survey,
+    ) -> (Option<Kept>, Vec<String>) {
+        let mut evidence = vec![format!(
+            "the layout of {} proves that the checkout's build fetches the directory",
+            ecosystem.label()
+        )];
+        let kept = surveyed(survey, &mut evidence)
+            .or_else(|| self.in_use(checkout, &mut evidence))
+            .or_else(|| self.recent(newest, &mut evidence))
+            .or_else(|| self.fetched(&[path.to_path_buf()], &mut evidence));
         (kept, evidence)
     }
 

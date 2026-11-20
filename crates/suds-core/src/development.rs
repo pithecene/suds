@@ -155,6 +155,9 @@ pub struct Store {
     pub path: PathBuf,
     pub status: StoreStatus,
     pub measure: Measure,
+    /// For a toolchain that a checkout fetched into its own tree, that
+    /// checkout. A store at a program's own location has no owner.
+    pub owner: Option<PathBuf>,
 }
 
 /// One directory that the caller named as a place to look for checkouts.
@@ -421,6 +424,15 @@ pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
     }
 }
 
+/// The ecosystem whose layout proves that `dir` is a toolchain that a
+/// checkout fetched into its own tree.
+pub(crate) fn toolchain_at(dir: &Path) -> Option<Ecosystem> {
+    match claim(dir, true) {
+        Some(Claim::Toolchain(ecosystem)) => Some(ecosystem),
+        _ => None,
+    }
+}
+
 /// The main checkout that the `.git` file of `dir` names, when the file
 /// names an entry of that checkout's `worktrees` directory.
 fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
@@ -455,12 +467,12 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             unclassified: Measure::default(),
         };
         if let Some(claimed) = claim(path, false) {
-            found.take(&mut scan, path.clone(), claimed);
+            found.take(&mut scan, path.clone(), claimed, None);
         } else if let Some(bounded) = scan.measure(path, &mut |dir| claim(dir, false).is_some()) {
             workspace.unclassified = bounded.measure;
             for dir in bounded.set_aside {
                 if let Some(claimed) = claim(&dir, false) {
-                    found.take(&mut scan, dir, claimed);
+                    found.take(&mut scan, dir, claimed, None);
                 }
             }
         } else {
@@ -486,7 +498,9 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
                             repositories,
                         });
                     }
-                    Some(claimed) => found.take(&mut scan, dir, claimed),
+                    Some(claimed) => {
+                        found.take(&mut scan, dir, claimed, Some(&checkout.path));
+                    }
                     None => {}
                 }
             }
@@ -526,6 +540,7 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             path,
             status,
             measure,
+            owner: None,
         });
     }
     DevelopmentScan {
@@ -640,7 +655,9 @@ struct Found {
 }
 
 impl Found {
-    fn take(&mut self, scan: &mut SharedScan, path: PathBuf, claimed: Claim) {
+    /// Records what `claimed` found at `path`. The `owner` is the checkout
+    /// whose tree holds the path, or none beneath a workspace alone.
+    fn take(&mut self, scan: &mut SharedScan, path: PathBuf, claimed: Claim, owner: Option<&Path>) {
         match claimed {
             Claim::Checkout(kind, repository) => {
                 if self.seen.insert(path.clone()) {
@@ -662,6 +679,7 @@ impl Found {
                     path,
                     status: StoreStatus::Present,
                     measure,
+                    owner: owner.map(Path::to_path_buf),
                 });
             }
             // Build state outside a checkout has no owner, so the profile
@@ -749,6 +767,9 @@ pub struct StoreResult {
     pub ecosystem: Ecosystem,
     pub path: String,
     pub status: StoreStatus,
+    /// For a toolchain that a checkout fetched into its own tree, that
+    /// checkout.
+    pub owner: Option<String>,
     #[serde(flatten)]
     pub measure: Measure,
 }
@@ -831,6 +852,7 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
                 ecosystem: store.ecosystem,
                 path: display(&store.path),
                 status: store.status,
+                owner: store.owner.as_deref().map(display),
                 measure: store.measure.clone(),
             })
             .collect(),

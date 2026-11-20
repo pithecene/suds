@@ -215,6 +215,23 @@ fn check(journal: &Path, candidate: &Candidate, judge: &Judge<'_>) -> Result<(),
             let (measure, survey) = development::survey_tree(path);
             judge.checkout(path, measure.newest_modified.as_deref(), &survey)
         }
+        Subject::FetchedToolchain { ecosystem } => {
+            if development::toolchain_at(path) != Some(ecosystem) {
+                return Err(format!(
+                    "the layout of {} no longer proves that {} is a fetched toolchain",
+                    ecosystem.label(),
+                    path.display()
+                ));
+            }
+            let (measure, survey) = development::survey_tree(path);
+            judge.fetched_toolchain(
+                candidate.checkout.as_path(),
+                path,
+                ecosystem,
+                measure.newest_modified.as_deref(),
+                &survey,
+            )
+        }
     };
     match kept {
         // The judgment's last fact is the one that keeps the directory.
@@ -228,7 +245,7 @@ fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
     match candidate.subject {
         // The standard library removes a tree without following a symbolic
         // link, so a link inside build state loses only itself.
-        Subject::BuildState { .. } => fs::remove_dir_all(path)
+        Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => fs::remove_dir_all(path)
             .map_err(|err| format!("could not remove {}: {err}", path.display())),
         Subject::LinkedCheckout => {
             let repository = candidate

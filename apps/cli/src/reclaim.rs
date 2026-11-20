@@ -36,6 +36,7 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
         idle_seconds: args.idle_minutes.saturating_mul(60),
         checkouts: args.checkouts,
         tolerate_unreadable_processes: args.tolerate_unreadable_processes,
+        admit_landed: true,
     };
     let observed = Observed {
         liveness: &Liveness::observe(),

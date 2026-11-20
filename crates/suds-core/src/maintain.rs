@@ -109,6 +109,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         idle_seconds,
         checkouts: false,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
+        admit_landed: false,
     };
     let observed = Observed {
         liveness: &Liveness::observe(),

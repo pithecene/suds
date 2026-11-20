@@ -129,6 +129,7 @@ impl Fixture {
             idle_seconds: IDLE,
             checkouts,
             tolerate_unreadable_processes: false,
+            admit_landed: true,
         };
         let observed = Observed {
             liveness,
@@ -452,6 +453,7 @@ fn keeps_everything_while_the_system_hides_a_process_of_this_user() {
         idle_seconds: IDLE,
         checkouts: false,
         tolerate_unreadable_processes: true,
+        admit_landed: false,
     };
     let plan = plan_reclaim(
         &scan,
@@ -535,6 +537,7 @@ fn names_each_directory_once_when_roots_overlap() {
         idle_seconds: IDLE,
         checkouts: true,
         tolerate_unreadable_processes: false,
+        admit_landed: false,
     };
     let plan = plan_reclaim(
         &scan,
@@ -1075,6 +1078,30 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         Decision::Remove,
         "{:?}",
         candidate.evidence
+    );
+
+    // The standing approval covers derived state alone, so a run under it
+    // refuses the checkout and leaves the commits for a person's run.
+    let mut journal = open_journal(&fixture.journal);
+    let unattended = apply(
+        &mut journal,
+        &plan,
+        Conditions {
+            authority: Authority::StandingApproval,
+            observe: &mut nobody,
+            registry: &mut || fixture.standings(),
+            git: &Git::default(),
+            now: now() + 2 * IDLE_SECONDS,
+        },
+    )
+    .unwrap();
+    drop(journal);
+    assert!(fixture.linked.exists());
+    assert!(
+        unattended
+            .removals
+            .iter()
+            .any(|removal| { removal.path.as_path() == fixture.linked && !removal.removed })
     );
 
     // A commit after the report is work that no remote holds.

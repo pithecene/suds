@@ -36,6 +36,11 @@ pub struct Policy {
     /// Whether a removal may proceed while the system hides the working
     /// directory of one of this user's processes.
     pub tolerate_unreadable_processes: bool,
+    /// Whether a client's report of a landed head stands in for a remote
+    /// that holds the head's commits. A person's own run admits the report.
+    /// A run under the standing approval never does, because an unpushed
+    /// commit is no derived state.
+    pub admit_landed: bool,
 }
 
 /// A plan to remove derived development state.
@@ -187,6 +192,7 @@ pub fn plan_reclaim(
         git,
         idle_since: idle_since(now, policy.idle_seconds),
         tolerate_unreadable_processes: policy.tolerate_unreadable_processes,
+        admit_landed: policy.admit_landed,
     };
     let released = |checkout: &Checkout| {
         observed.registry.as_ref().is_ok_and(|standings| {
@@ -334,6 +340,7 @@ pub(crate) struct Judge<'a> {
     pub(crate) git: &'a Git,
     pub(crate) idle_since: String,
     pub(crate) tolerate_unreadable_processes: bool,
+    pub(crate) admit_landed: bool,
 }
 
 impl Judge<'_> {
@@ -416,8 +423,12 @@ impl Judge<'_> {
         (kept, evidence)
     }
 
-    /// The head that a client's release of `checkout` reported as landed.
+    /// The head that a client's release of `checkout` reported as landed,
+    /// where this run admits such a report.
     fn landed(&self, checkout: &Path) -> Option<&str> {
+        if !self.admit_landed {
+            return None;
+        }
         let standing = self.registry.as_ref().ok()?.get(checkout)?;
         (standing.event == registry::Event::Released)
             .then_some(standing.landed.as_deref())

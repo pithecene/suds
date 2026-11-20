@@ -39,6 +39,22 @@ pub fn pressure_facts(card: &PressureCard) -> String {
     facts.join(" · ")
 }
 
+/// What a reading left unread, or nothing for a whole reading.
+pub fn notice(error_count: u64, registry_error: Option<&str>) -> String {
+    let mut lines = Vec::new();
+    if error_count > 0 {
+        lines.push(format!(
+            "Suds could not read {error_count} entries, so each figure is a lower bound."
+        ));
+    }
+    if let Some(reason) = registry_error {
+        lines.push(format!(
+            "Suds could not read the registry, so no checkout shows its hold: {reason}"
+        ));
+    }
+    lines.join("\n")
+}
+
 pub fn class(position: usize, class: &Class) -> ClassItem {
     ClassItem {
         label: class.label.into(),
@@ -173,7 +189,7 @@ pub fn store(store: &Store) -> StoreItem {
 mod tests {
     use suds_view::{BuildState, Checkout, Hold, Store, StoreStanding};
 
-    use super::{builds, checkout, facts, short, store};
+    use super::{builds, checkout, facts, notice, short, store};
 
     #[test]
     fn a_path_beneath_the_home_directory_opens_with_a_tilde() {
@@ -244,6 +260,15 @@ mod tests {
         let build = &builds(&checkout)[0];
         assert_eq!(build.path, "target");
         assert_eq!(build.size, "2.0 KiB");
+    }
+
+    #[test]
+    fn a_notice_states_each_part_that_a_reading_left_unread() {
+        assert_eq!(notice(0, None), "");
+        assert!(notice(3, None).contains("3 entries"));
+        let both = notice(1, Some("permission denied"));
+        assert_eq!(both.lines().count(), 2);
+        assert!(both.ends_with("no checkout shows its hold: permission denied"));
     }
 
     #[test]

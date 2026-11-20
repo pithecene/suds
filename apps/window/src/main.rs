@@ -112,15 +112,7 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
         }
         Ok(Observation::Measured(view)) => *view,
     };
-    window.set_notice(if view.error_count == 0 {
-        "".into()
-    } else {
-        format!(
-            "Suds could not read {} entries, so each figure is a lower bound.",
-            view.error_count
-        )
-        .into()
-    });
+    window.set_notice(present::notice(view.error_count, view.registry_error.as_deref()).into());
     window.set_observed(view.observed_at.as_str().into());
     if let Some(card) = &view.pressure {
         let (level, rank) = present::level(card.level);

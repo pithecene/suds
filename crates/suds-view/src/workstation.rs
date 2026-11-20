@@ -160,8 +160,8 @@ fn pressure_card(pressure: &Pressure) -> PressureCard {
 fn classes(report: &DevelopmentReport) -> Vec<Class> {
     let totals = &report.totals;
     let each = [
-        ("Main checkouts", totals.main_checkouts),
-        ("Linked checkouts", totals.linked_checkouts),
+        ("Repositories", totals.main_checkouts),
+        ("Worktrees", totals.linked_checkouts),
         ("Build state", totals.build_state),
         ("Shared stores", totals.shared_stores),
         ("Toolchains", totals.toolchains),

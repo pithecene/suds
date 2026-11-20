@@ -3,7 +3,11 @@
 import { AboutSlint, Button, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
-export struct CheckoutItem { name: string, parent: string, kind: string, total: string, build: string, modified: string, share: float, hold: string }
+// One row of the outline: a project, or one of its checkouts beneath it.
+export struct RowItem { project: bool, open: bool, name: string, caption: string, total: string, build: string, modified: string, share: float, build-share: float, state: string, state-rank: int, tint: color }
+// A project's frame and a checkout's tile on the storage map. The second rectangle is the build state's part.
+export struct FrameItem { id: int, x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, name: string, tip: string, labelled: bool, detailed: bool }
+export struct TileItem { x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, id: int, name: string, tip: string, tint: color }
 export struct BuildItem { path: string, ecosystem: string, size: string, modified: string }
 export struct FactItem { label: string, value: string }
 export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
@@ -12,6 +16,9 @@ global Tones {
     out property <color> normal: #2f9e6b;
     out property <color> soft: #d98a00;
     out property <color> hard: #d6453d;
+    out property <color> main: #4c7fe0;
+    out property <color> linked: #8a72f0;
+    out property <color> build: #e0951c;
     out property <brush> muted: Palette.foreground.transparentize(0.42);
     out property <brush> hairline: Palette.foreground.transparentize(0.86);
     out property <brush> track: Palette.foreground.transparentize(0.88);
@@ -47,6 +54,42 @@ component Meter inherits Rectangle {
     }
 }
 
+// A bar that fills a share of its track, with the build state's part of the fill in its own tint.
+component Split inherits Rectangle {
+    in property <float> share;
+    in property <float> build-share;
+    in property <brush> fill;
+    property <length> filled: self.width * max(0, min(1, root.share));
+    height: 6px;
+    border-radius: self.height / 2;
+    background: Tones.track;
+    clip: true;
+    accessible-role: none;
+    Rectangle {
+        x: 0;
+        width: root.filled;
+        background: root.fill;
+    }
+    Rectangle {
+        x: root.filled * (1 - root.build-share);
+        width: root.filled * root.build-share;
+        background: Tones.build;
+    }
+}
+
+// One entry of the map's legend.
+component Key inherits HorizontalLayout {
+    in property <brush> tint;
+    in property <string> text;
+    horizontal-stretch: 0;
+    spacing: 5px;
+    VerticalLayout {
+        alignment: center;
+        Rectangle { width: 8px; height: 8px; border-radius: 2px; background: root.tint; }
+    }
+    Caption { text: root.text; vertical-alignment: center; }
+}
+
 component Card inherits Rectangle {
     background: Palette.control-background;
     border-width: 1px;
@@ -69,11 +112,17 @@ export component Window inherits Window {
     in property <string> pressure-facts;
 
     in property <[ClassItem]> classes;
-    in property <[CheckoutItem]> checkouts;
+    in property <[RowItem]> rows;
+    in property <[FrameItem]> frames;
+    in property <[TileItem]> tiles;
     in property <string> checkout-count;
+    // The identifiers of the selected checkout's tile and of the selected project's frame.
+    in property <int> selected-tile: -1;
+    in property <int> selected-frame: -1;
     in property <[StoreItem]> stores;
 
     in property <bool> has-detail;
+    in property <string> detail-kind;
     in property <string> detail-name;
     in property <string> detail-path;
     in property <[FactItem]> detail-facts;
@@ -82,11 +131,25 @@ export component Window inherits Window {
     in-out property <string> query;
     in-out property <int> sort: 0;
     in-out property <int> selected: -1;
+    // The outline's scroll offset and the height that it shows, for a row that the map selects.
+    in-out property <length> list-y;
+    out property <length> list-visible;
 
     callback refresh();
     callback arrange(query: string, sort: int);
-    callback select(row: int);
+    // A click on a row: it selects the row, opens or closes a project, and lets a selected checkout go.
+    callback activate(row: int);
+    // A key's move to a row, which selects it and changes nothing else.
+    callback move(row: int);
+    callback open(row: int, open: bool);
+    callback clear();
+    callback pick(checkout: int);
+    callback pick-project(frame: int);
+    callback layout(width: length, height: length);
     callback quit();
+
+    // What the pointer rests on in the map.
+    property <string> hover;
 
     // Each request for the filter's focus. The filter stands inside a condition, so it watches this count.
     property <int> search-requests;
@@ -146,12 +209,24 @@ export component Window inherits Window {
                 root.refresh();
                 return accept;
             }
-            if (event.text == Key.DownArrow && root.selected < root.checkouts.length - 1) {
-                root.select(root.selected + 1);
+            if (event.text == Key.DownArrow && root.selected < root.rows.length - 1) {
+                root.move(root.selected + 1);
                 return accept;
             }
             if (event.text == Key.UpArrow && root.selected > 0) {
-                root.select(root.selected - 1);
+                root.move(root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.selected >= 0) {
+                root.open(root.selected, true);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow && root.selected >= 0) {
+                root.open(root.selected, false);
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.clear();
                 return accept;
             }
             return reject;
@@ -282,7 +357,7 @@ export component Window inherits Window {
                             padding-left: 16px;
                             padding-right: 12px;
                             spacing: 10px;
-                            Heading { text: "CHECKOUTS"; vertical-alignment: center; }
+                            Heading { text: "PROJECTS"; vertical-alignment: center; }
                             Caption { text: root.checkout-count; vertical-alignment: center; horizontal-stretch: 1; }
                             search := LineEdit {
                                 width: 240px;
@@ -297,46 +372,199 @@ export component Window inherits Window {
                                 width: 150px;
                                 model: ["By size", "By name", "By last change", "By build state"];
                                 current-index <=> root.sort;
-                                accessible-label: "Order of the checkouts";
+                                accessible-label: "Order of the projects and their checkouts";
                                 selected => { root.arrange(root.query, self.current-index); }
                             }
                         }
                         Rectangle { height: 1px; background: Tones.hairline; }
-                        ListView {
+                        // The storage map: a rectangle's area is its size on disk.
+                        Rectangle {
+                            vertical-stretch: 2;
+                            min-height: 120px;
+                            HorizontalLayout {
+                                padding: 10px;
+                                padding-bottom: 0px;
+                                Rectangle {
+                                    clip: true;
+                                    accessible-role: groupbox;
+                                    accessible-label: "Storage map. Each rectangle's area is the size of a checkout, inside its project.";
+                                    init => { root.layout(self.width, self.height); }
+                                    changed width => { root.layout(self.width, self.height); }
+                                    changed height => { root.layout(self.width, self.height); }
+                                    TouchArea {
+                                        changed has-hover => {
+                                            if (!self.has-hover) {
+                                                root.hover = "";
+                                            }
+                                        }
+                                        clicked => {
+                                            root.clear();
+                                            keys.focus();
+                                        }
+                                    }
+                                    for frame in root.frames: Rectangle {
+                                        x: frame.x;
+                                        y: frame.y;
+                                        width: max(0px, frame.w - 1px);
+                                        height: max(0px, frame.h - 1px);
+                                        background: frame.detailed ? Tones.track : Tones.main;
+                                        border-radius: 2px;
+                                        clip: true;
+                                        if !frame.detailed: Rectangle {
+                                            x: frame.bx - frame.x;
+                                            y: frame.by - frame.y;
+                                            width: frame.bw;
+                                            height: frame.bh;
+                                            background: Tones.build;
+                                        }
+                                        if frame.labelled: Text {
+                                            x: 4px;
+                                            y: 0px;
+                                            width: parent.width - 8px;
+                                            height: 15px;
+                                            text: frame.name;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            color: Tones.muted;
+                                            accessible-role: none;
+                                        }
+                                        TouchArea {
+                                            changed has-hover => {
+                                                if (self.has-hover) {
+                                                    root.hover = frame.tip;
+                                                }
+                                            }
+                                            clicked => {
+                                                root.pick-project(frame.id);
+                                                keys.focus();
+                                            }
+                                        }
+                                        if frame.id == root.selected-frame: Rectangle {
+                                            border-width: 2px;
+                                            border-color: Palette.foreground;
+                                            border-radius: 2px;
+                                        }
+                                    }
+                                    for tile in root.tiles: Rectangle {
+                                        x: tile.x;
+                                        y: tile.y;
+                                        width: max(0px, tile.w - 1px);
+                                        height: max(0px, tile.h - 1px);
+                                        background: tile.tint;
+                                        clip: true;
+                                        Rectangle {
+                                            x: tile.bx - tile.x;
+                                            y: tile.by - tile.y;
+                                            width: tile.bw;
+                                            height: tile.bh;
+                                            background: Tones.build;
+                                        }
+                                        if tile.w > 64px && tile.h > 20px: Text {
+                                            x: 5px;
+                                            y: 3px;
+                                            width: parent.width - 10px;
+                                            text: tile.name;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                            color: white;
+                                            accessible-role: none;
+                                        }
+                                        TouchArea {
+                                            changed has-hover => {
+                                                if (self.has-hover) {
+                                                    root.hover = tile.tip;
+                                                }
+                                            }
+                                            clicked => {
+                                                root.pick(tile.id);
+                                                keys.focus();
+                                            }
+                                        }
+                                        if tile.id == root.selected-tile: Rectangle {
+                                            border-width: 2px;
+                                            border-color: Palette.foreground;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            height: 26px;
+                            spacing: 14px;
+                            Caption {
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                text: root.hover != "" ? root.hover : "Area is size on disk. Select a rectangle or a row.";
+                            }
+                            Key { tint: Tones.main; text: "Repository"; }
+                            Key { tint: Tones.linked; text: "Worktree"; }
+                            Key { tint: Tones.build; text: "Build state"; }
+                        }
+                        Rectangle { height: 1px; background: Tones.hairline; }
+                        outline := ListView {
+                            vertical-stretch: 3;
+                            min-height: 114px;
                             accessible-role: list;
-                            accessible-label: "Checkouts";
-                            for row[position] in root.checkouts: Rectangle {
-                                height: 44px;
+                            accessible-label: "Projects and their checkouts";
+                            content-y <=> root.list-y;
+                            init => { root.list-visible = self.visible-height; }
+                            changed visible-height => { root.list-visible = self.visible-height; }
+                            for row[position] in root.rows: Rectangle {
+                                height: 38px;
                                 accessible-role: list-item;
-                                accessible-label: row.name + ", " + row.kind + ", " + row.total + ", " + row.build;
+                                accessible-label: (row.project ? "Project " : "Checkout ") + row.name + ", " + row.caption + ", " + row.total + ", " + row.build + (row.state != "" ? ", " + row.state : "");
                                 accessible-item-selectable: true;
                                 accessible-item-selected: position == root.selected;
                                 accessible-item-index: position;
+                                accessible-expandable: row.project;
+                                accessible-expanded: row.open;
                                 background: position == root.selected ? Palette.selection-background : area.has-hover ? Tones.hover : transparent;
                                 area := TouchArea {
                                     clicked => {
-                                        root.select(position);
+                                        root.activate(position);
                                         keys.focus();
                                     }
                                 }
                                 HorizontalLayout {
-                                    padding-left: 16px;
+                                    padding-left: row.project ? 12px : 34px;
                                     padding-right: 16px;
-                                    spacing: 14px;
+                                    spacing: 10px;
+                                    Text {
+                                        width: 12px;
+                                        text: row.project ? (row.open ? "▾" : "▸") : "";
+                                        visible: row.project;
+                                        vertical-alignment: center;
+                                        color: Tones.muted;
+                                        accessible-role: none;
+                                    }
                                     VerticalLayout {
                                         alignment: center;
                                         horizontal-stretch: 1;
-                                        Text { text: row.name; overflow: elide; color: position == root.selected ? Palette.selection-foreground : Palette.foreground; }
-                                        Caption { text: row.parent; }
+                                        Text {
+                                            text: row.name;
+                                            overflow: elide;
+                                            font-weight: row.project ? 600 : 400;
+                                            color: position == root.selected ? Palette.selection-foreground : Palette.foreground;
+                                        }
+                                        Caption { text: row.caption; }
                                     }
-                                    Caption { width: 72px; text: row.hold; vertical-alignment: center; horizontal-alignment: right; }
-                                    Caption { width: 44px; text: row.kind; vertical-alignment: center; }
+                                    Caption {
+                                        width: 116px;
+                                        text: row.state;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                        color: row.state-rank == 1 ? Tones.main : row.state-rank == 2 ? Tones.normal : Tones.muted;
+                                    }
                                     VerticalLayout {
                                         width: 150px;
                                         alignment: center;
-                                        Meter { share: row.share; }
+                                        Split { share: row.share; build-share: row.build-share; fill: row.tint; }
                                     }
-                                    Text { width: 78px; text: row.total; horizontal-alignment: right; vertical-alignment: center; }
+                                    Text { width: 78px; text: row.total; horizontal-alignment: right; vertical-alignment: center; font-weight: row.project ? 600 : 400; }
                                     Caption { width: 104px; text: row.build; horizontal-alignment: right; vertical-alignment: center; }
                                     Caption { width: 74px; text: row.modified; horizontal-alignment: right; vertical-alignment: center; }
                                 }
@@ -351,33 +579,52 @@ export component Window inherits Window {
                     spacing: 16px;
 
                     Card {
-                        vertical-stretch: 0;
+                        // The pane grows only for a list of build directories, and then shares the column.
+                        vertical-stretch: root.detail-builds.length > 0 ? 1 : 0;
+                        clip: true;
                         accessible-role: groupbox;
-                        accessible-label: root.has-detail ? "Checkout " + root.detail-name : "No checkout selected";
+                        accessible-label: root.has-detail ? root.detail-kind + " " + root.detail-name : "Nothing selected";
                         VerticalLayout {
                             padding: 16px;
                             spacing: 8px;
-                            Heading { text: "CHECKOUT"; }
-                            if !root.has-detail: Caption { text: "Select a checkout to read its build state and its hold."; wrap: word-wrap; }
+                            Heading { text: root.has-detail ? root.detail-kind : "SELECTION"; }
+                            if !root.has-detail: Caption { text: "Select a project or a checkout to read its size, its build state, and whether a tool is using it. Escape lets the selection go."; wrap: word-wrap; }
                             if root.has-detail: Text { text: root.detail-name; font-size: 15px; font-weight: 600; overflow: elide; }
                             if root.has-detail: Caption { text: root.detail-path; wrap: char-wrap; overflow: clip; }
                             for fact in root.detail-facts: HorizontalLayout {
-                                Caption { text: fact.label; width: 96px; }
-                                Text { text: fact.value; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
+                                Caption { text: fact.label; width: 84px; }
+                                Text { text: fact.value; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; }
                             }
-                            for build in root.detail-builds: VerticalLayout {
-                                spacing: 2px;
-                                HorizontalLayout {
-                                    Text { text: build.ecosystem; font-size: 12px; horizontal-stretch: 1; }
-                                    Text { text: build.size; font-size: 12px; }
+                            // A checkout may hold a hundred build directories, so their list scrolls
+                            // inside the pane and never sets the window's height.
+                            if root.detail-builds.length > 0: Heading { text: "BUILD DIRECTORIES"; }
+                            if root.detail-builds.length > 0: ScrollView {
+                                vertical-stretch: 1;
+                                min-height: 60px;
+                                accessible-role: list;
+                                accessible-label: "Build directories, largest first";
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    padding-right: 12px;
+                                    alignment: start;
+                                    for build in root.detail-builds: VerticalLayout {
+                                        spacing: 2px;
+                                        accessible-role: list-item;
+                                        accessible-label: build.ecosystem + ", " + build.size + ", " + build.path;
+                                        HorizontalLayout {
+                                            Text { text: build.ecosystem; font-size: 12px; horizontal-stretch: 1; }
+                                            Text { text: build.size; font-size: 12px; }
+                                        }
+                                        Caption { text: build.path; }
+                                    }
                                 }
-                                Caption { text: build.path; }
                             }
                         }
                     }
 
                     Card {
                         vertical-stretch: 1;
+                        min-height: 140px;
                         clip: true;
                         accessible-role: groupbox;
                         accessible-label: "Shared stores";

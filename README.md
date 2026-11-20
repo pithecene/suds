@@ -94,11 +94,15 @@ them, and it writes nothing: no pressure reading, no journal, and no
 removal.
 
 The window shows the pressure against the ceiling and each class of
-development storage. It lists each checkout with its size, its build state,
-its last change, and its client's hold. A filter keeps the checkouts
-whose path holds its text, and the list orders by size, name, last change,
-or build state. A pane shows the selected checkout's facts and each of its
-build directories. Each shared store stands against its budget, and a store
+development storage. It groups the checkouts of one repository into a
+project: the repository's own checkout and each worktree. A storage map
+draws each project and each checkout as a rectangle with the area of its
+size on disk, and build state takes its own color. An outline beneath
+the map lists each project with its sums, and an open project lists its
+checkouts. A filter keeps the checkouts whose path holds its text, and the
+projects order by size, name, last change, or build state. A pane shows the
+selected project or checkout: its size, its build directories, and its
+use by a tool. Each shared store stands against its budget, and a store
 over its budget shows in red.
 
 Run it with `task window`. Control and F moves to the filter, Control and R

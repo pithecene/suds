@@ -235,6 +235,8 @@ fn systemd_units(program: &Path, minutes: u64) -> String {
          [Service]\n\
          Type=oneshot\n\
          ExecStart={program} maintain\n\
+         # A run that kept or refused a directory ends with status {partial}.\n\
+         SuccessExitStatus={partial}\n\
          \n\
          # ~/.config/systemd/user/suds-maintain.timer\n\
          [Unit]\n\
@@ -246,7 +248,8 @@ fn systemd_units(program: &Path, minutes: u64) -> String {
          \n\
          [Install]\n\
          WantedBy=timers.target\n",
-        program = systemd_quote(&program.to_string_lossy())
+        program = systemd_quote(&program.to_string_lossy()),
+        partial = crate::EXIT_PARTIAL
     )
 }
 
@@ -314,6 +317,7 @@ mod tests {
         let odd = systemd_units(Path::new("/opt/100% \"q\"/$x/suds"), 30);
         assert!(odd.contains("ExecStart=\"/opt/100%% \\\"q\\\"/$$x/suds\" maintain\n"));
         assert!(units.contains("OnUnitActiveSec=30min\n"));
+        assert!(units.contains("SuccessExitStatus=1\n"));
         let agent = launchd_agent(program, 30);
         assert!(agent.contains("<string>/opt/suds &amp; co/suds</string>"));
         assert!(agent.contains("<integer>1800</integer>"));

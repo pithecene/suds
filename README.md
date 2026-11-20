@@ -6,6 +6,16 @@ toolchains, configuration, and agent activity as parts of one environment.
 People use Suds through its desktop application, and automation calls the
 same `suds-core` crate through the `suds` command.
 
+## Installation
+
+Each release holds an archive of the `suds` command for macOS on Apple
+silicon and for Linux on x64 and arm64. With mise, one command installs
+the newest release:
+
+```sh
+mise use -g github:pithecene/suds
+```
+
 ## Current Release Boundary
 
 This release measures storage and makes one change. It moves a

@@ -218,8 +218,9 @@ and the report's errors name the path.
 A virtual machine's disk holds its container engine's images and volumes.
 The profile counts each one toward the development storage, beside the
 stores or inside a checkout. `suds stores` reports a
-machine whose disk exceeds 60 GiB and each machine inside a checkout, and
-it trims none, because no build makes a volume again.
+machine whose disk exceeds 60 GiB, and it trims none, because no build
+makes a volume again. With `--root DIR`, the plan also looks beneath that
+directory and reports each machine inside a checkout.
 
 A root may be a mount point, and Suds enters no mount point beneath a root.
 When one root lies beneath another, Suds inspects the outer root alone, so

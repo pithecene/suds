@@ -129,6 +129,18 @@ pub(crate) fn now_seconds() -> i64 {
         })
 }
 
+/// The directories that `roots` name, resolved as [`resolve_roots`] resolves
+/// them. No root names no directory.
+pub(crate) fn workspaces_of(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(resolve_roots(roots)?
+        .into_iter()
+        .map(|root| root.path)
+        .collect())
+}
+
 pub(crate) fn resolve_roots(paths: &[PathBuf]) -> Result<Vec<RootSpec>, String> {
     if paths.is_empty() {
         return platform::default_roots().map_err(|err| err.to_string());

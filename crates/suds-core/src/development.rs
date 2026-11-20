@@ -584,6 +584,13 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         let Some(path) = spec.path else {
             continue;
         };
+        // A workspace may hold a machines directory, and the walk has then
+        // counted each machine in it already.
+        let counted =
+            |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
+        if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
+            continue;
+        }
         let examined = examine_store(&path, environment.home.as_deref());
         if let Err(err) = &examined {
             scan.record_error(&path, err);

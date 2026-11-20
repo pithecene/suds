@@ -390,17 +390,30 @@ fn reports_a_machine_and_trims_none() {
         machine("colima.machines", 160, None),
         machine("lima.machines", 20, None),
         machine("lima.machine", 1, Some("/workspace/repo")),
+        machine("other.machine", 160, None),
     ]);
-    let plan = plan(&stores, &stubs.programs(), NOW);
+    let first = plan(&stores, &stubs.programs(), NOW);
     // A disk beyond its budget and a machine inside a checkout both reach
     // the person, and no program trims either.
-    let Decision::Audit { reason } = decision(&plan, "colima.machines") else {
+    let Decision::Audit { reason } = decision(&first, "colima.machines") else {
         panic!("a large machine is an audit");
     };
     assert!(reason.contains("exceeds its budget"));
-    assert_eq!(decision(&plan, "lima.machines"), &Decision::Within);
-    let Decision::Audit { reason } = decision(&plan, "lima.machine") else {
+    assert_eq!(decision(&first, "lima.machines"), &Decision::Within);
+    let Decision::Audit { reason } = decision(&first, "lima.machine") else {
         panic!("a machine inside a checkout is an audit");
     };
     assert!(reason.contains("a checkout holds a virtual machine"));
+    // A machine without a budget is no machine within one.
+    assert!(matches!(
+        decision(&first, "other.machine"),
+        Decision::Audit { .. }
+    ));
+    // A machine that the walk found outside a checkout has the budget too.
+    let stray = scan(vec![machine("lima.machine", 160, None)]);
+    let second = plan(&stray, &stubs.programs(), NOW);
+    assert!(matches!(
+        decision(&second, "lima.machine"),
+        Decision::Audit { .. }
+    ));
 }

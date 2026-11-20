@@ -373,6 +373,30 @@ fn reports_each_virtual_machine_with_the_checkout_that_holds_it() {
     assert_eq!(shared.owner, None);
     assert_eq!(shared.measure.logical_bytes, 930);
 
+    // A machines directory inside a workspace counts once: each machine in
+    // it stands in the report, and the directory as a whole does not.
+    let inside = fixture.workspace.join("engines");
+    write(&inside.join("_lima/colima/lima.yaml"), 30);
+    write(&inside.join("_lima/colima/diffdisk"), 600);
+    let mut environment = fixture.environment();
+    environment
+        .variables
+        .insert("COLIMA_HOME".to_owned(), inside.clone().into_os_string());
+    let moved = inspect(std::slice::from_ref(&fixture.workspace), &environment);
+    assert!(
+        moved
+            .stores
+            .iter()
+            .all(|store| store.id != "colima.machines")
+    );
+    let counted: u64 = moved
+        .stores
+        .iter()
+        .filter(|store| store.path.starts_with(&inside))
+        .map(|store| store.measure.logical_bytes)
+        .sum();
+    assert_eq!(counted, 630);
+
     // The checkout's own size leaves its machines out, and the report sums
     // them in a class of their own.
     let main = scan.checkouts.iter().find(|c| c.path == repo).unwrap();

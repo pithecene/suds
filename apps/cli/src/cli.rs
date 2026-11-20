@@ -133,6 +133,12 @@ pub enum Scheduler {
 
 #[derive(Debug, Args)]
 pub struct StoresArgs {
+    /// A directory beneath which Suds looks for checkouts, so the plan
+    /// reports each virtual machine that a checkout holds. Repeat the
+    /// option for several directories.
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<PathBuf>,
+
     /// A store's budget, as in `go.build-cache=10G`. Repeat the option for
     /// several stores.
     #[arg(long = "budget", value_name = "STORE=SIZE")]

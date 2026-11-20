@@ -56,6 +56,8 @@ impl Default for Budgets {
             (DOCKER_ANONYMOUS_VOLUMES, 1),
             ("lima.machines", 60),
             ("colima.machines", 60),
+            // One machine that the walk of a workspace found.
+            ("lima.machine", 60),
         ];
         Budgets {
             bytes: defaults
@@ -445,11 +447,14 @@ fn machine(store: &Store, budget: Option<u64>) -> Decision {
         };
     }
     match budget {
-        Some(budget) if store.measure.allocated_bytes > budget => Decision::Audit {
+        Some(budget) if store.measure.allocated_bytes <= budget => Decision::Within,
+        Some(_) => Decision::Audit {
             reason: "the machine's disk exceeds its budget, and only its owner shrinks or removes a machine"
                 .to_owned(),
         },
-        _ => Decision::Within,
+        None => Decision::Audit {
+            reason: "the machine has no budget".to_owned(),
+        },
     }
 }
 

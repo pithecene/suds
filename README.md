@@ -86,6 +86,27 @@ On Linux, the storage profile requires each root as an argument, as in
 `suds inspect` without `--root` exits with status 2. The development
 profile needs no root on either system.
 
+## Window
+
+The window `suds-window` shows one workstation's development storage. It
+measures the roots that the settings name, as `suds maintain` measures
+them, and it writes nothing: no pressure reading, no journal, and no
+removal.
+
+The window shows the pressure against the ceiling and each class of
+development storage. It lists each checkout with its size, its build state,
+its last change, and its client's hold. A filter keeps the checkouts
+whose path holds its text, and the list orders by size, name, last change,
+or build state. A pane shows the selected checkout's facts and each of its
+build directories. Each shared store stands against its budget, and a store
+over its budget shows in red.
+
+Run it with `task window`. Control and F moves to the filter, Control and R
+measures again, and the arrow keys move through the list. The window draws
+with [Slint](https://slint.dev/), without a web view, and runs on Linux
+(decision 0003). It replaces the desktop application below once it holds
+that application's views.
+
 ## Desktop Application
 
 The desktop application runs on macOS. Its window lists the default roots

@@ -1,0 +1,29 @@
+[package]
+name = "suds-window"
+description = "The Suds window: one workstation's development storage in a native window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "suds-window"
+path = "src/main.rs"
+
+[dependencies]
+suds-core.workspace = true
+suds-view.workspace = true
+# The interface toolkit of decision 0003, under its royalty-free licence for
+# desktop applications. The window shows the toolkit's attribution in About.
+slint.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+# The workspace forbids unsafe code, and the interface's generated module
+# allows its own. The crate therefore denies it: its written code holds none,
+# and the generated module keeps its allowance.
+[lints.rust]
+unsafe_code = "deny"

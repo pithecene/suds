@@ -46,6 +46,15 @@ jobs:
         run: task check
 
       # The desktop application targets macOS first, and its Linux build needs WebKitGTK.
+      # The window links the system's fontconfig, whose development files a runner may lack.
+      - name: 🧱 Install the Window's Libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libfontconfig1-dev
+
+      - name: 🪟 Check the Window
+        if: runner.os == 'Linux'
+        run: task window:check
+
       - name: 🖥️ Check the Desktop Application
         if: runner.os == 'macOS'
         run: task desktop:check

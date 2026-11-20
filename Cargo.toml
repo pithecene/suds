@@ -1,8 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/suds-core", "crates/suds-view", "apps/cli", "apps/desktop/src-tauri"]
+members = ["crates/suds-core", "crates/suds-view", "apps/cli", "apps/desktop/src-tauri", "apps/window"]
 # The desktop crate needs the frontend's build output and, on Linux, the
-# WebKitGTK libraries, so a plain cargo command builds the core and the CLI.
+# WebKitGTK libraries. The window needs a display's libraries. A plain cargo
+# command therefore builds the core, the view model, and the CLI.
 default-members = ["crates/suds-core", "crates/suds-view", "apps/cli"]
 
 [workspace.package]
@@ -22,6 +23,8 @@ serde_json = "=1.0.154"
 rustix = { version = "=1.1.6", features = ["fs", "process"] }
 tempfile = "=3.27.0"
 tauri = "=2.12.5"
+slint = "=1.19.0"
+slint-build = "=1.19.0"
 tauri-build = "=2.7.4"
 tauri-plugin-dialog = "=2.8.4"
 

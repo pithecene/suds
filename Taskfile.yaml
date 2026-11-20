@@ -38,6 +38,17 @@ tasks:
     desc: Run the debug build of suds inspect with the arguments after --
     cmd: cargo run --locked --quiet -p suds -- inspect {{.CLI_ARGS}}
 
+  window:
+    desc: Run the native window on this workstation's development storage
+    cmd: cargo run --locked --release -p suds-window
+
+  window:check:
+    desc: Build, test, and lint the native window and its view model
+    cmds:
+      - cargo build --locked -p suds-window
+      - cargo test --locked -p suds-window -p suds-view
+      - cargo clippy --locked -p suds-window -p suds-view --all-targets -- -D warnings
+
   desktop:install:
     desc: Install the desktop frontend's pinned packages
     dir: apps/desktop

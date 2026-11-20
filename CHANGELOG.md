@@ -19,7 +19,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rectangle with the area of its size on disk, and an outline lists the
   same projects. A pane shows the selected entry, and each shared store
   stands against its budget. The window runs on Linux and changes nothing
-  on disk. The task `window:install` installs it with its desktop entry.
+  on disk.
 
 ## [0.1.3] - 2026-11-20
 

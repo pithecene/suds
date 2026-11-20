@@ -24,7 +24,7 @@ pub fn level(level: Level) -> (&'static str, i32) {
     }
 }
 
-/// The time of day of a reading, from its time in RFC 3339 at UTC.
+/// A reading's time of day. The reading states its time in RFC 3339, at UTC.
 pub fn observed(at: &str) -> String {
     match at.get(11..16) {
         Some(time) => format!("{time} UTC"),

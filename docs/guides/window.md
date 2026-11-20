@@ -51,6 +51,13 @@ journal, and removes no file.
 A click on a project's row opens or closes it. A second click on a selected
 checkout, or a click on the map's empty space, also lets the selection go.
 
+### Projects
+
+A project is one repository, whichever directories hold its clones. The
+view model names a project by the remote `origin` in the main checkout's
+Git configuration, so each clone of that remote and each worktree joins one
+project. A repository without that remote stands alone under its path.
+
 ### Storage Map
 
 The map follows the squarified layout of Bruls, Huizing, and van Wijk. A

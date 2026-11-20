@@ -99,8 +99,34 @@ pub fn apply(
         authority,
     })?;
     let mut removals = Vec::new();
-    for (index, candidate) in plan.candidates.iter().enumerate() {
-        if candidate.decision != Decision::Remove {
+    // Git removes a linked checkout with the build state in it, so each
+    // checkout goes first. A removal of its build state would change the
+    // checkout and make it count as recently modified.
+    let mut order: Vec<(usize, &Candidate)> = plan
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.decision == Decision::Remove)
+        .collect();
+    order.sort_by_key(|(_, candidate)| candidate.subject != Subject::LinkedCheckout);
+    let mut gone: Vec<&Path> = Vec::new();
+    for (index, candidate) in order {
+        if gone
+            .iter()
+            .any(|checkout| candidate.path.as_path().starts_with(checkout))
+        {
+            journal.append(Event::Removed {
+                run: run.clone(),
+                index,
+                freed_bytes: candidate.allocated_bytes,
+            })?;
+            removals.push(Removal {
+                index,
+                path: candidate.path.clone(),
+                removed: true,
+                freed_bytes: candidate.allocated_bytes,
+                refusal: None,
+            });
             continue;
         }
         let liveness = observe();
@@ -135,6 +161,9 @@ pub fn apply(
                 reason: reason.clone(),
             },
         })?;
+        if refusal.is_none() && candidate.subject == Subject::LinkedCheckout {
+            gone.push(candidate.path.as_path());
+        }
         removals.push(Removal {
             index,
             path: candidate.path.clone(),
@@ -147,6 +176,7 @@ pub fn apply(
             refusal,
         });
     }
+    removals.sort_by_key(|removal| removal.index);
     let removed = removals.iter().filter(|removal| removal.removed).count();
     let freed_bytes = removals.iter().map(|removal| removal.freed_bytes).sum();
     let status = RunStatus::from_counts(removed, removals.len());

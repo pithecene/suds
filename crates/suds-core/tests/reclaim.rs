@@ -978,3 +978,65 @@ fn keeps_a_toolchain_that_is_no_repository_or_that_holds_one() {
     fixture.apply(&plan);
     assert!(toolchain.join(".vcpkg-root").exists());
 }
+
+/// Sets the modification time of `path` and of everything beneath it.
+fn backdate(path: &Path, to: SystemTime) {
+    let meta = fs::symlink_metadata(path).unwrap();
+    if meta.is_symlink() {
+        return;
+    }
+    if meta.is_dir() {
+        for entry in fs::read_dir(path).unwrap() {
+            backdate(&entry.unwrap().path(), to);
+        }
+    }
+    fs::File::open(path).unwrap().set_modified(to).unwrap();
+}
+
+#[test]
+fn removes_a_released_checkout_and_its_build_state_in_one_run() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    // The checkout last changed two idle times before the run, and the run
+    // happens at the present, so a change during the run counts as recent.
+    let idle = std::time::Duration::from_secs(IDLE);
+    backdate(&fixture.linked, SystemTime::now() - 2 * idle);
+    let plan = fixture.plan_at(&nobody(), false, now());
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    assert_eq!(
+        find(&plan, &fixture.linked.join("target")).decision,
+        Decision::Remove
+    );
+
+    let report = fixture.apply_at(&plan, &mut nobody, now());
+    assert!(!fixture.linked.exists());
+    let of_linked: Vec<_> = report
+        .removals
+        .iter()
+        .filter(|removal| removal.path.as_path().starts_with(&fixture.linked))
+        .collect();
+    assert_eq!(of_linked.len(), 2);
+    assert!(of_linked.iter().all(|removal| removal.removed));
+    // The report lists the removals in the plan's order.
+    assert!(report.removals.is_sorted_by_key(|removal| removal.index));
+}
+
+#[test]
+fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    write(&fixture.repo.join(".git/info/exclude"), ".cache/\n");
+    let modules = fixture.linked.join(".cache/go-mod");
+    write(&modules.join("cache/download/example.com/@v/list"), "v1");
+    // Go lets no one write a module's directory.
+    let module = modules.join("example.com@v1");
+    write(&module.join("lib.go"), "package lib");
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o555)).unwrap();
+    fixture.record(&fixture.linked, registry::Event::Released);
+
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);
+    assert!(!fixture.linked.exists());
+}

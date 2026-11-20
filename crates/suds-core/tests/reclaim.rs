@@ -1020,3 +1020,23 @@ fn removes_a_released_checkout_and_its_build_state_in_one_run() {
     // The report lists the removals in the plan's order.
     assert!(report.removals.is_sorted_by_key(|removal| removal.index));
 }
+
+#[test]
+fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    write(&fixture.repo.join(".git/info/exclude"), ".cache/\n");
+    let modules = fixture.linked.join(".cache/go-mod");
+    write(&modules.join("cache/download/example.com/@v/list"), "v1");
+    // Go lets no one write a module's directory.
+    let module = modules.join("example.com@v1");
+    write(&module.join("lib.go"), "package lib");
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o555)).unwrap();
+    fixture.record(&fixture.linked, registry::Event::Released);
+
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);
+    assert!(!fixture.linked.exists());
+}

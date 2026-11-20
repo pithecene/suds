@@ -3,7 +3,6 @@
 use suds_core::arena;
 use suds_core::development::{self, Environment};
 use suds_core::maintain;
-use suds_core::model::ReportStatus;
 use suds_core::pressure::{self, Measurement, Thresholds};
 use suds_core::registry;
 use suds_core::state::{Directories, Settings, load_settings};
@@ -41,7 +40,7 @@ pub fn observe(environment: &Environment, now: i64) -> Result<Observation, Strin
         ));
     };
     let scan = development::inspect(&settings.roots, environment);
-    let report = development::build_report(&scan, now);
+    let complete = scan.error_count == 0 && scan.workspaces.iter().all(|w| w.measured);
     // The pressure counts every root and every store, as a maintenance run counts them.
     let others: Vec<_> = settings
         .roots
@@ -58,17 +57,18 @@ pub fn observe(environment: &Environment, now: i64) -> Result<Observation, Strin
             ceiling_bytes: audited.ceiling_bytes,
             enforced: audited.enforced,
             filesystem_available_bytes: Some(audited.available_bytes),
-            complete: report.status == ReportStatus::Complete,
+            complete,
             now,
         },
         Thresholds::default(),
     );
-    // An unreadable registry shows no hold. The reclaim plan reads the registry itself and keeps every checkout then.
-    let standings = registry::reading(&directories.registry()).unwrap_or_default();
+    // The view states an unreadable registry, so no hold never reads as an empty registry.
+    let registry = registry::reading(&directories.registry());
     Ok(Observation::Measured(Box::new(workstation(
-        &report,
+        &scan,
+        now,
         Some(&reading),
-        &standings,
+        &registry,
         &budgets_of(&settings),
     ))))
 }

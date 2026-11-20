@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use suds_core::development::{CheckoutKind, DevelopmentReport, StoreStatus};
+use suds_core::development::{self, CheckoutKind, DevelopmentReport, DevelopmentScan, StoreStatus};
 use suds_core::pressure::{Level, Pressure};
-use suds_core::registry::{self, Event, Standings};
+use suds_core::registry::{self, Event, Reading, Standings};
 use suds_core::stores::Budgets;
 
 /// The usage of development storage against its ceiling.
@@ -109,6 +109,9 @@ pub struct Workstation {
     /// The stores in order of their size, largest first.
     pub stores: Vec<Store>,
     pub error_count: u64,
+    /// The reason that the registry gave no reading. The view then shows no
+    /// hold, which differs from a registry that holds none.
+    pub registry_error: Option<String>,
 }
 
 /// The order of the checkout list.
@@ -128,8 +131,7 @@ fn share(part: u64, whole: u64) -> f32 {
     (part as f64 / whole as f64).clamp(0.0, 1.0) as f32
 }
 
-fn split(path: &str) -> (String, String) {
-    let path = Path::new(path);
+fn split(path: &Path) -> (String, String) {
     let text = |part: Option<&std::ffi::OsStr>| {
         part.map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
@@ -173,8 +175,9 @@ fn classes(report: &DevelopmentReport) -> Vec<Class> {
         .collect()
 }
 
-fn checkouts(report: &DevelopmentReport, standings: &Standings) -> Vec<Checkout> {
-    let mut rows: Vec<Checkout> = report
+fn checkouts(scan: &DevelopmentScan, standings: &Standings) -> Vec<Checkout> {
+    let shown = |path: &Path| path.to_string_lossy().into_owned();
+    let mut rows: Vec<Checkout> = scan
         .checkouts
         .iter()
         .map(|checkout| {
@@ -183,33 +186,38 @@ fn checkouts(report: &DevelopmentReport, standings: &Standings) -> Vec<Checkout>
                 .build_state
                 .iter()
                 .map(|build| BuildState {
-                    path: build.path.clone(),
+                    path: shown(&build.path),
                     ecosystem: build.ecosystem.label(),
                     bytes: build.measure.allocated_bytes,
                     newest_modified: build.measure.newest_modified.clone().unwrap_or_default(),
                 })
                 .collect();
-            // A checkout's own record shows a release too, and a registration above it holds it otherwise.
-            let path = Path::new(&checkout.path);
-            let above = || registry::holder(standings, path).map(|(_, standing)| standing);
-            let hold = standings.get(path).or_else(above).map(|standing| Hold {
-                client: standing.client.clone(),
-                since: standing.at.clone(),
-                released: standing.event == Event::Released,
-                landed: standing.landed.clone(),
-            });
+            // The registry names a checkout by its native path, so the lookup takes that path
+            // and never its displayed text. A checkout's own record shows a release too, and a
+            // registration above it holds it otherwise.
+            let above =
+                || registry::holder(standings, &checkout.path).map(|(_, standing)| standing);
+            let hold = standings
+                .get(&checkout.path)
+                .or_else(above)
+                .map(|standing| Hold {
+                    client: standing.client.clone(),
+                    since: standing.at.clone(),
+                    released: standing.event == Event::Released,
+                    landed: standing.landed.clone(),
+                });
             Checkout {
                 name,
                 parent,
                 linked: checkout.kind == CheckoutKind::Linked,
-                repository: checkout.repository.clone(),
+                repository: checkout.repository.as_deref().map(shown),
                 own_bytes: checkout.own.allocated_bytes,
                 build_bytes: build_state.iter().map(|build| build.bytes).sum(),
                 build_state,
                 newest_modified: checkout.own.newest_modified.clone().unwrap_or_default(),
                 hold,
                 share: 0.0,
-                path: checkout.path.clone(),
+                path: shown(&checkout.path),
             }
         })
         .collect();
@@ -259,21 +267,26 @@ fn stores(report: &DevelopmentReport, budgets: &Budgets) -> Vec<Store> {
     rows
 }
 
-/// The first view of `report`, with the last reading of the pressure, each
-/// client's hold, and each store's budget.
+/// The first view of `scan`, with the last reading of the pressure, the
+/// registry's reading, and each store's budget. The scan's time is
+/// `observed_at`, in seconds since the Unix epoch.
 pub fn workstation(
-    report: &DevelopmentReport,
+    scan: &DevelopmentScan,
+    observed_at: i64,
     pressure: Option<&Pressure>,
-    standings: &Standings,
+    registry: &Reading,
     budgets: &Budgets,
 ) -> Workstation {
+    let report = development::build_report(scan, observed_at);
+    let none = Standings::new();
     Workstation {
         observed_at: report.observed_at.clone(),
         pressure: pressure.map(pressure_card),
-        classes: classes(report),
-        checkouts: checkouts(report, standings),
-        stores: stores(report, budgets),
+        classes: classes(&report),
+        checkouts: checkouts(scan, registry.as_ref().unwrap_or(&none)),
+        stores: stores(&report, budgets),
         error_count: report.error_count,
+        registry_error: registry.as_ref().err().cloned(),
     }
 }
 

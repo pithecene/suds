@@ -10,6 +10,7 @@ fn checkout(path: &str, repository: Option<&str>, own: u64, build: u64, day: &st
         parent: parent.into(),
         linked: repository.is_some(),
         repository: repository.map(str::to_owned),
+        origin: None,
         own_bytes: own,
         build_bytes: build,
         build_state: Vec::new(),
@@ -53,7 +54,10 @@ fn a_linked_checkout_joins_the_project_of_its_repository() {
     let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["app", "tool"]);
     let app = &found[0];
-    assert_eq!(app.path, "/work/app");
+    assert_eq!(
+        (app.key.as_str(), app.remote, app.clones),
+        ("/work/app", false, 1)
+    );
     // The members stand in order of size: the checkouts of 40, 40, and 10 bytes.
     assert_eq!(app.members, [0, 1, 2]);
     assert_eq!((app.own_bytes, app.build_bytes), (60, 30));
@@ -82,6 +86,26 @@ fn the_sort_orders_the_projects_and_a_query_keeps_only_its_checkouts() {
     assert_eq!(found[0].members, [2]);
     // The sums cover the kept checkouts alone, so `tool` would now lead.
     assert_eq!(found[0].total_bytes(), 10);
+}
+
+#[test]
+fn the_clones_of_one_remote_share_a_project() {
+    let mut checkouts = fixture();
+    // A second clone of the remote stands in another directory, with a checkout linked to it.
+    checkouts.push(checkout("/old/app", None, 5, 0, "02"));
+    checkouts.push(checkout("/old/app-tree", Some("/old/app"), 5, 0, "03"));
+    for position in [0, 1, 2, 4, 5] {
+        checkouts[position].origin = Some("github.com/acme/app".into());
+    }
+    let found = projects(&checkouts, "", Sort::Size);
+
+    assert_eq!(found.len(), 2);
+    let app = &found[0];
+    assert_eq!(app.name, "acme/app");
+    assert!(app.remote);
+    assert_eq!(app.clones, 2);
+    assert_eq!(app.members.len(), 5);
+    assert_eq!(found[1].name, "tool");
 }
 
 fn inside(inner: &Rect, outer: &Rect) -> bool {
@@ -150,7 +174,10 @@ fn a_frame_without_room_stands_for_its_whole_project() {
     let found = projects(&checkouts, "", Sort::Size);
     let drawn = map(&found, &checkouts, 600.0, 300.0);
 
-    let tool = drawn.frames.iter().find(|f| found[f.project].name == "tool");
+    let tool = drawn
+        .frames
+        .iter()
+        .find(|f| found[f.project].name == "tool");
     let tool = tool.unwrap();
     assert!(!tool.detailed && !tool.labelled);
     assert!(drawn.tiles.iter().all(|tile| tile.project != tool.project));

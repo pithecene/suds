@@ -12,16 +12,7 @@ mise install
 
 ## Development Tasks
 
-| Command | Description |
-| :--- | :--- |
-| `task build` | Build the release binary |
-| `task test` | Run the unit and command-line tests |
-| `task lint` | Check formatting, Clippy lints, and YAML formatting |
-| `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
-| `task check` | Build, test, and lint |
-| `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
-| `task desktop` | Run the desktop application in development mode |
-| `task desktop:check` | Build the desktop frontend, then test and lint the desktop crate |
+The README's Development section lists each task and what it runs.
 
 Each pull request passes `task check` on macOS and on Linux in CI, and
 `task desktop:check` on macOS.

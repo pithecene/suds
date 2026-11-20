@@ -364,6 +364,11 @@ registration adds knowledge and no permission:
 - A released linked checkout enters each reclaim plan, before every other
   checkout. Every other rule of [Reclamation](#reclamation) still decides
   whether it leaves.
+- A release may report the checkout's head as landed, with
+  `--landed COMMIT`. A forge that squashes a branch and deletes it leaves
+  the head's own commits on no remote, and a client that asked the forge
+  knows that the change landed. Suds then removes the checkout while its
+  head is still that commit and its tree is clean.
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading

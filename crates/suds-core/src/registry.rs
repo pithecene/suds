@@ -32,6 +32,11 @@ pub struct Record {
     /// The client's own name for the work, such as a workflow's identifier.
     pub attempt: Option<String>,
     pub event: Event,
+    /// On a release, the commit at the checkout's head that the client
+    /// reports as landed: a remote holds its change, though perhaps by
+    /// another commit, as after a squash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +53,8 @@ pub struct Standing {
     pub client: String,
     pub attempt: Option<String>,
     pub at: String,
+    /// The head that a release reported as landed.
+    pub landed: Option<String>,
 }
 
 /// The latest standing of each checkout that the registry names.
@@ -94,6 +101,51 @@ pub fn append(
     event: Event,
     now: i64,
 ) -> Result<Record, String> {
+    let record = Record {
+        schema: REGISTRY_SCHEMA.to_owned(),
+        at: timestamp::format_utc(now),
+        checkout: NativePath::new(checkout.to_path_buf()),
+        client: client.to_owned(),
+        attempt: attempt.map(str::to_owned),
+        event,
+        landed: None,
+    };
+    write(path, record)
+}
+
+/// Appends a release of `checkout` that reports the commit `landed` at its
+/// head as landed. The commit is a full object name in lowercase
+/// hexadecimal digits.
+pub fn append_landed(
+    path: &Path,
+    checkout: &Path,
+    client: &str,
+    attempt: Option<&str>,
+    landed: &str,
+    now: i64,
+) -> Result<Record, String> {
+    let full = matches!(landed.len(), 40 | 64)
+        && landed
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    if !full {
+        return Err(format!("{landed} is no full commit name"));
+    }
+    let record = Record {
+        schema: REGISTRY_SCHEMA.to_owned(),
+        at: timestamp::format_utc(now),
+        checkout: NativePath::new(checkout.to_path_buf()),
+        client: client.to_owned(),
+        attempt: attempt.map(str::to_owned),
+        event: Event::Released,
+        landed: Some(landed.to_owned()),
+    };
+    write(path, record)
+}
+
+/// Writes `record` as the registry's next line, and creates the file and
+/// its directory when they do not exist.
+fn write(path: &Path, record: Record) -> Result<Record, String> {
     let failed = |err: io::Error| format!("could not write {}: {err}", path.display());
     if let Some(directory) = path.parent() {
         fs::DirBuilder::new()
@@ -102,14 +154,6 @@ pub fn append(
             .create(directory)
             .map_err(failed)?;
     }
-    let record = Record {
-        schema: REGISTRY_SCHEMA.to_owned(),
-        at: timestamp::format_utc(now),
-        checkout: NativePath::new(checkout.to_path_buf()),
-        client: client.to_owned(),
-        attempt: attempt.map(str::to_owned),
-        event,
-    };
     let mut line = serde_json::to_vec(&record).map_err(|err| failed(err.into()))?;
     line.push(b'\n');
     let mut file = OpenOptions::new()
@@ -192,6 +236,7 @@ pub fn standings(records: &[Record]) -> Standings {
                 client: record.client.clone(),
                 attempt: record.attempt.clone(),
                 at: record.at.clone(),
+                landed: record.landed.clone(),
             };
             (record.checkout.as_path().to_path_buf(), standing)
         })

@@ -42,14 +42,18 @@ fn hold(args: &HoldArgs, event: Event) -> Result<ExitCode, String> {
     let cwd =
         env::current_dir().map_err(|err| format!("could not read the working directory: {err}"))?;
     let checkout = roots::normalize(&cwd.join(&args.checkout));
-    let record = registry::append(
-        &directories()?.registry(),
-        &checkout,
-        &args.client,
-        args.attempt.as_deref(),
-        event,
-        now_seconds(),
-    )?;
+    if args.landed.is_some() && event != Event::Released {
+        return Err("only a release reports a landed commit".to_owned());
+    }
+    let path = directories()?.registry();
+    let attempt = args.attempt.as_deref();
+    let now = now_seconds();
+    let record = match &args.landed {
+        Some(landed) => {
+            registry::append_landed(&path, &checkout, &args.client, attempt, landed, now)?
+        }
+        None => registry::append(&path, &checkout, &args.client, attempt, event, now)?,
+    };
     planned(emit(Format::Json, &record, |_, _: &Record| Ok(())))
 }
 

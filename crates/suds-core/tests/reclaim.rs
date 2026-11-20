@@ -1040,3 +1040,74 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
     assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);
     assert!(!fixture.linked.exists());
 }
+
+#[test]
+fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
+    let fixture = Fixture::new();
+    // The forge squashed the branch and deleted it, so no remote holds the
+    // head's own commits.
+    git(
+        &fixture.repo,
+        &["push", "--quiet", "origin", "--delete", "feature"],
+    );
+    git(&fixture.repo, &["fetch", "--quiet", "--prune", "origin"]);
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(
+        find(&plan, &fixture.linked).kept,
+        Some(Kept::UnpushedCommits)
+    );
+
+    let head = Git::default().head(&fixture.linked).unwrap();
+    registry::append_landed(
+        &fixture.registry(),
+        &fixture.linked,
+        "bosun",
+        None,
+        &head,
+        0,
+    )
+    .unwrap();
+    let plan = fixture.plan(&nobody(), false);
+    let candidate = find(&plan, &fixture.linked);
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
+    );
+
+    // A commit after the report is work that no remote holds.
+    write(&fixture.linked.join("src/more.rs"), "pub fn g() {}");
+    git(&fixture.linked, &["add", "."]);
+    git(&fixture.linked, &["commit", "-m", "more"]);
+    let report = fixture.apply(&plan);
+    assert!(fixture.linked.join("src/more.rs").exists());
+    assert_ne!(report.status, RunStatus::Complete);
+
+    // A report of the new head lets the checkout leave.
+    let head = Git::default().head(&fixture.linked).unwrap();
+    registry::append_landed(
+        &fixture.registry(),
+        &fixture.linked,
+        "bosun",
+        None,
+        &head,
+        0,
+    )
+    .unwrap();
+    let plan = fixture.plan(&nobody(), false);
+    fixture.apply(&plan);
+    assert!(!fixture.linked.exists());
+    assert!(
+        registry::append_landed(
+            &fixture.registry(),
+            &fixture.linked,
+            "bosun",
+            None,
+            "abc",
+            0
+        )
+        .is_err()
+    );
+}

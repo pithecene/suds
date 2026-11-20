@@ -74,6 +74,12 @@ impl Git {
         Ok(status.is_empty())
     }
 
+    /// The full name of the commit at the checkout's head.
+    pub fn head(&self, checkout: &Path) -> Result<String, String> {
+        self.run(checkout, &["rev-parse", "--verify", "HEAD"], None)
+            .map(|name| name.trim().to_owned())
+    }
+
     /// The number of commits of the checkout's head that no remote-tracking
     /// branch holds.
     pub fn unpushed(&self, checkout: &Path) -> Result<u64, String> {

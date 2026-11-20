@@ -412,8 +412,16 @@ impl Judge<'_> {
             .or_else(|| self.in_use(path, &mut evidence))
             .or_else(|| self.recent(newest, &mut evidence))
             .or_else(|| self.fetched(repositories, &mut evidence))
-            .or_else(|| unsaved_work(self.git, path, &mut evidence));
+            .or_else(|| unsaved_work(self.git, path, self.landed(path), &mut evidence));
         (kept, evidence)
+    }
+
+    /// The head that a client's release of `checkout` reported as landed.
+    fn landed(&self, checkout: &Path) -> Option<&str> {
+        let standing = self.registry.as_ref().ok()?.get(checkout)?;
+        (standing.event == registry::Event::Released)
+            .then_some(standing.landed.as_deref())
+            .flatten()
     }
 
     /// Keeps a candidate when a process works in its checkout, or when Suds
@@ -593,7 +601,12 @@ fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
 
 /// Keeps a checkout that holds work that no remote holds, by Git's account.
 /// A failed query keeps the checkout too.
-fn unsaved_work(git: &Git, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
+fn unsaved_work(
+    git: &Git,
+    checkout: &Path,
+    landed: Option<&str>,
+    evidence: &mut Vec<String>,
+) -> Option<Kept> {
     match git.is_clean(checkout) {
         Ok(true) => evidence.push("Git reports no changed, staged, or untracked file".to_owned()),
         Ok(false) => {
@@ -604,6 +617,17 @@ fn unsaved_work(git: &Git, checkout: &Path, evidence: &mut Vec<String>) -> Optio
             evidence.push(reason);
             return Some(Kept::Unverified);
         }
+    }
+    // A client that asked the forge may report the head as landed, as after
+    // a squash, where no remote holds the head's own commits. The report
+    // holds only while the head is still that commit.
+    if let Some(landed) = landed
+        && git.head(checkout).is_ok_and(|head| head == landed)
+    {
+        evidence.push(format!(
+            "its client reported the head {landed} as landed on a remote"
+        ));
+        return None;
     }
     match git.unpushed(checkout) {
         Ok(0) => {

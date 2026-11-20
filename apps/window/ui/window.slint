@@ -556,6 +556,7 @@ export component Window inherits Window {
                         Rectangle { height: 1px; background: Tones.hairline; }
                         outline := ListView {
                             vertical-stretch: 3;
+                            min-height: 114px;
                             accessible-role: list;
                             accessible-label: "Projects and their checkouts";
                             content-y <=> root.list-y;
@@ -627,7 +628,9 @@ export component Window inherits Window {
                     spacing: 12px;
 
                     Card {
-                        vertical-stretch: 0;
+                        // The pane grows only for a list of build directories, and then shares the column.
+                        vertical-stretch: root.detail-builds.length > 0 ? 1 : 0;
+                        clip: true;
                         accessible-role: groupbox;
                         accessible-label: root.has-detail ? root.detail-kind + " " + root.detail-name : "Nothing selected";
                         VerticalLayout {
@@ -641,19 +644,36 @@ export component Window inherits Window {
                                 Caption { text: fact.label; width: 84px; }
                                 Text { text: fact.value; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; }
                             }
-                            for build in root.detail-builds: VerticalLayout {
-                                spacing: 2px;
-                                HorizontalLayout {
-                                    Text { text: build.ecosystem; font-size: 12px; horizontal-stretch: 1; }
-                                    Text { text: build.size; font-size: 12px; }
+                            // A checkout may hold a hundred build directories, so their list scrolls
+                            // inside the pane and never sets the window's height.
+                            if root.detail-builds.length > 0: Heading { text: "BUILD DIRECTORIES"; }
+                            if root.detail-builds.length > 0: ScrollView {
+                                vertical-stretch: 1;
+                                min-height: 60px;
+                                accessible-role: list;
+                                accessible-label: "Build directories, largest first";
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    padding-right: 12px;
+                                    alignment: start;
+                                    for build in root.detail-builds: VerticalLayout {
+                                        spacing: 2px;
+                                        accessible-role: list-item;
+                                        accessible-label: build.ecosystem + ", " + build.size + ", " + build.path;
+                                        HorizontalLayout {
+                                            Text { text: build.ecosystem; font-size: 12px; horizontal-stretch: 1; }
+                                            Text { text: build.size; font-size: 12px; }
+                                        }
+                                        Caption { text: build.path; }
+                                    }
                                 }
-                                Caption { text: build.path; }
                             }
                         }
                     }
 
                     Card {
                         vertical-stretch: 1;
+                        min-height: 140px;
                         clip: true;
                         accessible-role: groupbox;
                         accessible-label: "Shared stores";

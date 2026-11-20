@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use suds_core::development::{DevelopmentReport, Environment};
+use suds_core::development::{
+    Checkout, CheckoutKind, DevelopmentScan, Ecosystem, Environment, Store, StoreClass, StoreStatus,
+};
+use suds_core::model::Measure;
 use suds_core::registry::{Event, Standing, Standings};
 use suds_core::state::Directories;
 use suds_core::stores::Budgets;
@@ -77,56 +80,94 @@ fn a_reading_shows_each_checkout_with_its_build_state() {
     assert!(!Directories::of(&environment).unwrap().pressure().exists());
 }
 
-fn measure(bytes: u64, modified: &str) -> serde_json::Value {
-    serde_json::json!({
-        "logical_bytes": bytes, "allocated_bytes": bytes, "files": 1, "directories": 1,
-        "symlinks": 0, "others": 0, "oldest_modified": modified, "newest_modified": modified,
-    })
+#[test]
+fn a_reading_states_a_registry_that_it_could_not_read() {
+    let (_temp, environment, root) = home();
+    configure(&environment, &root);
+    // A directory stands where the registry's file belongs, so the read fails.
+    fs::create_dir_all(Directories::of(&environment).unwrap().registry()).unwrap();
+
+    let Observation::Measured(view) = observe(&environment, 0).unwrap() else {
+        panic!("the settings name a root");
+    };
+    assert!(view.registry_error.is_some());
 }
 
-/// A report of three checkouts and two stores, as `suds inspect --profile development` writes one.
-fn report() -> DevelopmentReport {
-    let checkout = |path: &str, kind: &str, bytes: u64, modified: &str| {
-        serde_json::json!({
-            "path": path, "kind": kind, "repository": null,
-            "own": measure(bytes, modified), "build_state": [],
-        })
-    };
-    let store = |id: &str, bytes: u64, status: &str| {
-        let mut store = measure(bytes, "2026-11-01T00:00:00Z");
-        let fields = serde_json::json!({
-            "id": id, "class": "shared_store", "ecosystem": "go", "path": format!("/stores/{id}"),
-            "status": status, "owner": null,
-        });
-        store
-            .as_object_mut()
-            .unwrap()
-            .extend(fields.as_object().unwrap().clone());
-        store
-    };
-    let total = |count: u64, bytes: u64| serde_json::json!({ "count": count, "allocated_bytes": bytes, "logical_bytes": bytes });
-    serde_json::from_value(serde_json::json!({
-        "schema": "suds.development/v1",
-        "platform": { "os": "linux", "arch": "x86_64" },
-        "observed_at": "2026-11-20T20:16:42Z",
-        "status": "complete",
-        "totals": {
-            "main_checkouts": total(1, 3 * GIB), "linked_checkouts": total(2, GIB),
-            "build_state": total(0, 0), "shared_stores": total(2, 12 * GIB),
-            "toolchains": total(0, 0), "machines": total(0, 0),
-        },
-        "workspaces": [],
-        "checkouts": [
-            checkout("/work/Zeta", "main", 3 * GIB, "2026-11-01T00:00:00Z"),
-            checkout("/work/zeta/.claude/worktrees/alpha", "linked", GIB / 2, "2026-11-20T00:00:00Z"),
-            checkout("/work/other/beta", "linked", GIB / 2, "2026-11-10T00:00:00Z"),
+fn measure(bytes: u64, modified: &str) -> Measure {
+    Measure {
+        logical_bytes: bytes,
+        allocated_bytes: bytes,
+        files: 1,
+        directories: 1,
+        newest_modified: Some(modified.to_owned()),
+        ..Measure::default()
+    }
+}
+
+fn checkout(path: impl Into<PathBuf>, kind: CheckoutKind, bytes: u64, modified: &str) -> Checkout {
+    Checkout {
+        path: path.into(),
+        kind,
+        repository: None,
+        own: measure(bytes, modified),
+        build_state: Vec::new(),
+    }
+}
+
+fn store(id: &str, bytes: u64) -> Store {
+    Store {
+        id: id.to_owned(),
+        class: StoreClass::SharedStore,
+        ecosystem: Ecosystem::Go,
+        path: PathBuf::from("/stores").join(id),
+        status: StoreStatus::Present,
+        measure: measure(bytes, "2026-11-01T00:00:00Z"),
+        owner: None,
+    }
+}
+
+/// A scan of three checkouts and two stores.
+fn scan() -> DevelopmentScan {
+    DevelopmentScan {
+        workspaces: Vec::new(),
+        checkouts: vec![
+            checkout(
+                "/work/Zeta",
+                CheckoutKind::Main,
+                3 * GIB,
+                "2026-11-01T00:00:00Z",
+            ),
+            checkout(
+                "/work/zeta/.claude/worktrees/alpha",
+                CheckoutKind::Linked,
+                GIB / 2,
+                "2026-11-20T00:00:00Z",
+            ),
+            checkout(
+                "/work/other/beta",
+                CheckoutKind::Linked,
+                GIB / 2,
+                "2026-11-10T00:00:00Z",
+            ),
         ],
-        "stores": [store("go.module-cache", 11 * GIB, "present"), store("go.build-cache", GIB, "present")],
-        "skipped_mount_count": 0,
-        "error_count": 0,
-        "errors": [],
-    }))
-    .unwrap()
+        stores: vec![
+            store("go.module-cache", 11 * GIB),
+            store("go.build-cache", GIB),
+        ],
+        skipped_mount_count: 0,
+        error_count: 0,
+        errors: Vec::new(),
+    }
+}
+
+fn released(client: &str, landed: Option<&str>) -> Standing {
+    Standing {
+        event: Event::Released,
+        client: client.to_owned(),
+        attempt: None,
+        at: "2026-11-19T00:00:00Z".to_owned(),
+        landed: landed.map(str::to_owned),
+    }
 }
 
 #[test]
@@ -134,17 +175,12 @@ fn the_view_orders_by_size_and_marks_each_hold_and_budget() {
     let mut standings = Standings::new();
     standings.insert(
         PathBuf::from("/work/other/beta"),
-        Standing {
-            event: Event::Released,
-            client: "bosun".into(),
-            attempt: None,
-            at: "2026-11-19T00:00:00Z".into(),
-            landed: Some("abc123".into()),
-        },
+        released("bosun", Some("abc123")),
     );
-    let view = workstation(&report(), None, &standings, &Budgets::default());
+    let view = workstation(&scan(), 0, None, &Ok(standings), &Budgets::default());
 
     assert_eq!(view.pressure, None);
+    assert_eq!(view.registry_error, None);
     let names: Vec<&str> = view.checkouts.iter().map(|c| c.name.as_str()).collect();
     // Two checkouts of one size keep the order of their paths.
     assert_eq!(names, ["Zeta", "beta", "alpha"]);
@@ -167,8 +203,64 @@ fn the_view_orders_by_size_and_marks_each_hold_and_budget() {
 }
 
 #[test]
+fn an_unreadable_registry_shows_its_reason_and_no_hold() {
+    let view = workstation(
+        &scan(),
+        0,
+        None,
+        &Err("could not read the registry: permission denied".to_owned()),
+        &Budgets::default(),
+    );
+    assert_eq!(
+        view.registry_error.as_deref(),
+        Some("could not read the registry: permission denied")
+    );
+    assert!(
+        view.checkouts
+            .iter()
+            .all(|checkout| checkout.hold.is_none())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hold_follows_the_native_path_and_never_its_displayed_text() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    // The two names differ in one byte that no text holds, so both display alike.
+    let native = |byte: u8| {
+        PathBuf::from(OsString::from_vec(
+            [b"/work/app-".as_slice(), &[byte]].concat(),
+        ))
+    };
+    let mut scan = scan();
+    scan.checkouts = vec![
+        checkout(
+            native(0xfe),
+            CheckoutKind::Main,
+            2 * GIB,
+            "2026-11-01T00:00:00Z",
+        ),
+        checkout(
+            native(0xff),
+            CheckoutKind::Main,
+            GIB,
+            "2026-11-01T00:00:00Z",
+        ),
+    ];
+    let mut standings = Standings::new();
+    standings.insert(native(0xff), released("bosun", None));
+    let view = workstation(&scan, 0, None, &Ok(standings), &Budgets::default());
+
+    assert_eq!(view.checkouts[0].path, view.checkouts[1].path);
+    assert_eq!(view.checkouts[0].hold, None);
+    assert_eq!(view.checkouts[1].hold.as_ref().unwrap().client, "bosun");
+}
+
+#[test]
 fn an_arrangement_filters_by_path_and_sorts() {
-    let view = workstation(&report(), None, &Standings::new(), &Budgets::default());
+    let view = workstation(&scan(), 0, None, &Ok(Standings::new()), &Budgets::default());
     let names = |query: &str, sort: Sort| -> Vec<&str> {
         arrange(&view.checkouts, query, sort)
             .into_iter()

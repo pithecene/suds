@@ -302,10 +302,12 @@ pub fn tile(tile: &Tile, checkout: &Checkout, project: &Project) -> TileItem {
     }
 }
 
+/// A checkout's build directories for the detail pane, largest first.
 pub fn builds(checkout: &Checkout) -> Vec<BuildItem> {
-    checkout
-        .build_state
-        .iter()
+    let mut builds: Vec<_> = checkout.build_state.iter().collect();
+    builds.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
+    builds
+        .into_iter()
         .map(|build| BuildItem {
             // The pane shows a build directory's path beneath its checkout.
             path: build
@@ -473,6 +475,17 @@ mod tests {
         let build = &builds(&checkout)[0];
         assert_eq!(build.path, "target");
         assert_eq!(build.size, "2.0 KiB");
+
+        // The pane lists the largest build directory first.
+        let mut many = fixture();
+        many.build_state.push(BuildState {
+            path: "/work/app/node_modules".into(),
+            ecosystem: "node",
+            bytes: 4096,
+            newest_modified: "2026-11-20T00:00:00Z".into(),
+        });
+        let paths: Vec<String> = builds(&many).iter().map(|b| b.path.to_string()).collect();
+        assert_eq!(paths, ["node_modules", "target"]);
     }
 
     #[test]

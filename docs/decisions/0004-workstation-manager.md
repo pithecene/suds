@@ -16,7 +16,7 @@ command line, for a developer or an ordinary user who has no other
 Pithecene program. After an analysis, that person should reach a well-kept
 workstation without choosing each command, and should keep every control.
 
-Bosun also uses Suds, as a program that operates for agents. Bosun knows
+Bosun also uses Suds, as a program that operates for agents. It knows
 which session, track, and pull request stands behind a checkout, and Suds
 knows none of the three (decision 0002, item 2).
 

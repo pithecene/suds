@@ -1,0 +1,419 @@
+// The Suds window. Its first view shows one workstation's development
+// storage: the pressure, the classes, each checkout, and each store.
+import { AboutSlint, Button, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
+
+export struct ClassItem { label: string, detail: string, share: float, tint: color }
+export struct CheckoutItem { name: string, parent: string, kind: string, total: string, build: string, modified: string, share: float, hold: string }
+export struct BuildItem { path: string, ecosystem: string, size: string, modified: string }
+export struct FactItem { label: string, value: string }
+export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
+
+global Tones {
+    out property <color> normal: #2f9e6b;
+    out property <color> soft: #d98a00;
+    out property <color> hard: #d6453d;
+    out property <brush> muted: Palette.foreground.transparentize(0.42);
+    out property <brush> hairline: Palette.foreground.transparentize(0.86);
+    out property <brush> track: Palette.foreground.transparentize(0.88);
+    out property <brush> hover: Palette.foreground.transparentize(0.94);
+}
+
+component Caption inherits Text {
+    color: Tones.muted;
+    font-size: 11px;
+    overflow: elide;
+}
+
+component Heading inherits Text {
+    color: Tones.muted;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+
+// A horizontal bar that fills a share of its track.
+component Meter inherits Rectangle {
+    in property <float> share;
+    in property <brush> fill: Palette.accent-background;
+    height: 6px;
+    border-radius: self.height / 2;
+    background: Tones.track;
+    accessible-role: none;
+    Rectangle {
+        x: 0;
+        width: parent.width * max(0, min(1, root.share));
+        border-radius: parent.border-radius;
+        background: root.fill;
+    }
+}
+
+component Card inherits Rectangle {
+    background: Palette.control-background;
+    border-width: 1px;
+    border-color: Tones.hairline;
+    border-radius: 8px;
+}
+
+export component Window inherits Window {
+    // The reading in progress, and the reason that the last one showed nothing.
+    in property <bool> loading;
+    in property <string> notice;
+    in property <bool> measured;
+    in property <string> observed;
+
+    in property <string> usage;
+    in property <string> ceiling;
+    in property <string> level;
+    in property <int> level-rank;
+    in property <float> pressure-share;
+    in property <string> pressure-facts;
+
+    in property <[ClassItem]> classes;
+    in property <[CheckoutItem]> checkouts;
+    in property <string> checkout-count;
+    in property <[StoreItem]> stores;
+
+    in property <bool> has-detail;
+    in property <string> detail-name;
+    in property <string> detail-path;
+    in property <[FactItem]> detail-facts;
+    in property <[BuildItem]> detail-builds;
+
+    in-out property <string> query;
+    in-out property <int> sort: 0;
+    in-out property <int> selected: -1;
+
+    callback refresh();
+    callback arrange(query: string, sort: int);
+    callback select(row: int);
+    callback quit();
+
+    // Each request for the filter's focus. The filter stands inside a condition, so it watches this count.
+    property <int> search-requests;
+    property <color> level-tint: level-rank == 2 ? Tones.hard : level-rank == 1 ? Tones.soft : Tones.normal;
+
+    title: "Suds";
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 880px;
+    min-height: 560px;
+    background: Palette.background;
+    default-font-size: 13px;
+
+    MenuBar {
+        Menu {
+            title: "Suds";
+            MenuItem {
+                title: "About Suds";
+                activated => { about.show(); }
+            }
+            MenuItem {
+                title: "Measure Again";
+                activated => { root.refresh(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Quit";
+                activated => { root.quit(); }
+            }
+        }
+    }
+
+    about := PopupWindow {
+        x: (root.width - 360px) / 2;
+        y: (root.height - 300px) / 2;
+        width: 360px;
+        height: 300px;
+        Card {
+            background: Palette.background;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text { text: "Suds"; font-size: 18px; font-weight: 600; horizontal-alignment: center; }
+                Caption { text: "Bounded development storage for one workstation."; horizontal-alignment: center; }
+                AboutSlint { }
+            }
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "f") {
+                root.search-requests += 1;
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "r") {
+                root.refresh();
+                return accept;
+            }
+            if (event.text == Key.DownArrow && root.selected < root.checkouts.length - 1) {
+                root.select(root.selected + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow && root.selected > 0) {
+                root.select(root.selected - 1);
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+
+            HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    text: "Workstation";
+                    font-size: 20px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Caption {
+                    horizontal-stretch: 1;
+                    text: root.loading ? "Measuring the development storage…" : root.measured ? "Measured " + root.observed : "";
+                    vertical-alignment: center;
+                }
+                if root.loading: Spinner { width: 20px; height: 20px; indeterminate: true; }
+                Button {
+                    text: "Measure Again";
+                    enabled: !root.loading;
+                    accessible-description: "Measures the development storage again. Control and R does the same.";
+                    clicked => { root.refresh(); }
+                }
+            }
+
+            if root.notice != "": Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 16px;
+                    Text { text: root.notice; wrap: word-wrap; }
+                }
+            }
+
+            if root.measured: HorizontalLayout {
+                spacing: 16px;
+                vertical-stretch: 0;
+                Card {
+                    horizontal-stretch: 1;
+                    accessible-role: groupbox;
+                    accessible-label: "Development storage, " + root.usage + " of " + root.ceiling + ", " + root.level;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+                        HorizontalLayout {
+                            Heading { text: "DEVELOPMENT STORAGE"; vertical-alignment: center; horizontal-stretch: 1; }
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                width: pill.preferred-width + 20px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: root.level-tint.with-alpha(0.16);
+                                pill := Text { text: root.level; color: root.level-tint; font-size: 11px; font-weight: 600; }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            Text { text: root.usage; font-size: 30px; font-weight: 600; }
+                            VerticalLayout {
+                                alignment: end;
+                                padding-bottom: 5px;
+                                Text { text: "of " + root.ceiling; color: Tones.muted; }
+                            }
+                        }
+                        Meter { height: 10px; share: root.pressure-share; fill: root.level-tint; }
+                        Caption { text: root.pressure-facts; }
+                    }
+                }
+                Card {
+                    horizontal-stretch: 1;
+                    accessible-role: groupbox;
+                    accessible-label: "Storage by class";
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+                        Heading { text: "BY CLASS"; }
+                        HorizontalLayout {
+                            height: 14px;
+                            spacing: 2px;
+                            for class in root.classes: Rectangle {
+                                horizontal-stretch: class.share;
+                                min-width: 0px;
+                                visible: class.share > 0;
+                                background: class.tint;
+                                border-radius: 3px;
+                            }
+                        }
+                        // The classes stand in two columns, so the card stays as tall as the pressure's.
+                        HorizontalLayout {
+                            spacing: 24px;
+                            for column in 2: VerticalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                for class[position] in root.classes: HorizontalLayout {
+                                    visible: Math.mod(position, 2) == column;
+                                    height: self.visible ? 18px : 0px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: class.tint; }
+                                    }
+                                    Text { text: class.label; font-size: 12px; vertical-alignment: center; }
+                                    Caption { text: class.detail; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.measured: HorizontalLayout {
+                spacing: 16px;
+                vertical-stretch: 1;
+
+                Card {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    VerticalLayout {
+                        HorizontalLayout {
+                            padding: 10px;
+                            padding-left: 16px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            Heading { text: "CHECKOUTS"; vertical-alignment: center; }
+                            Caption { text: root.checkout-count; vertical-alignment: center; horizontal-stretch: 1; }
+                            search := LineEdit {
+                                width: 240px;
+                                placeholder-text: "Filter by path";
+                                text <=> root.query;
+                                accessible-label: "Filter the checkouts by path";
+                                property <int> requests: root.search-requests;
+                                changed requests => { self.focus(); }
+                                edited(text) => { root.arrange(text, root.sort); }
+                            }
+                            ComboBox {
+                                width: 150px;
+                                model: ["By size", "By name", "By last change", "By build state"];
+                                current-index <=> root.sort;
+                                accessible-label: "Order of the checkouts";
+                                selected => { root.arrange(root.query, self.current-index); }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Tones.hairline; }
+                        ListView {
+                            accessible-role: list;
+                            accessible-label: "Checkouts";
+                            for row[position] in root.checkouts: Rectangle {
+                                height: 44px;
+                                accessible-role: list-item;
+                                accessible-label: row.name + ", " + row.kind + ", " + row.total + ", " + row.build;
+                                accessible-item-selectable: true;
+                                accessible-item-selected: position == root.selected;
+                                accessible-item-index: position;
+                                background: position == root.selected ? Palette.selection-background : area.has-hover ? Tones.hover : transparent;
+                                area := TouchArea {
+                                    clicked => {
+                                        root.select(position);
+                                        keys.focus();
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 14px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text { text: row.name; overflow: elide; color: position == root.selected ? Palette.selection-foreground : Palette.foreground; }
+                                        Caption { text: row.parent; }
+                                    }
+                                    Caption { width: 72px; text: row.hold; vertical-alignment: center; horizontal-alignment: right; }
+                                    Caption { width: 44px; text: row.kind; vertical-alignment: center; }
+                                    VerticalLayout {
+                                        width: 150px;
+                                        alignment: center;
+                                        Meter { share: row.share; }
+                                    }
+                                    Text { width: 78px; text: row.total; horizontal-alignment: right; vertical-alignment: center; }
+                                    Caption { width: 104px; text: row.build; horizontal-alignment: right; vertical-alignment: center; }
+                                    Caption { width: 74px; text: row.modified; horizontal-alignment: right; vertical-alignment: center; }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: Tones.hairline; }
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    width: 340px;
+                    spacing: 16px;
+
+                    Card {
+                        vertical-stretch: 0;
+                        accessible-role: groupbox;
+                        accessible-label: root.has-detail ? "Checkout " + root.detail-name : "No checkout selected";
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+                            Heading { text: "CHECKOUT"; }
+                            if !root.has-detail: Caption { text: "Select a checkout to read its build state and its hold."; wrap: word-wrap; }
+                            if root.has-detail: Text { text: root.detail-name; font-size: 15px; font-weight: 600; overflow: elide; }
+                            if root.has-detail: Caption { text: root.detail-path; wrap: char-wrap; overflow: clip; }
+                            for fact in root.detail-facts: HorizontalLayout {
+                                Caption { text: fact.label; width: 96px; }
+                                Text { text: fact.value; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
+                            }
+                            for build in root.detail-builds: VerticalLayout {
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    Text { text: build.ecosystem; font-size: 12px; horizontal-stretch: 1; }
+                                    Text { text: build.size; font-size: 12px; }
+                                }
+                                Caption { text: build.path; }
+                            }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+                        clip: true;
+                        accessible-role: groupbox;
+                        accessible-label: "Shared stores";
+                        VerticalLayout {
+                            padding-top: 16px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                Heading { text: "SHARED STORES"; }
+                            }
+                            ScrollView {
+                                VerticalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    alignment: start;
+                                    for store in root.stores: VerticalLayout {
+                                        spacing: 4px;
+                                        accessible-role: list-item;
+                                        accessible-label: store.id + ", " + store.size + ", " + store.budget;
+                                        HorizontalLayout {
+                                            Text { text: store.id; font-size: 12px; horizontal-stretch: 1; overflow: elide; }
+                                            Text { text: store.size; font-size: 12px; color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground; }
+                                        }
+                                        Meter { share: store.share; fill: store.over ? Tones.hard : Tones.normal; }
+                                        Caption { text: store.budget; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !root.measured && root.notice == "": Rectangle { vertical-stretch: 1; }
+        }
+    }
+}

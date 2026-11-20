@@ -9,6 +9,17 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A native window shows the workstation's development storage**.
+
+  The program `suds-window` measures the settings' roots. It shows the
+  pressure against the ceiling and each class of development storage. It
+  lists each checkout with its build state and its client's hold, and each
+  shared store against its budget. A filter and four orders arrange the
+  checkouts, and a pane shows the selected one. The window runs on Linux
+  and changes nothing on disk.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added

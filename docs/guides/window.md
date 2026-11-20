@@ -38,10 +38,13 @@ them. A workstation without a root shows the settings file's path and no
 figure.
 
 The command `task window:install` installs the window for one user: the
-binary, the desktop entry `suds.desktop`, and the icon. A desktop names the
-window and shows its icon through that entry, which the window claims by
-the identifier `suds`. The window draws no menu bar on Linux. Its first
-card carries the two buttons, to measure again and to show About.
+binary, the desktop entry `suds.desktop`, and the icon. The entry and the
+icon go beneath `XDG_DATA_HOME`, or beneath `~/.local/share` without one,
+and the entry names the binary by its full path. A desktop names the window
+and shows its icon through that entry, which the window claims by the
+identifier `suds`. The window draws no menu bar on Linux. Its first card
+carries the two buttons, to measure again and to show About. The Tab key
+reaches each button, and Return or Space presses it.
 
 The window writes nothing. It records no pressure reading, opens no
 journal, and removes no file.

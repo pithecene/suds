@@ -6178,6 +6178,7 @@ dependencies = [
  "slint-build",
  "suds-core",
  "suds-view",
+ "tempfile",
 ]
 
 [[package]]

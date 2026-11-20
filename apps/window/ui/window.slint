@@ -104,6 +104,20 @@ component IconButton inherits Rectangle {
     accessible-label: root.label;
     accessible-enabled: root.enabled;
     accessible-action-default => { root.clicked(); }
+    border-width: scope.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    forward-focus: scope;
+    // The Tab key reaches the button, and Return or Space presses it.
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
     area := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }

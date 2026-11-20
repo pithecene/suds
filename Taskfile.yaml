@@ -46,9 +46,7 @@ tasks:
     desc: Install the native window, its desktop entry, and its icon for this user
     cmds:
       - cargo build --locked --release -p suds-window
-      - install -D -m 755 target/release/suds-window "{{.HOME}}/.local/bin/suds-window"
-      - install -D -m 644 apps/window/assets/suds.desktop "{{.HOME}}/.local/share/applications/suds.desktop"
-      - install -D -m 644 apps/window/assets/suds.svg "{{.HOME}}/.local/share/icons/hicolor/scalable/apps/suds.svg"
+      - sh apps/window/install.sh target/release/suds-window
 
   window:check:
     desc: Build, test, and lint the native window and its view model

@@ -37,11 +37,18 @@ measures the roots that `settings.json` names, as `suds maintain` measures
 them. A workstation without a root shows the settings file's path and no
 figure.
 
+The command `task window:install` installs the window for one user: the
+binary, the desktop entry `suds.desktop`, and the icon. A desktop names the
+window and shows its icon through that entry, which the window claims by
+the identifier `suds`. The window draws no menu bar on Linux. Its first
+card carries the two buttons, to measure again and to show About.
+
 The window writes nothing. It records no pressure reading, opens no
 journal, and removes no file.
 
 | Key | Act |
 | :--- | :--- |
+| Control and Q | Closes the window |
 | Control and F | Moves to the filter |
 | Control and R | Measures again |
 | Up and Down | Move through the outline |

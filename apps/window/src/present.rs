@@ -24,6 +24,14 @@ pub fn level(level: Level) -> (&'static str, i32) {
     }
 }
 
+/// The time of day of a reading, from its time in RFC 3339 at UTC.
+pub fn observed(at: &str) -> String {
+    match at.get(11..16) {
+        Some(time) => format!("{time} UTC"),
+        None => at.to_owned(),
+    }
+}
+
 /// The line beneath the pressure's meter.
 pub fn pressure_facts(card: &PressureCard) -> String {
     // The meter's share stops at the whole track, and the text states the usage beyond the ceiling.
@@ -339,6 +347,12 @@ mod tests {
     use suds_view::{BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, projects};
 
     use super::{builds, checkout_row, facts, notice, pressure_facts, project_row, short, store};
+
+    #[test]
+    fn a_reading_states_its_time_of_day() {
+        assert_eq!(super::observed("2026-11-20T23:04:46Z"), "23:04 UTC");
+        assert_eq!(super::observed("unknown"), "unknown");
+    }
 
     #[test]
     fn a_path_beneath_the_home_directory_opens_with_a_tilde() {

@@ -283,7 +283,7 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
         Ok(Observation::Measured(view)) => *view,
     };
     window.set_notice(present::notice(view.error_count, view.registry_error.as_deref()).into());
-    window.set_observed(view.observed_at.as_str().into());
+    window.set_observed(present::observed(&view.observed_at).into());
     if let Some(card) = &view.pressure {
         let (level, rank) = present::level(card.level);
         window.set_usage(suds_view::bytes(card.usage_bytes).into());
@@ -401,6 +401,9 @@ fn pick_project(window: &Window, state: &mut State, frame: i32) {
 
 fn main() -> Result<(), slint::PlatformError> {
     let window = Window::new()?;
+    // A desktop finds the window's name and icon in the entry `suds.desktop`, by this identifier.
+    // The window takes it when it first shows.
+    slint::set_xdg_app_id("suds")?;
     let home = Environment::of_process().home;
     let state = Rc::new(RefCell::new(State {
         home: home.map(|home| home.to_string_lossy().into_owned()),

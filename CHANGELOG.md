@@ -21,7 +21,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Each checkout states its build state and the tool that uses it. A filter
   and four orders arrange the projects, and a pane shows the selected
   project or checkout. Each shared store stands against its budget. The
-  window runs on Linux and changes nothing on disk.
+  window runs on Linux and changes nothing on disk. The task
+  `window:install` installs it with a desktop entry and an icon.
 
 ## [0.1.3] - 2026-11-20
 

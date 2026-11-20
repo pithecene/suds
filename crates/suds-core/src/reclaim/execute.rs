@@ -137,6 +137,9 @@ pub fn apply(
             git,
             idle_since: idle_since(now, plan.idle_seconds),
             tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
+            // The standing approval covers derived state alone, and a
+            // landed head still holds commits that no remote holds.
+            admit_landed: authority == Authority::Person,
         };
         let outcome = match check(journal.directory(), candidate, &judge) {
             Err(reason) => Err(reason),

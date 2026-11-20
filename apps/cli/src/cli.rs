@@ -93,6 +93,11 @@ pub struct HoldArgs {
     /// The client's own name for the work, such as a workflow's identifier.
     #[arg(long, value_name = "ID")]
     pub attempt: Option<String>,
+
+    /// With `release`, the commit at the checkout's head whose change a
+    /// remote holds, though perhaps by another commit, as after a squash.
+    #[arg(long, value_name = "COMMIT")]
+    pub landed: Option<String>,
 }
 
 #[derive(Debug, Args)]

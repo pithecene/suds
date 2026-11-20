@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A release reports a landed head**: `suds release --landed COMMIT` records that a remote holds the change at the checkout's head, though by another commit. A forge that squashes a branch and deletes it left such a checkout in place for good, because no remote held its commits. A person's own `suds reclaim --apply` now removes it while its head is still that commit and its tree is clean. A scheduled run reclaims its build state and leaves the checkout.
+
 ## [0.1.0] - 2026-11-20
 
 ### Added

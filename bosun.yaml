@@ -17,3 +17,8 @@ branches:
   pattern: "{user}/{type}/{scope}/{slug}"
   worktrees: .claude/worktrees
   stack: routed
+# Bosun is a client of Suds in this repository too (records/contracts/CONFIG.md §21). A task waits while free disk
+# lies below the floor or while Suds reads hard pressure.
+storage:
+  min_free: 20G
+  hard: wait

@@ -258,6 +258,20 @@ impl SharedScan {
 }
 
 /// The state that persists across one root's traversal.
+/// One entry's metadata, its kind, and whether a mount point stands there.
+struct Probed {
+    meta: fs::Metadata,
+    kind: EntryKind,
+    mount: bool,
+}
+
+impl Probed {
+    /// Whether the entry is a directory of the scanned filesystem.
+    fn is_directory_here(&self) -> bool {
+        self.kind == EntryKind::Directory && !self.mount
+    }
+}
+
 struct Walker {
     /// The root's device, which bounds the traversal to one filesystem.
     device: u64,
@@ -310,7 +324,8 @@ impl Walker {
         // A bounded measurement starts where its caller chose, so its start
         // may be a mount point. A mount point beneath the start still ends
         // the traversal there.
-        let revision = self.visit_entry(start, tally, boundary.is_some())?;
+        let probed = self.probe(start, boundary.is_some())?;
+        let revision = self.count(start, &probed, tally)?;
         if revision.kind == EntryKind::Directory {
             // The listings arrive sorted, and the traversal pushes subdirectories
             // onto the stack in reverse order, so the traversal order, and with
@@ -334,14 +349,19 @@ impl Walker {
                         break;
                     }
                     let path = dir.join(name);
+                    // One probe serves the boundary and the count, so each
+                    // entry costs one metadata call.
+                    let Some(probed) = self.probe(&path, false) else {
+                        continue;
+                    };
                     if let Some(boundary) = boundary.as_deref_mut()
-                        && self.is_directory_here(&path)
+                        && probed.is_directory_here()
                         && boundary(&path)
                     {
                         set_aside.push(path);
                         continue;
                     }
-                    let visited = self.visit(&path, tally);
+                    let visited = self.count(&path, &probed, tally);
                     if visited.is_some_and(|revision| revision.kind == EntryKind::Directory) {
                         subdirs.push(path);
                     }
@@ -352,27 +372,10 @@ impl Walker {
         Some(revision)
     }
 
-    /// Whether `path` is a directory of the scanned filesystem and no mount
-    /// point. The visit that follows counts a mount point as skipped, so no
-    /// boundary sets one aside.
-    fn is_directory_here(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.dev() == self.device)
-            && matches!(is_mount_root(path), Ok(false))
-    }
-
-    /// Measures one entry without descending into it.
-    fn visit(&mut self, path: &Path, tally: &mut Tally) -> Option<EntryRevision> {
-        self.visit_entry(path, tally, false)
-    }
-
-    /// Measures one entry as `visit` does. With `chosen`, the entry is the
-    /// start that a caller named, which may be a mount point.
-    fn visit_entry(
-        &mut self,
-        path: &Path,
-        tally: &mut Tally,
-        chosen: bool,
-    ) -> Option<EntryRevision> {
+    /// Reads the metadata of one entry and decides whether a mount point
+    /// stands there. With `chosen`, the entry is the start that a caller
+    /// named, which may be a mount point.
+    fn probe(&mut self, path: &Path, chosen: bool) -> Option<Probed> {
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -393,7 +396,14 @@ impl Walker {
                 }
             }
         }
-        if mount {
+        Some(Probed { meta, kind, mount })
+    }
+
+    /// Measures one probed entry without descending into it. A mount point
+    /// counts as skipped, so no boundary sets one aside.
+    fn count(&mut self, path: &Path, probed: &Probed, tally: &mut Tally) -> Option<EntryRevision> {
+        let Probed { meta, kind, mount } = probed;
+        if *mount {
             self.mount_count = self.mount_count.saturating_add(1);
             if self.mounts.len() < SAMPLE_LIMIT {
                 self.mounts.push(path.to_path_buf());
@@ -402,11 +412,11 @@ impl Walker {
         }
         // A regular file with several links stores its data once, so only the
         // first link that the traversal reaches under the root contributes bytes.
-        let counts_storage = kind != EntryKind::File
+        let counts_storage = *kind != EntryKind::File
             || meta.nlink() <= 1
             || self.linked.insert((meta.dev(), meta.ino()));
-        tally.count(kind, &meta, counts_storage);
-        Some(EntryRevision::from_metadata(&meta))
+        tally.count(*kind, meta, counts_storage);
+        Some(EntryRevision::from_metadata(meta))
     }
 
     /// Lists a directory's entry names in byte order.

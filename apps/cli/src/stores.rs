@@ -28,8 +28,10 @@ fn run(args: &StoresArgs) -> Result<ExitCode, String> {
         budgets.set(&id, bytes);
     }
     let programs = Programs::default();
-    // An inspection without a workspace measures the stores alone.
-    let scan = development::inspect(&[], &Environment::of_process());
+    // An inspection without a workspace measures the stores alone, and each
+    // root adds what its checkouts hold.
+    let workspaces = crate::workspaces_of(&args.roots)?;
+    let scan = development::inspect(&workspaces, &Environment::of_process());
     let engine = engine_usage(&programs.docker);
     let inputs = Inputs {
         budgets: &budgets,

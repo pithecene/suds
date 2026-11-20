@@ -37,6 +37,7 @@ pub enum Ecosystem {
     Ccache,
     Cmake,
     Go,
+    Lima,
     Mise,
     Node,
     Pnpm,
@@ -51,6 +52,7 @@ impl Ecosystem {
             Ecosystem::Ccache => "ccache",
             Ecosystem::Cmake => "cmake",
             Ecosystem::Go => "go",
+            Ecosystem::Lima => "lima",
             Ecosystem::Mise => "mise",
             Ecosystem::Node => "node",
             Ecosystem::Pnpm => "pnpm",
@@ -131,6 +133,9 @@ pub enum StoreClass {
     SharedStore,
     /// Installed tools, each at the version that a pin names.
     Toolchain,
+    /// A virtual machine's disk, on which a container engine runs. The
+    /// disk holds the engine's volumes, so no build regenerates it.
+    Machine,
 }
 
 /// What the profile found at a store's location.
@@ -340,6 +345,25 @@ fn store_specs(environment: &Environment) -> Vec<StoreSpec> {
             marker: None,
         },
         StoreSpec {
+            id: "lima.machines",
+            class: StoreClass::Machine,
+            ecosystem: Ecosystem::Lima,
+            path: environment
+                .path("LIMA_HOME")
+                .or_else(|| environment.home(".lima")),
+            marker: None,
+        },
+        // Colima keeps its machines in a Lima directory of its own.
+        StoreSpec {
+            id: "colima.machines",
+            class: StoreClass::Machine,
+            ecosystem: Ecosystem::Lima,
+            path: environment
+                .path("COLIMA_HOME")
+                .or_else(|| environment.home(".colima")),
+            marker: Some("_lima"),
+        },
+        StoreSpec {
             id: "mise.installs",
             class: StoreClass::Toolchain,
             ecosystem: Ecosystem::Mise,
@@ -367,6 +391,8 @@ enum Claim {
     Checkout(CheckoutKind, Option<PathBuf>),
     Build(Ecosystem),
     Toolchain(Ecosystem),
+    /// A virtual machine of Lima, which Colima runs too.
+    Machine,
 }
 
 fn is_file(path: &Path) -> bool {
@@ -397,6 +423,13 @@ fn go_build_cache(dir: &Path) -> bool {
     holds(dir, &[], &["README", "trim.txt"]) && is_dir(&dir.join("00")) && is_dir(&dir.join("ff"))
 }
 
+/// Whether `dir` holds a virtual machine of Lima: its configuration beside
+/// a disk, or a data disk that Lima keeps apart from a machine.
+fn machine_at(dir: &Path) -> bool {
+    let disk = |name: &str| is_file(&dir.join(name));
+    (disk("lima.yaml") && (disk("diffdisk") || disk("basedisk"))) || disk("datadisk")
+}
+
 /// Classifies `dir` from the entries that its ecosystem writes. Build state
 /// has an owner, so the profile claims it only beneath a checkout.
 fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
@@ -404,6 +437,9 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
     // before the `.git` entry.
     if is_file(&dir.join(".vcpkg-root")) {
         return Some(Claim::Toolchain(Ecosystem::Vcpkg));
+    }
+    if machine_at(dir) {
+        return Some(Claim::Machine);
     }
     let git = dir.join(".git");
     match fs::symlink_metadata(&git) {
@@ -548,6 +584,13 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         let Some(path) = spec.path else {
             continue;
         };
+        // A workspace may hold a machines directory, and the walk has then
+        // counted each machine in it already.
+        let counted =
+            |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
+        if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
+            continue;
+        }
         let examined = examine_store(&path, environment.home.as_deref());
         if let Err(err) = &examined {
             scan.record_error(&path, err);
@@ -784,6 +827,18 @@ impl Found {
                     owner: owner.map(Path::to_path_buf),
                 });
             }
+            Claim::Machine => {
+                let measure = measure_whole(scan, &path);
+                self.stores.push(Store {
+                    id: "lima.machine".to_owned(),
+                    class: StoreClass::Machine,
+                    ecosystem: Ecosystem::Lima,
+                    path,
+                    status: StoreStatus::Present,
+                    measure,
+                    owner: owner.map(Path::to_path_buf),
+                });
+            }
             // Build state outside a checkout has no owner, so the profile
             // leaves it unclassified.
             Claim::Build(_) => {}
@@ -819,6 +874,9 @@ pub struct Totals {
     pub build_state: ClassTotal,
     pub shared_stores: ClassTotal,
     pub toolchains: ClassTotal,
+    /// The virtual machines' disks, beneath a checkout or beside the stores.
+    #[serde(default)]
+    pub machines: ClassTotal,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -900,6 +958,7 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
         match store.class {
             StoreClass::SharedStore => totals.shared_stores.add(&store.measure),
             StoreClass::Toolchain => totals.toolchains.add(&store.measure),
+            StoreClass::Machine => totals.machines.add(&store.measure),
         }
     }
     let complete = scan.error_count == 0 && scan.workspaces.iter().all(|w| w.measured);

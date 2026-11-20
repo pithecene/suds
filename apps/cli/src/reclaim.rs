@@ -1,7 +1,6 @@
 //! The `reclaim` command.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use suds_core::development::{self, Environment};
@@ -19,17 +18,14 @@ use crate::cli::ReclaimArgs;
 use crate::organize::journal_directory;
 use crate::output::{emit, finish, planned, ran};
 use crate::table::{escape, format_bytes, write_rows};
-use crate::{now_seconds, resolve_roots};
+use crate::{now_seconds, workspaces_of};
 
 pub fn reclaim_command(args: &ReclaimArgs) -> ExitCode {
     finish(run(args))
 }
 
 fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
-    let workspaces: Vec<PathBuf> = resolve_roots(&args.roots)?
-        .into_iter()
-        .map(|root| root.path)
-        .collect();
+    let workspaces = workspaces_of(&args.roots)?;
     // An environment without a home directory names no store, so the
     // inspection measures the checkouts alone.
     let scan = development::inspect(&workspaces, &Environment::default());

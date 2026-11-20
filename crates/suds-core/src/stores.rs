@@ -12,7 +12,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::development::{self, DevelopmentScan, StoreStatus};
+use crate::development::{self, DevelopmentScan, Store, StoreClass, StoreStatus};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
@@ -54,6 +54,10 @@ impl Default for Budgets {
             (DOCKER_IMAGES, 20),
             (DOCKER_BUILD_CACHE, 10),
             (DOCKER_ANONYMOUS_VOLUMES, 1),
+            ("lima.machines", 60),
+            ("colima.machines", 60),
+            // One machine that the walk of a workspace found.
+            ("lima.machine", 60),
         ];
         Budgets {
             bytes: defaults
@@ -433,6 +437,27 @@ pub struct Inputs<'a> {
     pub now: i64,
 }
 
+/// Decides a virtual machine's disk. The disk holds its engine's volumes,
+/// so Suds trims none and reports each one that a person should see.
+fn machine(store: &Store, budget: Option<u64>) -> Decision {
+    if store.owner.is_some() {
+        return Decision::Audit {
+            reason: "a checkout holds a virtual machine of its own, where one engine could serve every checkout"
+                .to_owned(),
+        };
+    }
+    match budget {
+        Some(budget) if store.measure.allocated_bytes <= budget => Decision::Within,
+        Some(_) => Decision::Audit {
+            reason: "the machine's disk exceeds its budget, and only its owner shrinks or removes a machine"
+                .to_owned(),
+        },
+        None => Decision::Audit {
+            reason: "the machine has no budget".to_owned(),
+        },
+    }
+}
+
 /// Plans each store's trim from an inspection and the engine's usage.
 pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
     let idle = i64::try_from(inputs.idle_seconds).unwrap_or(i64::MAX);
@@ -443,6 +468,9 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
         let measured = store.measure.allocated_bytes;
         let decision = match (store.status, budget) {
             (StoreStatus::Absent, _) => continue,
+            (StoreStatus::Present, _) if store.class == StoreClass::Machine => {
+                machine(store, budget)
+            }
             (StoreStatus::Unreadable, _) => Decision::Audit {
                 reason: "Suds could not examine the store".to_owned(),
             },

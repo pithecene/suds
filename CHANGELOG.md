@@ -21,6 +21,12 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a mount point, or an unreadable entry keeps the checkout. The journal
   records the reference or the first path that keeps the checkout.
 
+## [0.1.2] - 2026-11-20
+
+### Added
+
+- **Virtual machines count toward development storage**: the development profile classifies each Lima and Colima machine from its layout. It finds one at the program's own location and inside a checkout. The pressure counts each machine's disk. `suds stores` reports a machine beyond 60 GiB and each machine that a checkout holds, and it trims none.
+
 ## [0.1.1] - 2026-11-20
 
 ### Added
@@ -59,6 +65,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.
 
-[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/pithecene/suds/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pithecene/suds/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pithecene/suds/releases/tag/v0.1.0

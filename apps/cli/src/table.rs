@@ -61,6 +61,7 @@ pub fn write_development(out: &mut impl Write, report: &DevelopmentReport) -> io
         ("build state", totals.build_state),
         ("shared stores", totals.shared_stores),
         ("toolchains", totals.toolchains),
+        ("machines", totals.machines),
     ] {
         rows.push(vec![
             label.to_owned(),
@@ -103,6 +104,7 @@ pub fn write_development(out: &mut impl Write, report: &DevelopmentReport) -> io
             let class = match store.class {
                 StoreClass::SharedStore => "shared store",
                 StoreClass::Toolchain => "toolchain",
+                StoreClass::Machine => "machine",
             };
             let (status, size) = match store.status {
                 StoreStatus::Present => ("present", format_bytes(store.measure.allocated_bytes)),

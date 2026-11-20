@@ -1,0 +1,119 @@
+# Releases a version of Suds. An annotated tag vX.Y.Z holds the release notes,
+# which `bosun release X.Y.Z --notes notes.md` checks and writes. Each
+# platform's job builds the command-line program at the tag and packs it, and
+# the release job publishes the archives under the tag's notes.
+
+name: 🚀 Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  # A person can run the workflow again on a tag whose run GitHub lost.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to release, such as v0.1.0
+        required: true
+        type: string
+
+env:
+  # The tag that the run releases: the pushed tag, or the one that a person names.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  archives:
+    name: 📦 Archive (${{ matrix.platform }})
+    strategy:
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-latest
+          - platform: linux-x64
+            os: ubuntu-latest
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - name: 🧰 Mise
+        uses: jdx/mise-action@v4
+
+      - name: 🔨 Build the Archive
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |-
+          version="${TAG#v}"
+          cargo build --release --locked --package suds
+          # The program states the version of its manifest, which the tag must match.
+          stated="$(target/release/suds --version)"
+          if [ "$stated" != "suds $version" ]; then
+            echo "the program states '$stated', and the tag names $version" >&2
+            exit 1
+          fi
+          root="$RUNNER_TEMP/suds"
+          mkdir -p "$root/bin" "$RUNNER_TEMP/archives"
+          cp target/release/suds "$root/bin/suds"
+          cp LICENSE README.md "$root/"
+          name="suds-$version-$PLATFORM.tar.gz"
+          tar -czf "$RUNNER_TEMP/archives/$name" -C "$root" .
+          # GNU systems ship sha256sum, and macOS ships shasum.
+          cd "$RUNNER_TEMP/archives"
+          if command -v sha256sum > /dev/null; then sha256sum "$name"; else shasum -a 256 "$name"; fi > "$name.sha256"
+
+      - name: 📤 Upload the Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.platform }}
+          path: ${{ runner.temp }}/archives/
+          if-no-files-found: error
+
+  release:
+    name: 🏷️ Release
+    needs: [archives]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: 📥 Download the Archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: ${{ runner.temp }}/archives
+          merge-multiple: true
+
+      - name: 🏷️ Publish the Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          # The checkout replaces an annotated tag with a lightweight one, which
+          # has no message, so the job fetches the tag object again.
+          git fetch --quiet --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" != tag ]; then
+            echo "${TAG} is not an annotated tag, so it holds no release notes" >&2
+            exit 1
+          fi
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "${TAG}" |
+            sed '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP"/archives/*

@@ -373,18 +373,24 @@ fn is_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-/// Whether the file at `path` is a short text that holds `word`.
-fn names(path: &Path, word: &str) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() < 4096)
-        && fs::read_to_string(path).is_ok_and(|text| text.contains(word))
+/// Whether `dir` holds the chain of directories `chain`, and whether the
+/// last one holds each of `files`. The check reads metadata alone, and a
+/// symbolic link at any step fails it.
+fn holds(dir: &Path, chain: &[&str], files: &[&str]) -> bool {
+    let mut at = dir.to_path_buf();
+    for name in chain {
+        at.push(name);
+        if !is_dir(&at) {
+            return false;
+        }
+    }
+    files.iter().all(|name| is_file(&at.join(name)))
 }
 
-/// Whether `dir` is a build cache of Go, which holds Go's own notice.
+/// Whether `dir` has the layout of Go's build cache: its notice, its trim
+/// record, and the first and the last of its 256 directories.
 fn go_build_cache(dir: &Path) -> bool {
-    names(
-        &dir.join("README"),
-        "cached build artifacts from the Go build system",
-    )
+    holds(dir, &[], &["README", "trim.txt"]) && is_dir(&dir.join("00")) && is_dir(&dir.join("ff"))
 }
 
 /// Classifies `dir` from the entries that its ecosystem writes. Build state
@@ -430,8 +436,8 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
         _ if is_file(&dir.join("CMakeCache.txt")) => Ecosystem::Cmake,
         // A project may point a cache into its own checkout, where each
         // checkout then fills a copy. The cache's program names it there.
-        _ if go_build_cache(dir) || is_dir(&dir.join("cache/download")) => Ecosystem::Go,
-        _ if names(&dir.join("0/CACHEDIR.TAG"), "ccache") => Ecosystem::Ccache,
+        _ if go_build_cache(dir) || holds(dir, &["cache", "download"], &[]) => Ecosystem::Go,
+        _ if holds(dir, &["0"], &["CACHEDIR.TAG", "stats"]) => Ecosystem::Ccache,
         _ => return None,
     };
     Some(Claim::Build(ecosystem))

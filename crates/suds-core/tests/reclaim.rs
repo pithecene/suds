@@ -771,7 +771,9 @@ fn removes_each_cache_that_a_project_points_into_its_checkout() {
         &cache.join("go-build/README"),
         "This directory holds cached build artifacts from the Go build system.\n",
     );
+    write(&cache.join("go-build/trim.txt"), "1");
     write(&cache.join("go-build/00/object-a"), "object");
+    write(&cache.join("go-build/ff/object-b"), "object");
     write(
         &cache.join("go-mod/cache/download/example.com/@v/list"),
         "v1",
@@ -785,8 +787,16 @@ fn removes_each_cache_that_a_project_points_into_its_checkout() {
         "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by ccache.\n",
     );
     write(&cache.join("ccache/0/stats"), "0");
-    // A directory with a README of its own is no cache.
+    // A directory with a README of its own is no cache, and a marker behind
+    // a symbolic link proves nothing.
     write(&fixture.linked.join("docs/README"), "The documents.");
+    let outside = fixture.workspace.join("outside");
+    write(&outside.join("download/keep"), "");
+    write(&outside.join("CACHEDIR.TAG"), "");
+    write(&outside.join("stats"), "");
+    fs::create_dir_all(cache.join("linked")).unwrap();
+    std::os::unix::fs::symlink(&outside, cache.join("linked/cache")).unwrap();
+    std::os::unix::fs::symlink(&outside, cache.join("linked/0")).unwrap();
 
     let plan = fixture.plan(&nobody(), false);
     for (name, label) in [("go-build", "go"), ("go-mod", "go"), ("ccache", "ccache")] {
@@ -802,11 +812,13 @@ fn removes_each_cache_that_a_project_points_into_its_checkout() {
         };
         assert_eq!(ecosystem.label(), label);
     }
-    assert!(
-        plan.candidates
-            .iter()
-            .all(|candidate| candidate.path.as_path() != fixture.linked.join("docs"))
-    );
+    for other in [fixture.linked.join("docs"), cache.join("linked")] {
+        assert!(
+            plan.candidates
+                .iter()
+                .all(|candidate| candidate.path.as_path() != other)
+        );
+    }
 
     let report = fixture.apply(&plan);
     assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);

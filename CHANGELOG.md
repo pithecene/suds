@@ -13,16 +13,13 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A native window shows the workstation's development storage**.
 
-  The program `suds-window` measures the settings' roots. It shows the
-  pressure against the ceiling and each class of development storage. It
-  groups the checkouts of one repository into a project. A storage map
-  draws each project and each checkout as a rectangle whose area is its
-  size on disk, and an outline lists the same projects with their sums.
-  Each checkout states its build state and the tool that uses it. A filter
-  and four orders arrange the projects, and a pane shows the selected
-  project or checkout. Each shared store stands against its budget. The
-  window runs on Linux and changes nothing on disk. The task
-  `window:install` installs it with a desktop entry and an icon.
+  The program `suds-window` measures the settings' roots and shows the
+  pressure against the ceiling. It groups the checkouts of one repository
+  into a project. A storage map draws each project and each checkout as a
+  rectangle with the area of its size on disk, and an outline lists the
+  same projects. A pane shows the selected entry, and each shared store
+  stands against its budget. The window runs on Linux and changes nothing
+  on disk. The task `window:install` installs it with its desktop entry.
 
 ## [0.1.3] - 2026-11-20
 

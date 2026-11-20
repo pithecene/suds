@@ -44,7 +44,7 @@ struct State {
     rows: Vec<Row>,
     /// The paths of the projects whose checkouts the outline shows.
     open: BTreeSet<String>,
-    /// Whether a filter is set. The outline then shows each kept checkout.
+    /// Whether the query holds text. The outline then shows each kept checkout.
     filtered: bool,
     pick: Option<Pick>,
     /// The size of the storage map.
@@ -116,7 +116,7 @@ impl State {
             .position(|project| project.members.contains(&checkout))
     }
 
-    /// Selects `pick`, or lets the selection go when `pick` is selected already.
+    /// Selects `pick`, or lets the selection go when the selection is `pick` already.
     fn toggle(&mut self, pick: Pick) {
         self.pick = if self.pick.as_ref() == Some(&pick) {
             None

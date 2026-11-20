@@ -29,7 +29,7 @@ fn held(mut checkout: Checkout, released: bool) -> Checkout {
     checkout
 }
 
-/// Two repositories: `app` with two linked checkouts, and `tool` alone.
+/// The repository `app` with its linked checkouts, and the repository `tool` alone.
 fn fixture() -> Vec<Checkout> {
     vec![
         checkout("/work/app", None, 40, 0, "01"),

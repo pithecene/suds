@@ -23,6 +23,31 @@ struct State {
     shown: Vec<usize>,
     /// The home directory, which the window writes as a tilde.
     home: Option<String>,
+    /// Whether a measurement runs. A second request waits for none and starts none.
+    measuring: bool,
+}
+
+impl State {
+    /// Marks a measurement as running, unless one runs already.
+    fn begin(&mut self) -> bool {
+        !std::mem::replace(&mut self.measuring, true)
+    }
+
+    /// The path of the checkout at `row` of the list.
+    fn path_at(&self, row: i32) -> Option<String> {
+        let position = *self.shown.get(usize::try_from(row).ok()?)?;
+        Some(self.view.as_ref()?.checkouts.get(position)?.path.clone())
+    }
+
+    /// The row of the list that shows the checkout at `path`.
+    fn row_of(&self, path: &str) -> Option<i32> {
+        let view = self.view.as_ref()?;
+        let row = self
+            .shown
+            .iter()
+            .position(|position| view.checkouts[*position].path == path)?;
+        i32::try_from(row).ok()
+    }
 }
 
 fn now() -> i64 {
@@ -66,14 +91,18 @@ fn show_detail(window: &Window, state: &State, row: i32) {
 }
 
 /// Fills the checkout list with the checkouts that `query` keeps, in the order of `sort`.
-fn show_checkouts(window: &Window, state: &mut State, query: &str, sort: i32) {
+/// The checkout at `keep` stays selected while the new list still shows it. A position
+/// names another checkout after a new reading, so the selection follows the path.
+fn show_checkouts(
+    window: &Window,
+    state: &mut State,
+    query: &str,
+    sort: i32,
+    keep: Option<String>,
+) {
     let Some(view) = &state.view else {
         return;
     };
-    // The selected checkout stays selected while the new arrangement still holds it.
-    let selected = usize::try_from(window.get_selected())
-        .ok()
-        .and_then(|row| state.shown.get(row).copied());
     state.shown = arrange(&view.checkouts, query, sort_of(sort));
     let rows = state
         .shown
@@ -89,14 +118,13 @@ fn show_checkouts(window: &Window, state: &mut State, query: &str, sort: i32) {
         }
         .into(),
     );
-    let row = selected
-        .and_then(|position| state.shown.iter().position(|shown| *shown == position))
-        .map_or(-1, |row| row as i32);
+    let row = keep.and_then(|path| state.row_of(&path)).unwrap_or(-1);
     show_detail(window, state, row);
 }
 
 /// Draws one reading.
 fn show(window: &Window, state: &mut State, reading: Result<Observation, String>) {
+    state.measuring = false;
     window.set_loading(false);
     let view = match reading {
         Err(reason) => {
@@ -130,13 +158,19 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
             .collect(),
     ));
     window.set_stores(model(view.stores.iter().map(present::store).collect()));
+    // The selection names its checkout by path before the new reading replaces the old positions.
+    let keep = state.path_at(window.get_selected());
     state.view = Some(view);
     window.set_measured(true);
-    show_checkouts(window, state, &window.get_query(), window.get_sort());
+    show_checkouts(window, state, &window.get_query(), window.get_sort(), keep);
 }
 
 /// Measures the workstation on a thread of its own and draws the reading on the interface's thread.
 fn measure(window: &Window, state: Rc<RefCell<State>>) {
+    // The button, the menu, and the key all arrive here, so one guard covers each of them.
+    if !state.borrow_mut().begin() {
+        return;
+    }
     window.set_loading(true);
     let weak: Weak<Window> = window.as_weak();
     // The state lives on the interface's thread, so the measuring thread carries only the weak handle.
@@ -183,7 +217,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         move |query, sort| {
             if let Some(window) = weak.upgrade() {
-                show_checkouts(&window, &mut state.borrow_mut(), &query, sort);
+                let mut state = state.borrow_mut();
+                let keep = state.path_at(window.get_selected());
+                show_checkouts(&window, &mut state, &query, sort, keep);
             }
         }
     });
@@ -199,4 +235,68 @@ fn main() -> Result<(), slint::PlatformError> {
 
     measure(&window, state);
     window.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use suds_core::development::{Checkout, CheckoutKind, DevelopmentScan};
+    use suds_core::model::Measure;
+    use suds_core::stores::Budgets;
+    use suds_view::{Sort, arrange, workstation};
+
+    use super::State;
+
+    /// A state that shows a reading of the named checkouts, each with its size, in order of size.
+    fn showing(checkouts: &[(&str, u64)]) -> State {
+        let scan = DevelopmentScan {
+            workspaces: Vec::new(),
+            checkouts: checkouts
+                .iter()
+                .map(|(path, bytes)| Checkout {
+                    path: path.into(),
+                    kind: CheckoutKind::Main,
+                    repository: None,
+                    own: Measure {
+                        allocated_bytes: *bytes,
+                        ..Measure::default()
+                    },
+                    build_state: Vec::new(),
+                })
+                .collect(),
+            stores: Vec::new(),
+            skipped_mount_count: 0,
+            error_count: 0,
+            errors: Vec::new(),
+        };
+        let view = workstation(&scan, 0, None, &Ok(Default::default()), &Budgets::default());
+        let shown = arrange(&view.checkouts, "", Sort::Size);
+        State {
+            view: Some(view),
+            shown,
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn a_selection_follows_its_checkout_into_a_new_reading() {
+        let before = showing(&[("/work/a", 30), ("/work/b", 20), ("/work/c", 10)]);
+        let selected = before.path_at(1).unwrap();
+        assert_eq!(selected, "/work/b");
+
+        // The second reading orders the checkouts anew, and one of them left.
+        let after = showing(&[("/work/b", 50), ("/work/c", 10)]);
+        assert_eq!(after.row_of(&selected), Some(0));
+        assert_eq!(after.row_of("/work/a"), None);
+        assert_eq!(after.path_at(-1), None);
+        assert_eq!(after.path_at(9), None);
+    }
+
+    #[test]
+    fn a_second_request_starts_no_measurement_while_one_runs() {
+        let mut state = State::default();
+        assert!(state.begin());
+        assert!(!state.begin());
+        state.measuring = false;
+        assert!(state.begin());
+    }
 }

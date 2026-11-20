@@ -24,7 +24,9 @@ pub fn level(level: Level) -> (&'static str, i32) {
 
 /// The line beneath the pressure's meter.
 pub fn pressure_facts(card: &PressureCard) -> String {
-    let mut facts = vec![format!("{:.0}% of the ceiling", card.share * 100.0)];
+    // The meter's share stops at the whole track, and the text states the usage beyond the ceiling.
+    let percent = card.usage_bytes as f64 / card.ceiling_bytes.max(1) as f64 * 100.0;
+    let mut facts = vec![format!("{percent:.0}% of the ceiling")];
     if let Some(free) = card.filesystem_available_bytes {
         facts.push(format!("{} free on the filesystem", bytes(free)));
     }
@@ -187,9 +189,10 @@ pub fn store(store: &Store) -> StoreItem {
 
 #[cfg(test)]
 mod tests {
-    use suds_view::{BuildState, Checkout, Hold, Store, StoreStanding};
+    use suds_core::pressure::Level;
+    use suds_view::{BuildState, Checkout, Hold, PressureCard, Store, StoreStanding};
 
-    use super::{builds, checkout, facts, notice, short, store};
+    use super::{builds, checkout, facts, notice, pressure_facts, short, store};
 
     #[test]
     fn a_path_beneath_the_home_directory_opens_with_a_tilde() {
@@ -260,6 +263,20 @@ mod tests {
         let build = &builds(&checkout)[0];
         assert_eq!(build.path, "target");
         assert_eq!(build.size, "2.0 KiB");
+    }
+
+    #[test]
+    fn the_pressure_states_a_usage_beyond_its_ceiling() {
+        let card = PressureCard {
+            level: Level::Hard,
+            usage_bytes: 150 << 30,
+            ceiling_bytes: 100 << 30,
+            share: 1.0,
+            filesystem_available_bytes: None,
+            enforced: false,
+            complete: true,
+        };
+        assert!(pressure_facts(&card).starts_with("150% of the ceiling"));
     }
 
     #[test]

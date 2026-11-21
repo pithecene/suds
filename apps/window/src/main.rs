@@ -4,6 +4,7 @@
 //! view model, and draws what the reading holds. It changes the disk only
 //! through a reclaim plan that a person approves.
 
+mod history;
 mod plan;
 mod present;
 
@@ -17,7 +18,8 @@ use suds_core::development::Environment;
 use suds_core::reclaim::execute::ReclaimReport;
 use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
-    Checkout, Observation, Project, Proposal, Sort, Workstation, map, observe, projects, propose,
+    Checkout, History, Observation, Project, Proposal, Sort, Workstation, map, observe, projects,
+    propose,
 };
 
 slint::include_modules!();
@@ -44,6 +46,25 @@ const ROW: f32 = 38.0;
 
 /// The height of one row of the plan's removals, as `window.slint` draws it.
 const PLAN_ROW: f32 = 44.0;
+
+/// The height of one row of the history's runs, as `window.slint` draws it.
+const RUN_ROW: f32 = 44.0;
+
+/// The selection after a choice of `row`. A second choice of the selected row lets it go.
+fn chosen(now: Option<usize>, row: i32) -> Option<usize> {
+    let row = usize::try_from(row).ok();
+    row.filter(|row| now != Some(*row))
+}
+
+/// The row that a key's move by `step` selects among `count` rows. The first move selects
+/// the first row.
+fn stepped(now: Option<usize>, step: i32, count: usize) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    Some(match now {
+        Some(row) => row.saturating_add_signed(step as isize).min(last),
+        None => 0,
+    })
+}
 
 /// What the window holds from one event to the next.
 #[derive(Default)]
@@ -78,6 +99,12 @@ struct State {
     ran: bool,
     /// Whether a person asked the window to close during a run.
     leaving: bool,
+    /// The journal's runs that the window shows.
+    history: Option<History>,
+    /// The run whose steps the window shows, by its position in the history.
+    run: Option<usize>,
+    /// Whether a reading of the journal is in progress. A second request starts none.
+    reading: bool,
 }
 
 impl State {
@@ -119,17 +146,20 @@ impl State {
     /// The first move selects the first row.
     fn step(&mut self, step: i32) -> Option<usize> {
         let removals = &self.proposal.as_ref()?.removals;
-        let last = removals.len().checked_sub(1)?;
         let now = self.evidence.and_then(|candidate| {
             let mut rows = removals.iter();
             rows.position(|entry| entry.candidate == candidate)
         });
-        let row = match now {
-            Some(row) => row.saturating_add_signed(step as isize).min(last),
-            None => 0,
-        };
+        let row = stepped(now, step, removals.len())?;
         self.evidence = Some(removals[row].candidate);
         Some(row)
+    }
+
+    /// Moves the history's selection by `step` runs and returns the new row.
+    fn history_step(&mut self, step: i32) -> Option<usize> {
+        let count = self.history.as_ref()?.runs.len();
+        self.run = Some(stepped(self.run, step, count)?);
+        self.run
     }
 
     fn checkouts(&self) -> &[Checkout] {
@@ -546,6 +576,68 @@ fn plan_step(window: &Window, state: &mut State, step: i32) {
     }
 }
 
+/// Draws the steps of the selected run.
+fn show_run(window: &Window, state: &State) {
+    let runs = state.history.as_ref().map(|history| &history.runs);
+    let run = state.run.and_then(|position| runs?.get(position));
+    let selected = state.run.and_then(|position| i32::try_from(position).ok());
+    window.set_history_selected(selected.unwrap_or(-1));
+    window.set_history_run(run.map_or("", |run| run.run.as_str()).into());
+    let steps = run.map(|run| history::steps(run, state.home.as_deref()));
+    window.set_history_steps(model(steps.unwrap_or_default()));
+}
+
+/// Opens the history and reads the journal on a thread of its own.
+fn history_open(window: &Window, state: &mut State) {
+    if std::mem::replace(&mut state.reading, true) {
+        return;
+    }
+    (state.history, state.run) = (None, None);
+    window.set_page(2);
+    window.set_history_loading(true);
+    window.set_history_error("".into());
+    window.set_history_summary("".into());
+    window.set_history_rows(model(Vec::new()));
+    show_run(window, state);
+    background(
+        window,
+        || suds_view::history(&Environment::of_process()),
+        |window, state, read| {
+            state.reading = false;
+            window.set_history_loading(false);
+            match read {
+                Err(reason) => {
+                    let line = format!("Suds could not read the journal: {reason}");
+                    window.set_history_error(line.into());
+                }
+                Ok(read) => {
+                    let rows = read.runs.iter().enumerate();
+                    let rows = rows.map(|(position, run)| history::row(position, run));
+                    window.set_history_rows(model(rows.collect()));
+                    window.set_history_summary(history::summary(&read).into());
+                    state.history = Some(read);
+                }
+            }
+        },
+    );
+}
+
+/// Moves the history's selection by `step` runs and scrolls until the list shows the run.
+fn history_step(window: &Window, state: &mut State, step: i32) {
+    let Some(row) = state.history_step(step) else {
+        return;
+    };
+    show_run(window, state);
+    let (row, visible) = (
+        i32::try_from(row).unwrap_or(0),
+        window.get_history_visible(),
+    );
+    if visible > 0.0 {
+        let offset = revealing_of(row, RUN_ROW, -window.get_history_y(), visible);
+        window.set_history_y(-offset);
+    }
+}
+
 thread_local! {
     /// The interface thread's handle on the window's state, for a reading that arrives from another thread.
     static STATE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
@@ -705,8 +797,7 @@ fn main() -> Result<(), slint::PlatformError> {
         &window, state, candidate
     )));
     window.on_plan_pick(on!(|window, state, candidate| {
-        let candidate = usize::try_from(candidate).ok();
-        state.evidence = candidate.filter(|candidate| state.evidence != Some(*candidate));
+        state.evidence = chosen(state.evidence, candidate);
         show_choice(&window, state);
     }));
     window.on_plan_step(on!(|window, state, step| plan_step(&window, state, step)));
@@ -727,6 +818,19 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    window.on_history(on!(|window, state| history_open(&window, state)));
+    window.on_history_pick(on!(|window, state, run| {
+        state.run = chosen(state.run, run);
+        show_run(&window, state);
+    }));
+    window.on_history_step(on!(|window, state, step| history_step(
+        &window, state, step
+    )));
+    window.on_history_close(on!(|window, state| {
+        window.set_page(0);
+        state.history = None;
+    }));
+
     STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
 
     measure(&window, state);
@@ -743,7 +847,7 @@ mod tests {
     use suds_core::reclaim::plan::{RECLAIM_SCHEMA, ReclaimPlan, Subject};
     use suds_view::{Entry, Proposal};
 
-    use super::{PLAN_ROW, Pick, ROW, Row, State, revealing, revealing_of};
+    use super::{PLAN_ROW, Pick, ROW, Row, State, chosen, revealing, revealing_of};
 
     /// A state that shows a plan of removals with these candidates.
     fn planned(candidates: &[usize]) -> State {
@@ -791,6 +895,36 @@ mod tests {
             revealing_of(5, PLAN_ROW, 0.0, 2.0 * PLAN_ROW),
             4.0 * PLAN_ROW
         );
+    }
+
+    #[test]
+    fn the_keys_move_through_the_history_and_stop_at_its_ends() {
+        let run = |name: &str| suds_view::Run {
+            run: name.into(),
+            kind: suds_core::organize::journal::RunKind::Reclaim,
+            started_at: String::new(),
+            status: None,
+            interrupted: false,
+            undo: None,
+            authority: None,
+            steps: Vec::new(),
+        };
+        let runs = vec![run("a"), run("b")];
+        let mut state = State {
+            history: Some(suds_view::History { runs }),
+            ..State::default()
+        };
+        assert_eq!(state.history_step(1), Some(0));
+        assert_eq!(state.history_step(1), Some(1));
+        assert_eq!(state.history_step(1), Some(1));
+        assert_eq!(state.history_step(-5), Some(0));
+        assert_eq!(chosen(Some(1), 0), Some(0));
+        assert_eq!(chosen(Some(1), 1), None);
+        assert_eq!(chosen(None, -1), None);
+        // A window without a history, and a history without a run, select nothing.
+        assert_eq!(State::default().history_step(1), None);
+        state.history = Some(suds_view::History::default());
+        assert_eq!(state.history_step(1), None);
     }
 
     #[test]

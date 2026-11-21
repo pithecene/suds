@@ -41,8 +41,10 @@ with `--apply`, as [Store Budgets](#store-budgets) describes. Each store's
 own program trims it, and Suds removes no entry of a store itself.
 
 Beyond those two commands, the release deletes, quarantines, copies,
-rewrites, installs, and repairs nothing. It calls Git, on macOS `lsof`, and
-each store's own program through typed adapters, and no other program. Between runs it keeps the
+rewrites, and repairs nothing. The one thing that it installs is the units
+of its own schedule, and only with `suds schedule --install --apply`. Suds
+calls Git, on macOS `lsof`, each store's own program, and the scheduler's
+own program through typed adapters, and no other program. Between runs it keeps the
 operation journal that [Moves](#moves) describes, and the registry and the
 pressure reading that [Clients and Schedule](#clients-and-schedule)
 describes. [AGENTS.md](AGENTS.md) states the rules that
@@ -413,7 +415,8 @@ suds release --checkout DIR --client bosun --attempt wf-12
 suds pressure --format json
 suds maintain
 suds schedule                          # print the units of this system
-suds schedule --install                # place them and start the schedule
+suds schedule --install                # plan the installation
+suds schedule --install --apply        # place the units and start the schedule
 suds schedule --check                  # state whether the placed units are current
 ```
 
@@ -478,17 +481,23 @@ minutes: a service and a timer for systemd, or an agent for launchd. It
 writes for the scheduler of this system, and `--scheduler` names the other
 one. The option `--minutes` sets another time between two runs.
 
-With `--install`, the command places the units and makes the scheduler take
-them up. It writes each file beneath the user's own directory of units and
-then runs `systemctl --user` or `launchctl`, so it needs no administrator.
-A second installation replaces the units of the first.
+With `--install`, the command plans the installation and changes nothing.
+The plan lists each file that it creates, replaces, or keeps, each command
+of the scheduler that it runs, and the text of each unit. With `--apply`
+too, the command writes each file beneath the user's own directory of units
+and then runs `systemctl --user` or `launchctl`, so it needs no
+administrator. The journal records each file and each command, and
+`suds journal` lists the run. A file that changed after the plan stays as
+it stands, and no command runs after it. Suds follows no symbolic link at a
+unit's path, so a linked unit fails the plan.
 
 With `--check`, the command reads the placed units and changes nothing. Its
 status is 0 when the units are the units of this release, and 1 when no
 unit stands in place or the placed units are stale. Units are stale when an
 earlier release wrote them, when they state no search path, or when they
 run another Suds program than the one that checks. The minutes and the
-search path are a person's choice, so the check accepts each value.
+search path are a person's choice, so the check accepts each value. A
+file that Suds cannot read fails the check with the reason.
 
 A scheduler starts a unit with a short search path of its own, which names
 no program that a version manager installed. The units therefore carry the

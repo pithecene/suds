@@ -16,6 +16,7 @@ fn kind(kind: RunKind) -> (&'static str, [&'static str; 3]) {
         RunKind::Move => ("Move", ["entry", "entries", "moved"]),
         RunKind::Reclaim => ("Reclaim", ["directory", "directories", "removed"]),
         RunKind::Stores => ("Store trim", ["store", "stores", "trimmed"]),
+        RunKind::Schedule => ("Schedule", ["step", "steps", "done"]),
     }
 }
 
@@ -114,6 +115,8 @@ fn step(kind: RunKind, step: &Step, home: Option<&str>) -> StepItem {
         (RunKind::Reclaim, false) => format!("kept · {note}"),
         (RunKind::Stores, true) => format!("trimmed · freed {}", bytes(step.freed_bytes)),
         (RunKind::Stores, false) => format!("not trimmed · {note}"),
+        (RunKind::Schedule, true) => "done".to_owned(),
+        (RunKind::Schedule, false) => format!("failed · {note}"),
     };
     let path = short(&step.subject, home);
     StepItem {

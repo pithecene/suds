@@ -181,6 +181,33 @@ pub enum Event {
         status: RunStatus,
         freed_bytes: u64,
     },
+    /// Suds is about to place the units of `scheduler`, which a person
+    /// approved.
+    UnitsStarted {
+        run: String,
+        scheduler: String,
+    },
+    /// Suds wrote the unit's file at `path`.
+    UnitPlaced {
+        run: String,
+        path: NativePath,
+    },
+    /// The scheduler's own program ran with this command.
+    UnitCommandRan {
+        run: String,
+        command: String,
+    },
+    /// Suds placed no file at the path, or the command failed. The step
+    /// is that path or that command.
+    UnitStepFailed {
+        run: String,
+        step: String,
+        reason: String,
+    },
+    UnitsCompleted {
+        run: String,
+        status: RunStatus,
+    },
 }
 
 /// What reconciliation found at an interrupted rename's two paths.
@@ -586,6 +613,19 @@ pub struct JournalState {
     pub reclaims: Vec<ReclaimState>,
     /// The stores runs in the order in which they started.
     pub stores: Vec<StoresState>,
+    /// The runs that placed a scheduler's units, in the same order.
+    pub units: Vec<UnitsState>,
+}
+
+/// One run that placed a scheduler's units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitsState {
+    pub run: String,
+    /// The sequence of the record that started the run.
+    pub sequence: u64,
+    pub started_at: String,
+    pub steps: Vec<UnitStepSummary>,
+    pub completed: Option<RunStatus>,
 }
 
 /// One stores run's state.
@@ -826,6 +866,29 @@ impl JournalState {
                     state.completed = Some(*status);
                 }
             }
+            Event::UnitsStarted { run, .. } => self.units.push(UnitsState {
+                run: run.clone(),
+                sequence: record.sequence,
+                started_at: record.at.clone(),
+                steps: Vec::new(),
+                completed: None,
+            }),
+            Event::UnitPlaced { run, path } => self.unit_step(run, path.display(), None),
+            Event::UnitCommandRan { run, command } => self.unit_step(run, command.clone(), None),
+            Event::UnitStepFailed { run, step, reason } => {
+                self.unit_step(run, step.clone(), Some(reason.clone()));
+            }
+            Event::UnitsCompleted { run, status } => {
+                if let Some(state) = self.units.iter_mut().find(|state| state.run == *run) {
+                    state.completed = Some(*status);
+                }
+            }
+        }
+    }
+
+    fn unit_step(&mut self, run: &str, step: String, reason: Option<String>) {
+        if let Some(state) = self.units.iter_mut().find(|state| state.run == run) {
+            state.steps.push(UnitStepSummary { step, reason });
         }
     }
 
@@ -881,6 +944,11 @@ impl JournalState {
                     .iter()
                     .map(|run| (run.sequence, stores_summary(run))),
             )
+            .chain(
+                self.units
+                    .iter()
+                    .map(|run| (run.sequence, units_summary(run))),
+            )
             .chain(self.move_summaries())
             .collect();
         summaries.sort_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
@@ -919,6 +987,7 @@ impl JournalState {
             moves: Vec::new(),
             removals,
             trims: Vec::new(),
+            units: Vec::new(),
         }
     }
 
@@ -954,6 +1023,7 @@ impl JournalState {
                 moves,
                 removals: Vec::new(),
                 trims: Vec::new(),
+                units: Vec::new(),
             };
             (run.sequence, summary)
         })
@@ -980,6 +1050,18 @@ pub struct RunSummary {
     pub removals: Vec<RemovalSummary>,
     /// For a stores run, each store that the run trimmed.
     pub trims: Vec<StoreTrimSummary>,
+    /// For a run that placed a scheduler's units, each of its steps.
+    pub units: Vec<UnitStepSummary>,
+}
+
+/// One step of a run that placed a scheduler's units: a file that Suds
+/// wrote, or a command of the scheduler's own program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitStepSummary {
+    /// The file's path, or the command.
+    pub step: String,
+    /// The reason that the step failed.
+    pub reason: Option<String>,
 }
 
 /// One store's trim in a stores run.
@@ -994,29 +1076,53 @@ pub struct StoreTrimSummary {
     pub reason: Option<String>,
 }
 
-fn stores_summary(run: &StoresState) -> RunSummary {
+/// The summary of a run that moves no entry and offers no undo.
+fn plain_summary(
+    kind: RunKind,
+    run: &str,
+    started_at: &str,
+    status: Option<RunStatus>,
+) -> RunSummary {
     RunSummary {
-        kind: RunKind::Stores,
-        run: run.run.clone(),
-        plan: run.plan.clone(),
-        started_at: run.started_at.clone(),
-        status: run.completed,
+        kind,
+        run: run.to_owned(),
+        plan: String::new(),
+        started_at: started_at.to_owned(),
+        status,
         interrupted: false,
         undo: None,
         undoable: false,
         moves: Vec::new(),
         removals: Vec::new(),
-        trims: run.trims.clone(),
+        trims: Vec::new(),
+        units: Vec::new(),
     }
 }
 
-/// Whether a run moved entries or removed derived state.
+fn stores_summary(run: &StoresState) -> RunSummary {
+    RunSummary {
+        plan: run.plan.clone(),
+        trims: run.trims.clone(),
+        ..plain_summary(RunKind::Stores, &run.run, &run.started_at, run.completed)
+    }
+}
+
+fn units_summary(run: &UnitsState) -> RunSummary {
+    RunSummary {
+        units: run.steps.clone(),
+        ..plain_summary(RunKind::Schedule, &run.run, &run.started_at, run.completed)
+    }
+}
+
+/// What a run did: it moved entries, removed derived state, trimmed stores, or placed a
+/// scheduler's units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
     Move,
     Reclaim,
     Stores,
+    Schedule,
 }
 
 /// One removal of a reclaim run.

@@ -36,12 +36,13 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The `schedule` command installs and checks its units**.
 
-  With `--install`, `suds schedule` places the units and starts the
-  schedule through `systemctl --user` or `launchctl`. With `--check`, it
-  states whether the placed units are the units of this release, so a unit
-  from an earlier release no longer keeps its faults unseen. The command
-  now writes for the scheduler of this system unless `--scheduler` names
-  one.
+  With `--install`, `suds schedule` plans the installation of its units,
+  and with `--apply` too it places them and starts the schedule through
+  `systemctl --user` or `launchctl`. The journal records the run. With
+  `--check`, the command states whether the placed units are the units of
+  this release, so a unit from an earlier release no longer keeps its
+  faults unseen. The command now writes for the scheduler of this system
+  unless `--scheduler` names one.
 
 ### Fixed
 

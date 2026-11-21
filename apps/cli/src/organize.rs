@@ -300,6 +300,17 @@ fn write_summaries(out: &mut impl Write, summaries: &[RunSummary]) -> io::Result
             )?;
             writeln!(out, "               {}", escape(&trim.command))?;
         }
+        for unit in &summary.units {
+            let outcome = if unit.reason.is_some() {
+                "failed"
+            } else {
+                "done"
+            };
+            writeln!(out, "  {outcome:<11}  {}", escape(&unit.step))?;
+            if let Some(reason) = &unit.reason {
+                writeln!(out, "               {}", escape(reason))?;
+            }
+        }
         for removal in &summary.removals {
             let outcome = if removal.removed { "removed" } else { "kept" };
             writeln!(out, "  {outcome:<11}  {}", escape(&removal.path.display()))?;

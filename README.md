@@ -510,6 +510,12 @@ holds it. Those are the directories of mise, asdf, Cargo, Go, pnpm, Volta,
 Nix, and Homebrew, with `~/.local/bin` and `/usr/local/bin`. A unit with a
 stale search path therefore still trims its stores.
 
+A program from such a directory may start another, as a launcher of pnpm
+starts Node. Its command therefore runs with those directories on its
+search path, and the plan shows that path. A directory that the search
+could not read stands on the error stream, since a program may lie there
+unseen.
+
 ## Arena
 
 ```sh

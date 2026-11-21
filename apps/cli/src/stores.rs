@@ -7,8 +7,8 @@ use suds_core::development::{self, Environment};
 use suds_core::organize::journal::Journal;
 use suds_core::reclaim::execute::Authority;
 use suds_core::stores::{
-    self, Budgets, Decision, Entry, Inputs, Programs, StoresPlan, StoresReport,
-    builder_budget_option, engine_usage, measure_after, parse_budget, plan_stores,
+    self, Budgets, Decision, Entry, Inputs, StoresPlan, StoresReport, builder_budget_option,
+    engine_usage, measure_after, parse_budget, plan_stores,
 };
 
 use crate::cli::StoresArgs;
@@ -27,7 +27,7 @@ fn run(args: &StoresArgs) -> Result<ExitCode, String> {
         let (id, bytes) = parse_budget(word)?;
         budgets.set(&id, bytes);
     }
-    let programs = Programs::resolved(&Environment::of_process());
+    let programs = crate::clients::resolved_programs();
     // An inspection without a workspace measures the stores alone, and each
     // root adds what its checkouts hold.
     let workspaces = crate::workspaces_of(&args.roots)?;

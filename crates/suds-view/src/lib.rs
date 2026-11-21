@@ -17,7 +17,7 @@ mod remote;
 mod upkeep;
 mod workstation;
 
-pub use format::{bytes, day};
+pub use format::{Zone, bytes};
 pub use history::{History, Run, Step, history};
 pub use map::{Frame, LABEL, Map, Rect, Tile, map, squarify};
 pub use observe::{Observation, observe};

@@ -138,7 +138,7 @@ runs it. The file `src/plan.rs` holds the view's text.
 
 The button History reads the journal and lists each run, most recent
 first: a reclaim, a store trim, or a move. The reading changes nothing and
-creates no journal. A row shows the run's start in UTC, the count of its
+creates no journal. A row shows the run's start in the system's time zone, the count of its
 steps that succeeded, the bytes that it freed, and its outcome. A reclaim
 and a store trim also state whose approval admitted them: a person's, or
 the standing approval of `suds maintain`.

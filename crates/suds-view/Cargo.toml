@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 suds-core.workspace = true
+# The time zone of the system, so a view states each time as the person's clock reads it.
+jiff.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

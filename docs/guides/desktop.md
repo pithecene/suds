@@ -25,6 +25,9 @@ Inside `apps/desktop`, these files divide the work.
 
 - `ui/window.slint` declares every element, its layout, and its
   accessible role and label. It holds no logic beyond a selection or a key.
+- `ui/controls.slint` declares the window's own buttons and its tones. The
+  test `tests/keys.rs` imports it and sends each button its keys without a
+  display, through the toolkit's test backend.
 - `src/present.rs` turns a value of the view model into an item's text. Its
   functions are pure, and its tests need no display. The file `src/plan.rs`
   does the same for a reclaim plan, and `src/history.rs` for the journal's

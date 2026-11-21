@@ -1,7 +1,8 @@
 // The Suds window. Its first view shows one workstation's development
 // storage: the pressure, the classes, each checkout, and each store. Its
 // second view shows a reclaim plan, which a person approves or leaves.
-import { AboutSlint, Button, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
+import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
+import { Check, IconButton, Push, Tones } from "controls.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
 // One row of the outline: a project, or one of its checkouts beneath it.
@@ -18,19 +19,6 @@ export struct OutcomeItem { path: string, detail: string, removed: bool }
 export struct StepItem { name: string, path: string, detail: string, done: bool }
 export struct RunItem { id: int, name: string, caption: string, size: string, state: string, rank: int }
 export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
-
-global Tones {
-    out property <color> normal: #2f9e6b;
-    out property <color> soft: #d98a00;
-    out property <color> hard: #d6453d;
-    out property <color> main: #4c7fe0;
-    out property <color> linked: #8a72f0;
-    out property <color> build: #e0951c;
-    out property <brush> muted: Palette.foreground.transparentize(0.42);
-    out property <brush> hairline: Palette.foreground.transparentize(0.86);
-    out property <brush> track: Palette.foreground.transparentize(0.88);
-    out property <brush> hover: Palette.foreground.transparentize(0.94);
-}
 
 component Caption inherits Text {
     color: Tones.muted;
@@ -95,77 +83,6 @@ component Key inherits HorizontalLayout {
         Rectangle { width: 8px; height: 8px; border-radius: 2px; background: root.tint; }
     }
     Caption { text: root.text; vertical-alignment: center; }
-}
-
-// A button that shows an icon alone and states its act to a screen reader.
-component IconButton inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
-    in property <bool> enabled: true;
-    callback clicked();
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    background: area.has-hover && root.enabled ? Tones.hover : transparent;
-    accessible-role: button;
-    accessible-label: root.label;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { root.clicked(); }
-    border-width: scope.has-focus ? 2px : 0px;
-    border-color: Palette.accent-background;
-    forward-focus: scope;
-    // The Tab key reaches the button, and Return or Space presses it.
-    scope := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.clicked();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    area := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
-    Image {
-        source: root.icon;
-        width: 14px;
-        height: 14px;
-        colorize: Palette.foreground;
-        opacity: root.enabled ? 0.8 : 0.35;
-    }
-}
-
-// A box that a person marks, for a row of the plan.
-component Check inherits Rectangle {
-    in property <bool> checked;
-    in property <string> label;
-    callback toggled();
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    border-width: scope.has-focus ? 2px : 1px;
-    border-color: scope.has-focus || root.checked ? Palette.accent-background : Tones.muted;
-    background: root.checked ? Palette.accent-background : transparent;
-    accessible-role: checkbox;
-    accessible-label: root.label;
-    accessible-checked: root.checked;
-    accessible-checkable: true;
-    accessible-action-default => { root.toggled(); }
-    forward-focus: scope;
-    scope := FocusScope {
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.toggled();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    TouchArea { clicked => { root.toggled(); } }
-    if root.checked: Text { text: "✓"; color: Palette.accent-foreground; font-size: 11px; font-weight: 700; accessible-role: none; }
 }
 
 component Card inherits Rectangle {
@@ -448,7 +365,7 @@ export component Window inherits Window {
                             }
                             if root.page == 0: VerticalLayout {
                                 alignment: center;
-                                Button {
+                                Push {
                                     text: "Free space…";
                                     height: 24px;
                                     enabled: !root.loading;
@@ -461,7 +378,7 @@ export component Window inherits Window {
                             }
                             if root.page == 0: VerticalLayout {
                                 alignment: center;
-                                Button {
+                                Push {
                                     text: "History";
                                     height: 24px;
                                     accessible-label: "History. Each run that the journal records.";
@@ -563,7 +480,7 @@ export component Window inherits Window {
                                 vertical-alignment: center;
                                 text: root.planning ? "" : root.has-outcome ? "" : root.plan-summary;
                             }
-                            Button {
+                            Push {
                                 text: root.has-outcome ? "Done" : "Back";
                                 enabled: !root.applying;
                                 accessible-label: "Return to the storage. Escape does the same.";
@@ -645,7 +562,7 @@ export component Window inherits Window {
                                 Text { text: root.plan-hidden; wrap: word-wrap; horizontal-stretch: 1; font-size: 12px; vertical-alignment: center; }
                                 if root.plan-held: VerticalLayout {
                                     alignment: center;
-                                    Button {
+                                    Push {
                                         text: "Plan without them";
                                         accessible-label: "Plan again, and proceed although the system hides those processes";
                                         clicked => {
@@ -679,6 +596,7 @@ export component Window inherits Window {
                                     accessible-item-selected: row.id == root.plan-selected;
                                     background: row.id == root.plan-selected ? Palette.selection-background : touch.has-hover ? Tones.hover : transparent;
                                     touch := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
                                         clicked => {
                                             root.plan-pick(row.id);
                                             keys.focus();
@@ -736,14 +654,14 @@ export component Window inherits Window {
                                 }
                                 if root.confirming: VerticalLayout {
                                     alignment: center;
-                                    Button {
+                                    Push {
                                         text: "Cancel";
                                         clicked => { root.confirming = false; }
                                     }
                                 }
                                 VerticalLayout {
                                     alignment: center;
-                                    Button {
+                                    Push {
                                         primary: true;
                                         enabled: root.plan-count > 0;
                                         text: root.confirming ? "Remove permanently" : root.plan-action;
@@ -843,7 +761,7 @@ export component Window inherits Window {
                                 vertical-alignment: center;
                                 text: root.history-summary;
                             }
-                            Button {
+                            Push {
                                 text: "Back";
                                 accessible-label: "Return to the storage. Escape does the same.";
                                 clicked => { root.history-close(); }
@@ -889,6 +807,7 @@ export component Window inherits Window {
                                 accessible-item-selected: row.id == root.history-selected;
                                 background: row.id == root.history-selected ? Palette.selection-background : pointer.has-hover ? Tones.hover : transparent;
                                 pointer := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
                                     clicked => {
                                         root.history-pick(row.id);
                                         keys.focus();
@@ -1068,7 +987,8 @@ export component Window inherits Window {
                                             color: Tones.muted;
                                             accessible-role: none;
                                         }
-                                        TouchArea {
+                                        over-frame := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
                                             changed has-hover => {
                                                 if (self.has-hover) {
                                                     root.hover = frame.tip;
@@ -1078,6 +998,11 @@ export component Window inherits Window {
                                                 root.pick-project(frame.id);
                                                 keys.focus();
                                             }
+                                        }
+                                        if over-frame.has-hover && frame.id != root.selected-frame: Rectangle {
+                                            border-width: 2px;
+                                            border-color: Tones.outline;
+                                            border-radius: 2px;
                                         }
                                         if frame.id == root.selected-frame: Rectangle {
                                             border-width: 2px;
@@ -1109,7 +1034,8 @@ export component Window inherits Window {
                                             color: white;
                                             accessible-role: none;
                                         }
-                                        TouchArea {
+                                        over-tile := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
                                             changed has-hover => {
                                                 if (self.has-hover) {
                                                     root.hover = tile.tip;
@@ -1119,6 +1045,10 @@ export component Window inherits Window {
                                                 root.pick(tile.id);
                                                 keys.focus();
                                             }
+                                        }
+                                        if over-tile.has-hover && tile.id != root.selected-tile: Rectangle {
+                                            border-width: 2px;
+                                            border-color: Tones.outline;
                                         }
                                         if tile.id == root.selected-tile: Rectangle {
                                             border-width: 2px;
@@ -1162,6 +1092,7 @@ export component Window inherits Window {
                                 accessible-expanded: row.open;
                                 background: position == root.selected ? Palette.selection-background : area.has-hover ? Tones.hover : transparent;
                                 area := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
                                     clicked => {
                                         root.activate(position);
                                         keys.focus();

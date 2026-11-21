@@ -21,6 +21,8 @@ slint.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The toolkit's own test backend, which sends a key to a component without a display.
+i-slint-backend-testing.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

@@ -68,14 +68,16 @@ checkout, or a click on the map's empty space, also lets the selection go.
 ### Scheduled Maintenance
 
 A scheduled run of `suds maintain` that fails tells nobody, so the window
-states the schedule's faults in the notice above the storage. Each
+states the schedule's faults in its notices. A chip beside the pressure's
+level counts the notices and lists them on a click, so a notice never
+moves the storage. Each
 measurement reads the scheduler's units, the time of the last pressure
 reading, and the journal's last stores run under the standing approval,
-and changes nothing. The notice states units that are absent or stale, a
+and changes nothing. The notices state units that are absent or stale, a
 schedule without a run in a day, and each store that the last scheduled
-run could not trim. A sound schedule adds no line.
+run could not trim. A sound schedule adds no notice.
 
-The window installs nothing. Its notice names the command
+The window installs nothing. A notice names the command
 `suds schedule --install`, which plans the units, and `--apply`, which
 places them. The function `suds_view::upkeep` reads the standing, and
 `present::upkeep` holds the text.

@@ -111,10 +111,10 @@ lists each removal with its size and its evidence. A person clears the mark
 of a removal to leave it out, and nothing leaves the disk before the person
 approves the run. The journal records the run.
 
-The window also states a fault of the scheduled maintenance above the
-storage. The notice names absent or stale units and a schedule without a
-run in a day. Each store that the last scheduled run could not trim stands
-there too.
+The window also states a fault of the scheduled maintenance. A chip beside
+the pressure's level counts the notices, and a click on it lists them. A
+notice names absent or stale units or a schedule without a run in a day.
+Each store that the last scheduled run could not trim has a notice too.
 
 The button History lists each run that the journal records, most recent
 first, with its outcome and the bytes that it freed. A selected run lists

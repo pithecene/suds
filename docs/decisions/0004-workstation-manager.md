@@ -30,9 +30,9 @@ work.
 
 ## Decision
 
-1. Suds has layers. The primitives measure, plan, apply, journal,
-   and record holds. The manager reads the primitives' measurements and
-   writes plans. The interfaces, which are the window, the command line,
+1. Suds divides into primitives, a manager, and interfaces. The
+   primitives measure, plan, apply, journal, and record holds. The
+   manager reads the primitives' measurements and writes plans. The interfaces, which are the window, the command line,
    and a client's calls, show and invoke both.
 2. The manager's only output is a plan of the form that `suds apply`
    takes, with a reason and its evidence for each entry. The manager

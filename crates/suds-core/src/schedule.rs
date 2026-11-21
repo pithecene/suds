@@ -7,10 +7,14 @@
 //! until a person installs it again, so each interface states a stale unit.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::development::Environment;
+use crate::organize::journal::{Event, Journal, JournalError, RunStatus, UnitStepSummary};
+use crate::organize::native::NativePath;
+use crate::organize::plan::new_id;
 
 /// The exit status of a maintenance run that kept or refused a directory.
 pub const PARTIAL_STATUS: u8 = 1;
@@ -27,6 +31,13 @@ pub enum Scheduler {
 }
 
 impl Scheduler {
+    pub fn label(self) -> &'static str {
+        match self {
+            Scheduler::Systemd => "systemd",
+            Scheduler::Launchd => "launchd",
+        }
+    }
+
     /// The scheduler of the system that runs this process.
     pub fn native() -> Self {
         if cfg!(target_os = "macos") {
@@ -71,7 +82,66 @@ pub enum Standing {
     Absent,
     /// The files differ from this release's files. The value is the reason.
     Stale(String),
+    /// Suds could not read a file of the unit. The value is the failure.
+    Unreadable(String),
     Current,
+}
+
+/// What an installation does with one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// No file stands at the path.
+    Create,
+    /// Another text stands at the path, and the installation replaces it.
+    Replace,
+    /// The file already holds the text.
+    Keep,
+}
+
+/// One file of an installation, with the text that stood at its path at
+/// planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedFile {
+    pub file: UnitFile,
+    pub change: Change,
+    before: Option<String>,
+}
+
+/// What an installation writes and runs. A person reads the plan before a
+/// run applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallPlan {
+    pub scheduler: Scheduler,
+    pub files: Vec<PlannedFile>,
+    pub steps: Vec<Step>,
+}
+
+/// The result of one installation, which the journal records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallReport {
+    pub run: String,
+    pub status: RunStatus,
+    pub steps: Vec<UnitStepSummary>,
+}
+
+/// The text at `path`, or none where no file stands. A link is no unit's
+/// file, and Suds follows none, so a link fails the reading.
+fn read(path: &Path) -> Result<Option<String>, String> {
+    let failed = |err: std::io::Error| format!("could not read {}: {err}", path.display());
+    match fs::symlink_metadata(path) {
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(failed(err)),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let path = path.display();
+            return Err(format!(
+                "{path} is a symbolic link, which Suds does not follow"
+            ));
+        }
+        Ok(_) => {}
+    }
+    let bytes = fs::read(path).map_err(failed)?;
+    // A text of another encoding is no unit of this release, and the standing says so.
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// The directory that holds the scheduler's units of this user.
@@ -292,10 +362,12 @@ pub fn standing(
     let Some(expected) = files(scheduler, &blank, environment) else {
         return Standing::Absent;
     };
-    let placed: Vec<Option<String>> = expected
-        .iter()
-        .map(|file| fs::read_to_string(&file.path).ok())
-        .collect();
+    let placed: Result<Vec<Option<String>>, String> =
+        expected.iter().map(|file| read(&file.path)).collect();
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(reason) => return Standing::Unreadable(reason),
+    };
     if placed.iter().all(Option::is_none) {
         return Standing::Absent;
     }
@@ -327,37 +399,168 @@ pub fn standing(
     Standing::Current
 }
 
-/// Places each file. A writer stages the text beside the file and renames
-/// it into place, so the scheduler never reads a part of a unit.
-pub fn place(files: &[UnitFile]) -> Result<(), String> {
-    for file in files {
-        let failed =
-            |err: std::io::Error| format!("could not write {}: {err}", file.path.display());
-        if let Some(directory) = file.path.parent() {
-            fs::create_dir_all(directory).map_err(failed)?;
-        }
-        let mut staged = file.path.clone().into_os_string();
-        staged.push(format!(".{}.new", std::process::id()));
-        let staged = PathBuf::from(staged);
-        let mut options = OpenOptions::new();
-        let opened = options
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&staged);
-        let written = opened
-            .and_then(|mut out| {
-                out.write_all(file.contents.as_bytes())
-                    .and_then(|()| out.sync_data())
-            })
-            .and_then(|()| fs::rename(&staged, &file.path));
-        if written.is_err() {
-            // A failed writer leaves no staged file behind.
-            let _ = fs::remove_file(&staged);
-        }
-        written.map_err(failed)?;
+/// Writes one file. The writer stages the text in a new file and renames
+/// it into place, so the scheduler never reads a part of a unit. The
+/// staging opens no file that already exists.
+fn write(file: &UnitFile) -> Result<(), String> {
+    let failed = |err: std::io::Error| format!("could not write {}: {err}", file.path.display());
+    if let Some(directory) = file.path.parent() {
+        fs::create_dir_all(directory).map_err(failed)?;
     }
-    Ok(())
+    let mut staged = file.path.clone().into_os_string();
+    staged.push(format!(".{}", new_id("new")));
+    let staged = PathBuf::from(staged);
+    let mut options = OpenOptions::new();
+    let opened = options.write(true).create_new(true).open(&staged);
+    let written = opened
+        .and_then(|mut out| {
+            out.write_all(file.contents.as_bytes())
+                .and_then(|()| out.sync_data())
+        })
+        .and_then(|()| fs::rename(&staged, &file.path));
+    if written.is_err() {
+        // A failed writer leaves no staged file behind.
+        let _ = fs::remove_file(&staged);
+    }
+    written.map_err(failed)
+}
+
+/// Places each file without a plan. A test and an installer that hold
+/// their own approval call this.
+pub fn place(files: &[UnitFile]) -> Result<(), String> {
+    files.iter().try_for_each(write)
+}
+
+/// Plans the installation of `unit` and changes nothing. The plan states
+/// what stands at each path, and it fails where Suds cannot read a path.
+pub fn plan_install(
+    scheduler: Scheduler,
+    unit: &Unit,
+    environment: &Environment,
+) -> Result<InstallPlan, String> {
+    let written = files(scheduler, unit, environment)
+        .ok_or("no home directory exists for this process, so the units have no place")?;
+    let steps = activation(scheduler, &written);
+    let planned = written.into_iter().map(|file| {
+        let before = read(&file.path)?;
+        let change = match &before {
+            None => Change::Create,
+            Some(text) if *text == file.contents => Change::Keep,
+            Some(_) => Change::Replace,
+        };
+        Ok(PlannedFile {
+            file,
+            change,
+            before,
+        })
+    });
+    Ok(InstallPlan {
+        scheduler,
+        files: planned.collect::<Result<_, String>>()?,
+        steps,
+    })
+}
+
+/// Runs one command of a scheduler's own program, without a shell.
+pub fn run_step(step: &Step) -> Result<(), String> {
+    let (program, arguments) = step
+        .command
+        .split_first()
+        .ok_or("the step names no program")?;
+    let output = Command::new(program).args(arguments).output();
+    let output = output.map_err(|err| format!("could not run {program}: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let errors = String::from_utf8_lossy(&output.stderr);
+    Err(format!("{}: {}", output.status, errors.trim()))
+}
+
+/// Applies `plan` on a person's approval, and the journal records each
+/// step. A file whose text changed after planning stays as it stands, and
+/// no command runs after a file that Suds could not place. `run` runs one
+/// command, and a test names a stub in its place.
+pub fn install(
+    journal: &mut Journal,
+    plan: &InstallPlan,
+    run: &mut dyn FnMut(&Step) -> Result<(), String>,
+) -> Result<InstallReport, JournalError> {
+    let name = new_id("run");
+    journal.append(Event::UnitsStarted {
+        run: name.clone(),
+        scheduler: plan.scheduler.label().to_owned(),
+    })?;
+    let mut steps: Vec<UnitStepSummary> = Vec::new();
+    let changed = plan.files.iter().filter(|file| file.change != Change::Keep);
+    for planned in changed {
+        let path = &planned.file.path;
+        let placed = read(path).and_then(|now| {
+            if now != planned.before {
+                return Err("the file changed after planning".to_owned());
+            }
+            write(&planned.file)
+        });
+        let step = path.to_string_lossy().into_owned();
+        journal.append(match &placed {
+            Ok(()) => Event::UnitPlaced {
+                run: name.clone(),
+                path: NativePath::new(path.clone()),
+            },
+            Err(reason) => Event::UnitStepFailed {
+                run: name.clone(),
+                step: step.clone(),
+                reason: reason.clone(),
+            },
+        })?;
+        steps.push(UnitStepSummary {
+            step,
+            reason: placed.err(),
+        });
+    }
+    let placed = steps.iter().all(|step| step.reason.is_none());
+    for step in plan.steps.iter().filter(|_| placed) {
+        let command = step.command.join(" ");
+        let ran = run(step);
+        // Some commands fail by design. The first installation unloads an agent that no
+        // scheduler holds yet, so such a failure leaves no record.
+        if ran.is_err() && !step.required {
+            continue;
+        }
+        journal.append(match &ran {
+            Ok(()) => Event::UnitCommandRan {
+                run: name.clone(),
+                command: command.clone(),
+            },
+            Err(reason) => Event::UnitStepFailed {
+                run: name.clone(),
+                step: command.clone(),
+                reason: reason.clone(),
+            },
+        })?;
+        let failed = ran.is_err();
+        steps.push(UnitStepSummary {
+            step: command,
+            reason: ran.err(),
+        });
+        if failed {
+            break;
+        }
+    }
+    let done = steps.iter().filter(|step| step.reason.is_none()).count();
+    // An installation that found each file in place and ran each command is whole.
+    let status = match steps.len() {
+        0 => RunStatus::Complete,
+        total => RunStatus::from_counts(done, total),
+    };
+    journal.append(Event::UnitsCompleted {
+        run: name.clone(),
+        status,
+    })?;
+    Ok(InstallReport {
+        run: name,
+        status,
+        steps,
+    })
 }
 
 /// The commands that make `scheduler` take up `files`, in their order.

@@ -3,16 +3,17 @@
 
 use std::env;
 use std::io::{self, Write};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use suds_core::arena::{self, Arena};
 use suds_core::development::{self, Environment};
 use suds_core::maintain::{self, Context, MaintenanceReport};
+use suds_core::organize::journal::{Journal, RunStatus};
 use suds_core::pressure::{Level, Pressure};
 use suds_core::reclaim::git::Git;
 use suds_core::registry::{self, Event, Record};
 use suds_core::roots;
-use suds_core::schedule::{self, Standing, Unit, UnitFile};
+use suds_core::schedule::{self, Change, InstallPlan, Standing, Unit, UnitFile};
 use suds_core::state::{Directories, load_settings};
 use suds_core::stores::Programs;
 
@@ -237,6 +238,9 @@ fn schedule(args: &ScheduleArgs) -> Result<ExitCode, String> {
                 "No unit stands in place, so no scheduler runs the maintenance.".to_owned()
             }
             Standing::Stale(reason) => format!("The placed units are stale: {reason}."),
+            Standing::Unreadable(reason) => {
+                format!("Suds could not read the placed units: {reason}.")
+            }
         };
         writeln!(out, "{line}").map_err(|err| format!("failed to write the standing: {err}"))?;
         return Ok(match standing {
@@ -251,33 +255,57 @@ fn schedule(args: &ScheduleArgs) -> Result<ExitCode, String> {
         path: env::var("PATH").ok().filter(|path| !path.is_empty()),
         minutes: args.minutes,
     };
-    let files = schedule::files(scheduler, &unit, &environment)
-        .ok_or("no home directory exists for this process, so the units have no place")?;
     if !args.install {
+        let files = schedule::files(scheduler, &unit, &environment)
+            .ok_or("no home directory exists for this process, so the units have no place")?;
         return planned(print_units(&mut out, &files));
     }
-    schedule::place(&files)?;
-    for file in &files {
-        let _ = writeln!(out, "wrote {}", escape(&file.path.to_string_lossy()));
+    let plan = schedule::plan_install(scheduler, &unit, &environment)?;
+    if !args.apply {
+        return planned(print_install(&mut out, &plan));
     }
-    for step in schedule::activation(scheduler, &files) {
-        let line = step.command.join(" ");
-        let (program, arguments) = step.command.split_first().ok_or("an empty command")?;
-        let status = Command::new(program).args(arguments).status();
-        let succeeded = status.as_ref().is_ok_and(|status| status.success());
-        if succeeded {
-            let _ = writeln!(out, "ran {}", escape(&line));
-        } else if step.required {
-            let reason = match status {
-                Ok(status) => status.to_string(),
-                Err(err) => err.to_string(),
-            };
-            return Err(format!(
-                "Suds placed the units, and `{line}` failed: {reason}"
-            ));
-        }
+    let mut journal = Journal::open(&directories()?.journal()).map_err(|err| err.to_string())?;
+    let report = schedule::install(&mut journal, &plan, &mut schedule::run_step)
+        .map_err(|err| err.to_string())?;
+    let mut written = Ok(());
+    for step in &report.steps {
+        let line = match &step.reason {
+            None => format!("done    {}", escape(&step.step)),
+            Some(reason) => format!("failed  {}: {}", escape(&step.step), escape(reason)),
+        };
+        written = written.and_then(|()| writeln!(out, "{line}"));
     }
-    planned(out.flush())
+    let line = format!("The journal records run {}.", report.run);
+    written = written.and_then(|()| writeln!(out, "{line}"));
+    ran(written, report.status != RunStatus::Complete)
+}
+
+/// Prints what an installation writes and runs, for a person to read before `--apply`.
+fn print_install(out: &mut impl Write, plan: &InstallPlan) -> io::Result<()> {
+    for planned in &plan.files {
+        let change = match planned.change {
+            Change::Create => "create ",
+            Change::Replace => "replace",
+            Change::Keep => "keep   ",
+        };
+        writeln!(
+            out,
+            "{change}  {}",
+            escape(&planned.file.path.to_string_lossy())
+        )?;
+    }
+    for step in &plan.steps {
+        writeln!(out, "run      {}", escape(&step.command.join(" ")))?;
+    }
+    writeln!(out)?;
+    let files: Vec<UnitFile> = plan.files.iter().map(|file| file.file.clone()).collect();
+    print_units(out, &files)?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Suds changed nothing. Run the command with --apply to place the units."
+    )?;
+    out.flush()
 }
 
 /// Prints each file beneath a comment that names its place.

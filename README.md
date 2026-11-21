@@ -90,8 +90,7 @@ profile needs no root on either system.
 
 The window `suds-window` shows one workstation's development storage. It
 measures the roots that the settings name, as `suds maintain` measures
-them, and it writes nothing: no pressure reading, no journal, and no
-removal.
+them, and a measurement writes nothing.
 
 The window shows the pressure against the ceiling and each class of
 development storage. It groups the checkouts of one repository into a
@@ -104,6 +103,11 @@ projects order by size, name, last change, or build state. A pane shows the
 selected project or checkout: its size, its build directories, and its
 use by a tool. Each shared store stands against its budget, and a store
 over its budget shows in red.
+
+The button Free space plans a reclaim as `suds reclaim` plans one and
+lists each removal with its size and its evidence. A person clears the mark
+of a removal to leave it out, and nothing leaves the disk before the person
+approves the run. The journal records the run.
 
 Run it with `task window`. Control and F moves to the filter, Control and R
 measures again, and the arrow keys move through the list. The window draws

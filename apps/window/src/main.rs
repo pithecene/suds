@@ -1,8 +1,10 @@
 //! The Suds window.
 //!
 //! The window measures the workstation on a thread of its own, through the
-//! view model, and draws what the reading holds. It changes nothing on disk.
+//! view model, and draws what the reading holds. It changes the disk only
+//! through a reclaim plan that a person approves.
 
+mod plan;
 mod present;
 
 use std::cell::RefCell;
@@ -10,9 +12,12 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use suds_core::development::Environment;
-use suds_view::{Checkout, Observation, Project, Sort, Workstation, map, observe, projects};
+use suds_core::reclaim::execute::ReclaimReport;
+use suds_view::{
+    Checkout, Observation, Project, Proposal, Sort, Workstation, map, observe, projects, propose,
+};
 
 slint::include_modules!();
 
@@ -54,12 +59,25 @@ struct State {
     home: Option<String>,
     /// Whether a measurement runs. A second request waits for none and starts none.
     measuring: bool,
+    /// The reclaim plan that the window shows.
+    proposal: Option<Proposal>,
+    /// The removals that a person left out of the run, by their candidates.
+    excluded: BTreeSet<usize>,
+    /// The removal whose evidence the window shows.
+    evidence: Option<usize>,
+    /// Whether a plan or a run is in progress. A second request starts none.
+    working: bool,
 }
 
 impl State {
     /// Marks a measurement as running, unless one runs already.
     fn begin(&mut self) -> bool {
         !std::mem::replace(&mut self.measuring, true)
+    }
+
+    /// Marks a plan or a run as in progress, unless one is already.
+    fn work(&mut self) -> bool {
+        !std::mem::replace(&mut self.working, true)
     }
 
     fn checkouts(&self) -> &[Checkout] {
@@ -329,6 +347,135 @@ fn measure(window: &Window, state: Rc<RefCell<State>>) {
     });
 }
 
+/// Runs `work` on a thread of its own and hands its result to `done` on the interface's thread.
+fn background<T: Send + 'static>(
+    window: &Window,
+    work: impl FnOnce() -> T + Send + 'static,
+    done: impl FnOnce(&Window, &mut State, T) + Send + 'static,
+) {
+    let weak: Weak<Window> = window.as_weak();
+    std::thread::spawn(move || {
+        let result = work();
+        let _ = weak.upgrade_in_event_loop(move |window| {
+            STATE.with(|slot| {
+                if let Some(state) = slot.borrow().as_ref() {
+                    done(&window, &mut state.borrow_mut(), result);
+                }
+            });
+        });
+    });
+}
+
+/// Draws the plan's sums and the evidence of the selected removal.
+fn show_choice(window: &Window, state: &State) {
+    let Some(proposal) = &state.proposal else {
+        return;
+    };
+    let removing = proposal.removing(&state.excluded);
+    window.set_plan_summary(plan::summary(removing).into());
+    window.set_plan_action(plan::action(removing).into());
+    window.set_plan_count(i32::try_from(removing.0).unwrap_or(i32::MAX));
+    let picked = state.evidence;
+    let facts = picked.map(|candidate| plan::evidence(proposal, candidate, state.home.as_deref()));
+    let facts = facts
+        .unwrap_or_default()
+        .into_iter()
+        .map(SharedString::from);
+    window.set_plan_evidence(model(facts.collect()));
+    let selected = picked.and_then(|candidate| i32::try_from(candidate).ok());
+    window.set_plan_selected(selected.unwrap_or(-1));
+}
+
+/// Opens the plan's view and builds a plan on a thread of its own.
+fn plan_reclaim(window: &Window, state: &mut State, tolerate: bool) {
+    if !state.work() {
+        return;
+    }
+    (state.proposal, state.evidence) = (None, None);
+    state.excluded.clear();
+    window.set_page(1);
+    window.set_planning(true);
+    window.set_has_outcome(false);
+    window.set_confirming(false);
+    window.set_plan_error("".into());
+    window.set_plan_summary("".into());
+    window.set_plan_action(plan::action((0, 0)).into());
+    window.set_plan_count(0);
+    window.set_plan_hidden("".into());
+    window.set_plan_rows(model(Vec::new()));
+    window.set_plan_kept(model(Vec::new()));
+    window.set_plan_evidence(model(Vec::new()));
+    background(
+        window,
+        move || propose(&Environment::of_process(), tolerate, now()),
+        |window, state, proposal| {
+            state.working = false;
+            window.set_planning(false);
+            match proposal {
+                Err(reason) => {
+                    window.set_plan_error(format!("Suds could not plan: {reason}").into());
+                }
+                Ok(proposal) => {
+                    let rows = proposal.removals.iter();
+                    let rows = rows.map(|entry| plan::row(entry, &state.excluded));
+                    window.set_plan_rows(model(rows.collect()));
+                    window.set_plan_kept(model(proposal.kept.iter().map(plan::kept).collect()));
+                    window.set_plan_hidden(plan::hidden(&proposal).into());
+                    window.set_plan_held(proposal.held_by_hidden());
+                    state.proposal = Some(proposal);
+                    show_choice(window, state);
+                }
+            }
+        },
+    );
+}
+
+/// Marks the removal at `candidate` as left out or taken in, and draws each row's mark in place.
+fn plan_toggle(window: &Window, state: &mut State, candidate: i32) {
+    let (Some(proposal), Ok(candidate)) = (&state.proposal, usize::try_from(candidate)) else {
+        return;
+    };
+    proposal.toggle(&mut state.excluded, candidate);
+    // The rows keep their model, so the list keeps its place.
+    let rows = window.get_plan_rows();
+    for (position, entry) in proposal.removals.iter().enumerate() {
+        rows.set_row_data(position, plan::row(entry, &state.excluded));
+    }
+    window.set_confirming(false);
+    show_choice(window, state);
+}
+
+/// Applies the approved part of the plan on a thread of its own and shows what the run did.
+fn plan_apply(window: &Window, state: &mut State) {
+    let Some(proposal) = &state.proposal else {
+        return;
+    };
+    let chosen = proposal.chosen(&state.excluded);
+    if !state.work() {
+        return;
+    }
+    window.set_applying(true);
+    background(
+        window,
+        move || suds_view::apply(&Environment::of_process(), &chosen, now()),
+        |window, state, report: Result<ReclaimReport, String>| {
+            state.working = false;
+            window.set_applying(false);
+            match report {
+                Err(reason) => {
+                    window.set_plan_error(format!("Suds could not run the plan: {reason}").into());
+                }
+                Ok(report) => {
+                    let (rows, line) = plan::outcome(&report, state.home.as_deref());
+                    window.set_outcome_rows(model(rows));
+                    window.set_outcome_summary(line.into());
+                    window.set_has_outcome(true);
+                }
+            }
+        },
+    );
+}
+
 thread_local! {
     /// The interface thread's handle on the window's state, for a reading that arrives from another thread.
     static STATE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
@@ -461,6 +608,34 @@ fn main() -> Result<(), slint::PlatformError> {
         state.map = (width, height);
         show_map(&window, state);
     }));
+    window.on_plan(on!(|window, state, tolerate| plan_reclaim(
+        &window, state, tolerate
+    )));
+    window.on_plan_toggle(on!(|window, state, candidate| plan_toggle(
+        &window, state, candidate
+    )));
+    window.on_plan_pick(on!(|window, state, candidate| {
+        let candidate = usize::try_from(candidate).ok();
+        state.evidence = candidate.filter(|candidate| state.evidence != Some(*candidate));
+        show_choice(&window, state);
+    }));
+    window.on_plan_apply(on!(|window, state| plan_apply(&window, state)));
+    window.on_plan_close({
+        let (weak, state) = (window.as_weak(), state.clone());
+        move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            window.set_page(0);
+            state.borrow_mut().proposal = None;
+            // A run changed the disk, so the storage's figures are stale.
+            if window.get_has_outcome() {
+                measure(&window, state.clone());
+            }
+        }
+    });
+
+    STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
 
     measure(&window, state);
     window.run()
@@ -581,5 +756,16 @@ mod tests {
         assert!(!state.begin());
         state.measuring = false;
         assert!(state.begin());
+    }
+
+    #[test]
+    fn a_second_request_starts_no_plan_while_one_is_in_progress() {
+        let mut state = State::default();
+        assert!(state.work());
+        assert!(!state.work());
+        // A measurement and a plan guard themselves apart.
+        assert!(state.begin());
+        state.working = false;
+        assert!(state.work());
     }
 }

@@ -18,8 +18,14 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   into a project. A storage map draws each project and each checkout as a
   rectangle with the area of its size on disk, and an outline lists the
   same projects. A pane shows the selected entry, and each shared store
-  stands against its budget. The window runs on Linux and changes nothing
-  on disk.
+  stands against its budget. The window runs on Linux.
+
+- **The window plans a reclaim and removes what a person approves**.
+
+  The button Free space plans as `suds reclaim` plans. The window lists each
+  removal with its size and its evidence, and counts the kept directories
+  by reason. A person leaves a removal out with its mark, and the journal
+  records the approved run.
 
 ## [0.1.3] - 2026-11-20
 

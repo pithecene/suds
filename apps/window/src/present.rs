@@ -129,7 +129,7 @@ fn share(part: u64, whole: u64) -> f32 {
     }
 }
 
-fn count(number: usize, one: &str, many: &str) -> String {
+pub fn count(number: usize, one: &str, many: &str) -> String {
     format!("{number} {}", if number == 1 { one } else { many })
 }
 

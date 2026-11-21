@@ -21,12 +21,13 @@ without a display, and the window of another system draws the same values.
 A figure that the window shows belongs in `suds-view`. Only its text and
 its color belong in `apps/window`.
 
-Inside `apps/window`, three files divide the work.
+Inside `apps/window`, these files divide the work.
 
 - `ui/window.slint` declares every element, its layout, and its
   accessible role and label. It holds no logic beyond a selection or a key.
 - `src/present.rs` turns a value of the view model into an item's text. Its
-  functions are pure, and its tests need no display.
+  functions are pure, and its tests need no display. The file `src/plan.rs`
+  does the same for a reclaim plan.
 - `src/main.rs` measures on a thread of its own, keeps the last reading,
   and answers the interface's callbacks.
 
@@ -46,8 +47,9 @@ identifier `suds`. The window draws no menu bar on Linux. Its first card
 carries the two buttons, to measure again and to show About. The Tab key
 reaches each button, and Return or Space presses it.
 
-The window writes nothing. It records no pressure reading, opens no
-journal, and removes no file.
+A measurement writes nothing: no pressure reading and no journal entry.
+The window changes the disk in one place, a reclaim run that a person
+approves in the plan's view.
 
 | Key | Act |
 | :--- | :--- |
@@ -56,7 +58,7 @@ journal, and removes no file.
 | Control and R | Measures again |
 | Up and Down | Move through the outline |
 | Right and Left | Open and close the selected project |
-| Escape | Lets the selection go |
+| Escape | Lets the selection go, or leaves the plan's view |
 
 A click on a project's row opens or closes it. A second click on a selected
 checkout, or a click on the map's empty space, also lets the selection go.
@@ -80,6 +82,32 @@ project's bar. The function `suds_view::map` computes each rectangle, and
 
 A selection in the map and a selection in the outline are one selection.
 The window names it by path, so it follows its entry into a new reading.
+
+### Reclaim Plan
+
+The button Free space opens the plan's view and plans as `suds reclaim`
+plans without an option: build state, and each worktree after its tool
+released it. Planning changes nothing. The view lists each removal with
+its size, largest first, and a mark beside it. A pane shows each fact
+that the plan found for the selected removal, and a second pane counts the
+kept directories by reason.
+
+A person clears a mark to leave a removal out. A worktree that stays keeps
+its build state, so clearing the mark of build state also clears the mark
+of its worktree. The button Remove asks once
+more, and then the core applies the marked part of the plan. The core
+verifies each directory again before it removes it, and the journal
+records the run as it records one from the command line. The view then
+shows what the run did with each directory, and the window measures again
+once the person leaves the view.
+
+While the system hides the working directory of a process that the person
+owns, the plan keeps each directory. The view names those processes, and
+its button plans again and tolerates them, which is the effect of the
+option `--tolerate-unreadable-processes`.
+
+The function `suds_view::propose` builds the plan, and `suds_view::apply`
+runs it. The file `src/plan.rs` holds the view's text.
 
 ## Check
 
@@ -138,8 +166,10 @@ command line.
 
 - The window runs on Linux alone. On macOS, the menu bar, the dialogs, and
   a screen reader's access have no measurement.
-- The window shows one view. The registry's records, the journal, a
-  reclaim plan, and the stores' trims have no view yet.
+- The registry's records, the journal, and the stores' trims have no view
+  yet.
+- The plan's view takes no option. A plan of every worktree, or one with
+  another idle time, still needs the command line.
 - The map has no key of its own. A person reaches each of its entries
   through the outline.
 - A release publishes no archive of the window.

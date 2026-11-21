@@ -6129,7 +6129,7 @@ dependencies = [
 
 [[package]]
 name = "suds"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap",
  "serde",
@@ -6140,7 +6140,7 @@ dependencies = [
 
 [[package]]
 name = "suds-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rustix 1.1.6",
  "serde",
@@ -6150,7 +6150,7 @@ dependencies = [
 
 [[package]]
 name = "suds-desktop"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "i-slint-backend-testing",
  "slint",
@@ -6162,7 +6162,7 @@ dependencies = [
 
 [[package]]
 name = "suds-view"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "jiff",
  "serde",
@@ -6173,7 +6173,7 @@ dependencies = [
 
 [[package]]
 name = "suds-webview"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",

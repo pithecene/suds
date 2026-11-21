@@ -6152,6 +6152,7 @@ dependencies = [
 name = "suds-desktop"
 version = "0.1.3"
 dependencies = [
+ "i-slint-backend-testing",
  "slint",
  "slint-build",
  "suds-core",

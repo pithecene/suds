@@ -56,6 +56,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The desktop application states each time in the system's time zone**: the reading's time, a run's start, and each date read as the person's clock reads them, where they read in UTC before.
 
+- **The desktop application answers the pointer**: the pointer becomes a hand above each button, each row, and each rectangle of the storage map, and the map outlines the rectangle beneath the pointer.
+
 ### Fixed
 
 - **A scheduled run finds the program of each store**.

@@ -24,6 +24,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A size that rounds to a whole unit reads in that unit**: a count one byte below one gibibyte read `1024.0 MiB`. The command and the desktop application now write `1.0 GiB`, and the same holds at each unit.
 - **The tests of the store adapters no longer fail by chance**: a test wrote a stub program and ran it at once. The system refused the stub while another test's new process held the file open. A shell now writes each stub.
 
 ## [0.1.4] - 2026-11-21

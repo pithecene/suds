@@ -289,7 +289,8 @@ pub fn format_bytes(bytes: u64) -> String {
     // bytes, and the resulting error falls far below the first decimal place.
     let mut value = bytes as f64 / 1024.0;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    // A value from here up rounds to 1024.0, so it takes the next unit.
+    while value >= 1023.95 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
@@ -324,5 +325,13 @@ mod tests {
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
         assert_eq!(format_bytes(u64::MAX), "16.0 EiB");
+    }
+
+    #[test]
+    fn a_size_that_rounds_to_a_whole_unit_takes_that_unit() {
+        assert_eq!(format_bytes((1 << 20) - 1), "1.0 MiB");
+        assert_eq!(format_bytes((1 << 30) - 1), "1.0 GiB");
+        assert_eq!(format_bytes(1023 * (1 << 20)), "1023.0 MiB");
+        assert_eq!(format_bytes((1 << 30) - (1 << 20) / 10), "1023.9 MiB");
     }
 }

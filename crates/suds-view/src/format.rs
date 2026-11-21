@@ -5,18 +5,19 @@ use jiff::{Timestamp, ZonedDateTime};
 
 /// A count of bytes in binary units, with one decimal above a kibibyte.
 pub fn bytes(count: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = count as f64;
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    // A value from here up rounds to 1024.0, so it takes the next unit.
+    const NEXT: f64 = 1023.95;
+    if count < 1024 {
+        return format!("{count} B");
+    }
+    let mut value = count as f64 / 1024.0;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    while value >= NEXT && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 {
-        format!("{count} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// The time zone of each time that a view shows.
@@ -80,6 +81,15 @@ mod tests {
         assert_eq!(bytes(1024), "1.0 KiB");
         assert_eq!(bytes(1536 * 1024 * 1024), "1.5 GiB");
         assert_eq!(bytes(u64::MAX), "16777216.0 TiB");
+    }
+
+    #[test]
+    fn a_size_that_rounds_to_a_whole_unit_takes_that_unit() {
+        assert_eq!(bytes((1 << 20) - 1), "1.0 MiB");
+        assert_eq!(bytes((1 << 30) - 1), "1.0 GiB");
+        assert_eq!(bytes((1 << 40) - 1), "1.0 TiB");
+        assert_eq!(bytes(1023 * (1 << 20)), "1023.0 MiB");
+        assert_eq!(bytes((1 << 30) - (1 << 20) / 10), "1023.9 MiB");
     }
 
     #[test]

@@ -39,6 +39,15 @@ measures the roots that `settings.json` names, as `suds maintain` measures
 them. A workstation without a root shows the settings file's path and no
 figure.
 
+A measurement walks every file beneath the roots, and a large workspace
+takes most of a minute. The window therefore saves each whole reading as
+`reading.json` in the state directory, and it opens with the saved reading
+while it measures again. The storage's card states the saved reading's
+time, with its day for a reading of another day. The functions
+`suds_view::save_reading` and `suds_view::last_reading` write and read the
+file. A reading of another schema counts as none, and a reading that Suds
+could not save adds a notice.
+
 The command `task desktop:install` installs the window for one user: the
 binary, the desktop entry `suds.desktop`, and the icon. The entry and the
 icon go beneath `XDG_DATA_HOME`, or beneath `~/.local/share` without one,

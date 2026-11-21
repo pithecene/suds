@@ -51,6 +51,28 @@ pub fn observed(at: &str) -> String {
     zone().minute(at)
 }
 
+/// A reading's time for the storage's card. A reading of another day states its day too,
+/// because the window opens with the reading that it saved last. `now` is the time in seconds
+/// since the Unix epoch.
+pub fn measured(at: &str, now: i64) -> String {
+    let (zone, day) = (zone(), zone().day(at));
+    if day == zone.day_at(now) {
+        zone.minute(at)
+    } else {
+        format!("{day} {}", zone.minute(at))
+    }
+}
+
+/// The notice of a reading that Suds could not save, or nothing for a saved one.
+pub fn unsaved(reason: Option<&str>) -> String {
+    let stated = |reason| {
+        format!(
+            "Suds could not save this reading, so the next window opens without figures: {reason}"
+        )
+    };
+    reason.map_or_else(String::new, stated)
+}
+
 /// The line beneath the pressure's meter.
 pub fn pressure_facts(card: &PressureCard) -> String {
     // The meter's share stops at the whole track, and the text states the usage beyond the ceiling.
@@ -137,7 +159,7 @@ pub fn upkeep(upkeep: &Upkeep) -> String {
 
 pub fn class(position: usize, class: &Class) -> ClassItem {
     ClassItem {
-        label: class.label.into(),
+        label: class.label.as_str().into(),
         detail: format!("{} · {}", bytes(class.bytes), class.count).into(),
         share: class.share,
         tint: tint(position),
@@ -391,7 +413,7 @@ pub fn builds(checkout: &Checkout) -> Vec<BuildItem> {
                 .strip_prefix(&checkout.path)
                 .map_or(build.path.as_str(), |rest| rest.trim_start_matches('/'))
                 .into(),
-            ecosystem: build.ecosystem.into(),
+            ecosystem: build.ecosystem.as_str().into(),
             size: bytes(build.bytes).into(),
             modified: day(&build.newest_modified).into(),
         })
@@ -498,7 +520,7 @@ mod tests {
             build_bytes: 2048,
             build_state: vec![BuildState {
                 path: "/work/app/target".into(),
-                ecosystem: "cargo",
+                ecosystem: "cargo".into(),
                 bytes: 2048,
                 newest_modified: "2026-11-20T00:00:00Z".into(),
             }],
@@ -604,7 +626,7 @@ mod tests {
         let mut many = fixture();
         many.build_state.push(BuildState {
             path: "/work/app/node_modules".into(),
-            ecosystem: "node",
+            ecosystem: "node".into(),
             bytes: 4096,
             newest_modified: "2026-11-20T00:00:00Z".into(),
         });
@@ -624,6 +646,19 @@ mod tests {
             complete: true,
         };
         assert!(pressure_facts(&card).starts_with("150% of the ceiling"));
+    }
+
+    #[test]
+    fn a_reading_of_another_day_states_its_day() {
+        // The instant 1795219200 is 2026-11-21T00:00:00Z.
+        let now = 1_795_219_200 + 3600;
+        assert_eq!(super::measured("2026-11-21T00:04:46Z", now), "00:04");
+        let earlier = super::measured("2026-11-20T23:04:46Z", now);
+        assert_eq!(earlier, "2026-11-20 23:04");
+        assert_eq!(super::unsaved(None), "");
+        let notice = super::unsaved(Some("could not write /s/reading.json: denied"));
+        assert!(notice.starts_with("Suds could not save this reading"));
+        assert!(notice.ends_with("could not write /s/reading.json: denied"));
     }
 
     #[test]
@@ -714,8 +749,8 @@ mod tests {
     fn a_store_over_its_budget_says_so() {
         let over = Store {
             id: "go.module-cache".into(),
-            ecosystem: "go",
-            class: "Shared stores",
+            ecosystem: "go".into(),
+            class: "Shared stores".into(),
             path: "/stores/go".into(),
             bytes: 11 << 30,
             budget_bytes: Some(10 << 30),

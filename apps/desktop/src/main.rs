@@ -423,6 +423,13 @@ fn show(
     draw(window, state, view);
 }
 
+/// Draws a saved reading with its notices: the last one, or the one of a named file. The
+/// reading left entries unread when Suds saved it, so its notices open with it.
+fn open_saved(window: &Window, state: &mut State, view: Workstation) {
+    window.set_notices(model(present::saved_notices(&view)));
+    draw(window, state, view);
+}
+
 /// Draws the figures of one reading: a measurement's, or the saved one's at the window's opening.
 fn draw(window: &Window, state: &mut State, view: Workstation) {
     window.set_observed(present::measured(&view.observed_at, now()).into());
@@ -908,18 +915,14 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(path) = std::env::var_os(SHOWN) {
         state.borrow_mut().fixed = true;
         match reading_at(Path::new(&path)) {
-            Ok(view) => draw(&window, &mut state.borrow_mut(), view),
+            Ok(view) => open_saved(&window, &mut state.borrow_mut(), view),
             Err(reason) => window.set_notice(reason.into()),
         }
         return window.run();
     }
     // A measurement takes time, so the window opens with the reading that it saved last.
     match last_reading(&Environment::of_process()) {
-        Ok(Some(view)) => {
-            // The saved reading left the same entries unread, so its notices open with it.
-            window.set_notices(model(present::saved_notices(&view)));
-            draw(&window, &mut state.borrow_mut(), view);
-        }
+        Ok(Some(view)) => open_saved(&window, &mut state.borrow_mut(), view),
         Ok(None) => {}
         // The notices show beside the figures, so the measurement that follows states this one.
         Err(reason) => state.borrow_mut().unread = Some(reason),

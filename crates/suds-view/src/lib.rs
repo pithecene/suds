@@ -26,7 +26,7 @@ pub use map::{Frame, LABEL, Map, Rect, Tile, map, squarify};
 pub use observe::{Observation, observe};
 pub use project::{Project, projects};
 pub use reclaim::{Entry, IDLE_SECONDS, KeptGroup, Proposal, apply, propose};
-pub use saved::{last_reading, save_reading};
+pub use saved::{last_reading, reading_at, save_reading};
 pub use upkeep::{FailedTrim, OVERDUE_SECONDS, Upkeep, upkeep};
 pub use workstation::{
     BuildState, Checkout, Class, Hold, PressureCard, Sort, Store, StoreStanding, Workstation,

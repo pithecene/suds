@@ -7,7 +7,8 @@ use suds_core::development::Environment;
 use suds_core::pressure::Level;
 use suds_core::state::Directories;
 use suds_view::{
-    Checkout, Class, PressureCard, Store, StoreStanding, Workstation, last_reading, save_reading,
+    Checkout, Class, PressureCard, Store, StoreStanding, Workstation, last_reading, reading_at,
+    save_reading,
 };
 use tempfile::TempDir;
 
@@ -119,4 +120,22 @@ fn a_reading_that_suds_cannot_read_is_a_failure_and_not_an_absence() {
     let failure = last_reading(&environment).unwrap_err();
     assert!(failure.starts_with("could not read "), "{failure}");
     assert!(failure.contains("reading.json"), "{failure}");
+}
+
+#[test]
+fn a_named_file_gives_its_reading_or_states_why_it_gives_none() {
+    let (temp, environment) = home();
+    save_reading(&environment, &view()).unwrap();
+    let path = Directories::of(&environment).unwrap().reading();
+    assert_eq!(reading_at(&path), Ok(view()));
+
+    // No measurement follows a named reading, so an absent file is a failure.
+    let absent = reading_at(&temp.path().join("none.json")).unwrap_err();
+    assert!(absent.starts_with("could not read "), "{absent}");
+    fs::write(&path, "{}").unwrap();
+    let other = reading_at(&path).unwrap_err();
+    assert!(
+        other.ends_with("holds no reading of the schema suds.reading/v1"),
+        "{other}"
+    );
 }

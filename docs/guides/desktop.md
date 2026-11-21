@@ -189,6 +189,16 @@ DISPLAY=:96 import -window root window.png
 The first measurement of a large workspace takes some seconds, so the
 picture waits for it.
 
+A picture for a document shows no real workstation. The variable
+`SUDS_SHOW_READING` names a file in the form of `reading.json`. The window
+then shows that file's reading and measures nothing, and its refresh
+button does nothing. The plan and the history still read the real
+workstation.
+
+```sh
+SUDS_SHOW_READING=docs/assets/reading.json target/release/suds-desktop
+```
+
 ### Screen Reader Access
 
 Slint publishes the window's elements on the accessibility bus only while

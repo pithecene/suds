@@ -10,6 +10,7 @@ mod present;
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,10 +20,14 @@ use suds_core::reclaim::execute::ReclaimReport;
 use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
     Checkout, Grouping, History, Observation, Project, Proposal, Sort, Upkeep, Workstation,
-    last_reading, map, observe, projects, propose, save_reading, store_groups, upkeep,
+    last_reading, map, observe, projects, propose, reading_at, save_reading, store_groups, upkeep,
 };
 
 slint::include_modules!();
+
+/// The variable that names a reading's file. The window shows that reading and measures
+/// nothing.
+const SHOWN: &str = "SUDS_SHOW_READING";
 
 /// One row of the outline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +116,9 @@ struct State {
     shown: BTreeSet<String>,
     /// The reason that Suds could not read the saved reading at the window's opening.
     unread: Option<String>,
+    /// Whether the window shows the reading of a file that a person named. It then measures
+    /// nothing.
+    fixed: bool,
 }
 
 impl State {
@@ -452,7 +460,7 @@ fn show_stores(window: &Window, state: &State) {
 /// Measures the workstation on a thread of its own and draws the reading on the interface's thread.
 fn measure(window: &Window, state: Rc<RefCell<State>>) {
     // The button, the menu, and the key all arrive here, so one guard covers each of them.
-    if !state.borrow_mut().begin() {
+    if state.borrow().fixed || !state.borrow_mut().begin() {
         return;
     }
     window.set_loading(true);
@@ -895,6 +903,16 @@ fn main() -> Result<(), slint::PlatformError> {
 
     STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
 
+    // A named reading stands in place of each measurement, so a picture of the window shows
+    // no real workstation.
+    if let Some(path) = std::env::var_os(SHOWN) {
+        state.borrow_mut().fixed = true;
+        match reading_at(Path::new(&path)) {
+            Ok(view) => draw(&window, &mut state.borrow_mut(), view),
+            Err(reason) => window.set_notice(reason.into()),
+        }
+        return window.run();
+    }
     // A measurement takes time, so the window opens with the reading that it saved last.
     match last_reading(&Environment::of_process()) {
         Ok(Some(view)) => {

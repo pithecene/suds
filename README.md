@@ -475,6 +475,11 @@ The `schedule` command prints the units that run `suds maintain` every 30
 minutes: a service and a timer for systemd, or an agent for launchd. Suds
 installs nothing, so a person or an installer places the units.
 
+A scheduler starts a unit with a short search path of its own, which names
+no program that a version manager installed. The units therefore carry the
+search path of the shell that ran `suds schedule`, so a scheduled run finds
+the program of each store as that shell finds it.
+
 ## Arena
 
 ```sh

@@ -6165,6 +6165,7 @@ name = "suds-view"
 version = "0.1.3"
 dependencies = [
  "jiff",
+ "serde",
  "serde_json",
  "suds-core",
  "tempfile",

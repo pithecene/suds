@@ -92,7 +92,9 @@ profile needs no root on either system.
 
 The window `suds-desktop` shows one workstation's development storage. It
 measures the roots that the settings name, as `suds maintain` measures
-them, and a measurement writes nothing.
+them. A measurement changes nothing beneath a root. The window saves each
+whole reading in the state directory and opens with the saved one while it
+measures again.
 
 The window shows the pressure against the ceiling and each class of
 development storage. It groups the checkouts of one repository into a

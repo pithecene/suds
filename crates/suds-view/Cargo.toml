@@ -12,9 +12,11 @@ repository.workspace = true
 suds-core.workspace = true
 # The time zone of the system, so a view states each time as the person's clock reads it.
 jiff.workspace = true
+# The saved reading: the view model as JSON, so a window opens with figures.
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

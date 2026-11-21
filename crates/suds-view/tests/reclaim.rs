@@ -263,7 +263,8 @@ fn a_proposal_states_what_the_inspection_missed() {
     assert_eq!(proposal.removals.len(), 2);
 }
 
-#[cfg(unix)]
+// The file systems of macOS refuse a name that no text encodes.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_repository_whose_path_is_no_text_keeps_its_own_project() {
     use std::ffi::OsStr;

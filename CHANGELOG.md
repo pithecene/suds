@@ -9,8 +9,13 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The desktop application shows a reading from a named file**: the variable `SUDS_SHOW_READING` names a file in the form of the saved reading. The window shows that reading and measures nothing, so a picture of the window shows no real workstation.
+
 ### Changed
 
+- **The README shortens, and guides hold the reference**: the README states what Suds does, its guarantees, and a picture of the desktop application on an invented workstation. The reference of each command moves to a guide beneath `docs/guides`.
 - **The stores' pane names the group of mise Polyglot**: the group of a store that serves each language read Many languages before.
 
 ### Removed

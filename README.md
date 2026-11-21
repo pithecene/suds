@@ -1,691 +1,160 @@
 # Suds
 
-Suds is a local-first desktop and command-line environment manager for
-developer workstations. It treats files, repositories, worktrees,
-toolchains, configuration, and agent activity as parts of one environment.
-People use Suds through its desktop application, and automation calls the
-same `suds-core` crate through the `suds` command.
+**A workstation storage manager for agentic development.**
+
+[![Release](https://img.shields.io/github/v/release/pithecene/suds?sort=semver)](https://github.com/pithecene/suds/releases/latest)
+[![CI](https://github.com/pithecene/suds/actions/workflows/ci.yml/badge.svg)](https://github.com/pithecene/suds/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/pithecene/suds)](LICENSE)
+
+Suds measures the storage that development leaves on a workstation and
+holds it to a ceiling. It finds each Git checkout, the build output
+beneath it, and each shared store and toolchain. Suds removes build output
+that no process uses and trims each store to a budget. Each removal runs
+through a plan that a person approves, or that the owner's settings
+approve in advance. Agents that work in many worktrees fill a disk within
+days, and Suds bounds that growth.
+
+![The Suds desktop application: the pressure against the ceiling, a storage map of each project and checkout, and the shared stores grouped by ecosystem](docs/assets/desktop.png)
+
+The picture shows an invented workstation, from the reading in
+[`docs/assets/reading.json`](docs/assets/reading.json).
+
+---
 
 ## Installation
 
 Each release holds an archive of the `suds` command for macOS on Apple
-silicon and for Linux on x64 and arm64. With mise, one command installs
-the newest release:
+silicon and for Linux on x64 and arm64. With [mise](https://mise.jdx.dev/),
+one command installs the newest release:
 
 ```sh
 mise use -g github:pithecene/suds
 ```
 
-## Current Release Boundary
+The desktop application builds from source on Linux, as
+[the desktop guide](docs/guides/desktop.md) describes.
 
-This release measures storage and makes one change. It moves a
-directory's direct children into another directory on the same
-filesystem, and only through a plan that a person reviews. The `suds inspect`
-command reads filesystem metadata beneath a set of user-owned roots. For
-each root, it reports its storage use, its entry counts, and its largest
-direct children, as a terminal table or one JSON document.
+---
 
-The `suds inspect --profile development` command finds each Git checkout
-beneath the directories that the caller names. It reports each checkout,
-the build output beneath it, and each shared store and toolchain, as
-[Development Profile](#development-profile) describes.
-
-The `suds reclaim` command removes build output that no process uses, and
-only with `--apply`, as [Reclamation](#reclamation) describes. A build
-regenerates that output, so the removal is permanent.
-
-The `suds stores` command holds each shared store to a budget, and only
-with `--apply`, as [Store Budgets](#store-budgets) describes. Each store's
-own program trims it, and Suds removes no entry of a store itself.
-
-Beyond those two commands, the release deletes, quarantines, copies,
-rewrites, and repairs nothing. The one thing that it installs is the units
-of its own schedule, and only with `suds schedule --install --apply`. Suds
-calls Git, on macOS `lsof`, each store's own program, and the scheduler's
-own program through typed adapters, and no other program. Between runs it keeps the
-operation journal that [Moves](#moves) describes, and the registry and the
-pressure reading that [Clients and Schedule](#clients-and-schedule)
-describes. [AGENTS.md](AGENTS.md) states the rules that
-bind any operation that changes a file: an inspectable plan, stated
-preconditions, and a journal entry. In Suds, optimization means a measured
-reduction in storage use, structural friction, or operational residue.
-Suds makes no claim about machine performance.
-
-## Default Roots on macOS
-
-Without `--root`, `suds inspect` on macOS reads these roots in the user's
-home directory. A root that does not exist appears as `absent`, and an
-absent root is no error.
-
-| Identifier | Kind | Path |
-| :--- | :--- | :--- |
-| `macos.user-caches` | `cache` | `~/Library/Caches` |
-| `macos.user-logs` | `logs` | `~/Library/Logs` |
-| `macos.xcode-derived-data` | `generated` | `~/Library/Developer/Xcode/DerivedData` |
-| `macos.downloads` | `inbox` | `~/Downloads` |
-| `macos.trash` | `trash` | `~/.Trash` |
-
-A kind names a root's usual contents. It grants no authority to remove
-anything.
-
-The profile holds no system-owned path, such as `/System`, `/Library`, or
-`/private`, and no other user's home directory. It also leaves
-`~/Library/Application Support`, `~/Library/Containers`, Xcode archives,
-simulator data, browser profiles, mail and message databases, and
-synchronized documents unread.
-
-On macOS, the system's privacy controls protect some locations, including
-`~/.Trash` and parts of `~/Library/Caches`. Unless the terminal holds
-Full Disk Access, Suds reports such a root as `unreadable` or `partial` and
-lists each refusal in the report.
-
-## Linux
-
-On Linux, the storage profile requires each root as an argument, as in
-`suds inspect --root ~/.cache`. It has no default roots there, so
-`suds inspect` without `--root` exits with status 2. The development
-profile needs no root on either system.
-
-## Desktop Application
-
-The window `suds-desktop` shows one workstation's development storage. It
-measures the roots that the settings name, as `suds maintain` measures
-them. A measurement changes nothing beneath a root. The window saves each
-whole reading in the state directory and opens with the saved one while it
-measures again.
-
-The window shows the pressure against the ceiling and each class of
-development storage. It groups the checkouts of one repository into a
-project: the repository's own checkout and each worktree. A storage map
-draws each project and each checkout as a rectangle with the area of its
-size on disk, and build state takes its own color. An outline beneath
-the map lists each project with its sums, and an open project lists its
-checkouts. A filter keeps the checkouts whose path holds its text, and the
-projects order by size, name, last change, or build state. A pane shows the
-selected project or checkout: its size, its build directories, and its
-use by a tool. A second pane groups the shared stores by
-ecosystem, by tool, or by storage class, and a click opens a group. An
-ecosystem is a language: Cargo and sccache both serve Rust. Each store
-stands against its budget, and a store over its budget shows in red.
-
-The button Free space plans a reclaim as `suds reclaim` plans one and
-lists each removal with its size and its evidence. A person clears the mark
-of a removal to leave it out, and nothing leaves the disk before the person
-approves the run. The journal records the run.
-
-The window also states a fault of the scheduled maintenance. A chip beside
-the pressure's level counts the notices, and a click on it lists them. A
-notice names absent or stale units or a schedule without a run in a day.
-Each store that the last scheduled run could not trim has a notice too.
-
-The button History lists each run that the journal records, most recent
-first, with its outcome and the bytes that it freed. A selected run lists
-its steps, and a step that did not succeed states its reason.
-
-Run it with `task desktop`. Control and F moves to the filter, Control and R
-measures again, and the arrow keys move through the list. The window draws
-with [Slint](https://slint.dev/), without a web view, and runs on Linux
-(decision 0003). On macOS, decision 0005 proposes a window in Swift with
-the system's own controls, and this release holds none. The command line
-serves each subject on both systems.
-
-## Installation for Contributors
-
-Contributors build Suds from source. The [mise](https://mise.jdx.dev/)
-version manager installs the pinned Rust toolchain,
-[Task](https://taskfile.dev/), and yamlfmt:
+## Quick Start
 
 ```sh
-mise install
-task build
-./target/release/suds inspect
-task desktop            # the desktop application, on Linux
-```
-
-The repository is a Cargo workspace. The `crates/suds-core` crate holds the
-inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/desktop` holds
-the desktop application. Neither interface invokes the other.
-
-## Usage
-
-```sh
-suds inspect                            # the default profile, as a table
-suds inspect --format json              # one JSON document on standard output
-suds inspect --root PATH                # one root in place of the profile
-suds inspect --root PATH --root PATH    # several roots, in the order given
-suds inspect --top 20                   # list 20 children of each root in the table
-```
-
-Explicit roots replace the default profile. Suds resolves a relative root
-against the working directory and shows each path in absolute, normalized
-form. The `--top` option limits only the number of children in the table,
-and the JSON document
-lists every direct child.
-
-The table lists each root's allocated and logical sizes in binary units
-(KiB, MiB, GiB), its counts of files, directories, and symbolic links, its
-status, and the duration of its scan. Each root's largest direct
-children follow, ranked by allocated size, then by logical size, then by
-name. The table escapes each control character in a name, a path, or an
-error message, so a file's name cannot rewrite the terminal. The JSON
-document keeps every name unchanged.
-
-## Development Profile
-
-```sh
+# Measure each checkout beneath a workspace, with its build output and the shared stores.
 suds inspect --profile development --root ~/workspace
-suds inspect --profile development --root ~/workspace --format json
-suds inspect --profile development      # the stores and toolchains alone
+
+# Plan the removal of build output that no process uses. The plan removes nothing.
+suds reclaim --root ~/workspace
+
+# Remove what the plan names.
+suds reclaim --root ~/workspace --apply
+
+# Plan each shared store's trim to its budget, then run the trims.
+suds stores
+suds stores --apply
+
+# Plan the schedule that runs `suds maintain`, then place it.
+suds schedule --install
+suds schedule --install --apply
 ```
 
-Each `--root` names a directory beneath which Suds looks for checkouts. The
-profile works on macOS and on Linux. It writes a terminal table or one
-`suds.development/v1` document, and it changes nothing.
-
-Each class rests on proof from its program's own layout, and a name alone
-proves none:
-
-| Class | Proof |
-| :--- | :--- |
-| Main checkout | A directory whose `.git` is a directory |
-| Linked checkout | A directory whose `.git` file names an entry of a main checkout's `worktrees` directory |
-| Cargo build state | A `target` directory that holds `CACHEDIR.TAG`, beside a `Cargo.toml` |
-| Node build state | A `node_modules` directory beside a `package.json` or a `pnpm-workspace.yaml`, or one that holds the state file of pnpm or npm |
-| CMake build state | A directory that holds `CMakeCache.txt` |
-| vcpkg build state | A `vcpkg_installed` directory beside a `vcpkg.json` |
-| Go cache in a checkout | A directory that holds `README`, `trim.txt`, `00`, and `ff`, or one that holds `cache/download` |
-| ccache cache in a checkout | A directory whose `0` directory holds `CACHEDIR.TAG` and `stats` |
-| vcpkg checkout | A directory that holds `.vcpkg-root` |
-| Virtual machine | A directory that holds Lima's `lima.yaml` beside a `diffdisk` or a `basedisk`, or one that holds a `datadisk` |
-
-Suds claims build state only beneath a checkout, so build output that no
-checkout owns stays unclassified. A submodule stays a part of its parent
-checkout. A checkout's own size leaves out its build state and each
-checkout beneath it.
-
-The profile then measures each shared store and toolchain directory at the
-location that its program documents: the program's own variable first, and
-its default beneath the home directory otherwise.
-
-| Identifier | Variable | Default on Linux |
-| :--- | :--- | :--- |
-| `go.build-cache` | `GOCACHE` | `~/.cache/go-build` |
-| `go.module-cache` | `GOMODCACHE`, `GOPATH` | `~/go/pkg/mod` |
-| `cargo.registry` | `CARGO_HOME` | `~/.cargo/registry` |
-| `pnpm.store` | `PNPM_HOME`, `XDG_DATA_HOME` | `~/.local/share/pnpm/store` |
-| `sccache.cache` | `SCCACHE_DIR` | `~/.cache/sccache` |
-| `ccache.cache` | `CCACHE_DIR` | `~/.cache/ccache` |
-| `vcpkg.binary-cache` | `VCPKG_DEFAULT_BINARY_CACHE` | `~/.cache/vcpkg/archives` |
-| `mise.installs` | `MISE_DATA_DIR` | `~/.local/share/mise/installs` |
-| `lima.machines` | `LIMA_HOME` | `~/.lima` |
-| `colima.machines` | `COLIMA_HOME` | `~/.colima` |
-
-On macOS, the cache directory is `~/Library/Caches`, pnpm's store lies in
-`~/Library/pnpm/store`, and sccache's cache lies in
-`~/Library/Caches/Mozilla.sccache`. A store is `present` when its directory
-exists, `absent` when none exists, and `unrecognized` when a directory
-exists without the entry that its program writes there. A store is
-`unreadable` when Suds cannot examine its location, or when a symbolic link
-stands on its path beneath the home directory. Suds follows no such link,
-and the report's errors name the path.
-
-A virtual machine's disk holds its container engine's images and volumes.
-The profile counts each one toward the development storage, beside the
-stores or inside a checkout. `suds stores` reports a
-machine whose disk exceeds 60 GiB, and it trims none, because no build
-makes a volume again. With `--root DIR`, the plan also looks beneath that
-directory and reports each machine inside a checkout.
-
-A root may be a mount point, and Suds enters no mount point beneath a root.
-When one root lies beneath another, Suds inspects the outer root alone, so
-no checkout counts twice.
-
-A file with several links counts once, toward the first class that reaches
-it. The checkouts come before the stores, so the checkouts' sizes sum to
-the figure that `du` reports for the same directories.
-
-The profile reads the content of one file in each linked checkout. The
-checkout's `.git` file holds one line that names its repository, and Suds
-reads that line.
-
-## Reclamation
-
-```sh
-suds reclaim --root ~/workspace                 # the plan, with nothing changed
-suds reclaim --root ~/workspace --apply         # remove what the plan names
-suds reclaim --root ~/workspace --checkouts     # consider linked checkouts too
-suds reclaim --root ~/workspace --idle-minutes 240
-```
-
-The command inspects the [development profile](#development-profile) of
-each root and plans the removal of each checkout's build state. Without
-`--apply` it prints the plan and changes nothing. Each candidate carries
-its decision and the evidence for it, and `--format json` writes the whole
-`suds.reclaim/v1` plan.
-
-Suds keeps a directory of build state in each of these cases:
-
-- A process works in the checkout that owns the directory. Suds reads each
-  process's working directory from `/proc` on Linux and from `lsof` on
-  macOS.
-- An entry in the directory changed within the idle time, which is 60
-  minutes unless `--idle-minutes` names another. A recent change suggests
-  a build in progress. No age ever causes a removal.
-- Suds could not read the processes' working directories. On Linux, the
-  kernel hides the working directory of a process that forbids its own
-  inspection. While this user runs such a process, Suds keeps every
-  directory, and the plan names the process. The option
-  `--tolerate-unreadable-processes` accepts those processes.
-- Git tracks a file in the directory, or would track one. Suds removes a
-  directory only when Git ignores every file beneath it.
-- A repository beneath it holds a changed file, or a commit that no
-  remote-tracking branch holds. A build fetches some dependencies as
-  repositories, and one that holds only what it fetched keeps nothing.
-- A mount point lies beneath it, or Suds could not read an entry there.
-- Another user owns a directory in it, as a container that runs as the
-  administrator leaves it. Suds removes nothing with an administrator's
-  rights, so an administrator removes such a directory.
-
-The plan also names each toolchain that a checkout fetched into its own
-tree as a repository, such as a vcpkg checkout, which the checkout's build
-fetches again. The same protections hold, and Git must report that the
-repository holds only what a remote holds.
-
-A repository inside a candidate leaves with it only when a layout proves
-that a build fetched it. CMake's `_deps/<name>-src` beside
-`_deps/<name>-subbuild` is such a layout. Such a repository must hold a clean tree, no
-second worktree, and no commit, branch, tag, or stash that a remote lacks.
-Any other repository is a checkout, and it keeps the candidate. A
-registration of a directory inside a candidate keeps the candidate too.
-
-The `suds reclaim` plan considers released linked checkouts by default and
-considers all linked checkouts with `--checkouts`. Git must report no
-changed, staged, or untracked file there. No process may work in the
-checkout, no entry may have changed within the idle time, and no client may
-hold an unreleased registration.
-
-A remote-tracking branch can show that a remote holds the checkout's
-head. A person who runs `suds reclaim --apply` can also use a release with
-`--landed COMMIT` as evidence while the head still matches `COMMIT`.
-
-A scheduled run with standing approval requires a release with
-`--landed COMMIT`. At planning and before removal, Suds checks that the
-head matches the release and that a local remote-tracking reference
-contains it. Suds accounts for every entry in the checkout. The landed
-tree accounts for tracked files and their directories. The build-state
-rules above account for ignored build output. Any other file or directory
-keeps the checkout, as does a checkout beneath it, a mount point, or an
-entry Suds could not read. The plan or journal names the first path that
-keeps the checkout.
-
-Suds has Git remove the linked checkout without force. The branch and its
-commits stay in the repository. Suds never names a main checkout.
-
-With `--apply`, Suds records the plan in the journal and judges each
-candidate again immediately before its removal. The directory must be the
-entry that the plan measured, with no symbolic link in its path. Suds then
-observes the processes, measures the directory, and asks Git anew, and it
-applies every rule of the plan to what it finds. One refusal leaves the other candidates to proceed. The journal records the
-plan, the authority for the run, and each removal or refusal. When Suds
-finds a local remote-tracking reference that contains the released head at
-removal, the journal records it. The `suds journal` command lists the run
-with its removals. A removal has no undo.
-
-## Store Budgets
-
-```sh
-suds stores                                  # the plan, with nothing changed
-suds stores --apply                          # run each trim that the plan names
-suds stores --budget go.build-cache=20G --budget docker.images=40G
-```
-
-The command measures each store of the
-[development profile](#development-profile) and asks Docker for its own
-usage. A store that exceeds its budget takes the trim of its own program.
-Without `--apply` the command prints the plan, with each command that it
-would run, and changes nothing.
-
-| Store | Default budget | Trim | What the trim removes |
-| :--- | :--- | :--- | :--- |
-| `go.build-cache` | 10 GiB | `go clean -cache` | Every cached build output |
-| `go.module-cache` | 10 GiB | `go clean -modcache` | Every downloaded module |
-| `pnpm.store` | 10 GiB | `pnpm store prune --store-dir DIR` | Each package that no project references |
-| `ccache.cache` | 10 GiB | `ccache --trim-dir DIR --trim-max-size SIZE` | The least recently used results beyond the budget |
-| `mise.installs` | 20 GiB | `mise prune --yes` | Each tool version that no tracked configuration names |
-| `docker.images` | 20 GiB | `docker image prune --all --force` | Each image that no container uses |
-| `docker.build-cache` | 10 GiB | `docker builder prune --force` with the builder's size option | The build cache beyond the budget |
-| `docker.anonymous-volumes` | 1 GiB | `docker volume prune --force` | Each anonymous volume that no container uses |
-
-Each command names the store that Suds measured. The commands of Go and
-mise receive it in `GOCACHE`, `GOMODCACHE`, or `MISE_DATA_DIR`, and the
-commands of pnpm and ccache receive it as an argument. Each command runs in
-the root directory, so no project's configuration redirects it to another
-store. Docker's own builder bounds its cache with `--keep-storage`, and the
-buildx builder bounds it with `--max-used-space`, so Suds reads the
-command's help to choose.
-
-A program's trim decides what leaves. Go offers no partial trim, so a cache
-beyond its budget leaves whole, and the next build fills it again. The
-trims of pnpm, mise, and Docker's images remove what nothing references,
-so a store can stay beyond its budget after its trim.
-
-Suds reports these stores and trims none of them:
-
-- `cargo.registry`, `sccache.cache`, and `vcpkg.binary-cache` have no
-  budget here. Cargo and sccache bound their own stores, and vcpkg offers
-  no trim.
-- A store whose directory lacks its program's marker has no proven owner.
-- A named Docker volume that no container uses may hold data that nothing
-  regenerates. The plan lists each one as `awaits_person`, and Suds removes
-  none.
-
-A store whose newest entry changed within the idle time stays, because a
-build may write it. The journal records each trim with the store's size
-before and after it, and `suds journal` lists the run.
-
-## Clients and Schedule
-
-A client is a program that works in checkouts, such as Bosun or an agent
-that a person drives. Each client uses the same commands.
-
-```sh
-suds register --checkout DIR --client bosun --attempt wf-12
-suds release --checkout DIR --client bosun --attempt wf-12
-suds pressure --format json
-suds maintain
-suds schedule                          # print the units of this system
-suds schedule --install                # plan the installation
-suds schedule --install --apply        # place the units and start the schedule
-suds schedule --check                  # state whether the placed units are current
-```
-
-The `register` command records that a client holds a checkout, and
-`release` records that the client's work there ended. Both append one
-`suds.registry/v1` record to `registry.jsonl` in the state directory. A
-registration adds knowledge and no permission:
-
-- Suds removes nothing beneath a checkout that a client registered and has
-  not released, and it reads the registry anew before each removal.
-- A release ends the registration for its client and attempt. In
-  `suds reclaim`, a linked checkout that its clients have released takes
-  priority over other checkouts. The rules of [Reclamation](#reclamation)
-  decide whether it leaves.
-- A client can report delivery with `suds release --checkout DIR --client
-  bosun --attempt wf-12 --landed COMMIT`. After a squash merge, a pull
-  request's head can serve as evidence if Git fetched it into a local
-  remote-tracking reference. A person can also approve removal based on a
-  matching release when no local reference contains the released head.
-
-The `maintain` command is the run that a schedule starts. It inspects the
-roots that the settings name, and it records one `suds.pressure/v1` reading
-in the state directory. The usage counts each root, each checkout with its
-build state, and each store. Docker keeps its own storage, which the usage
-leaves out. The `pressure` command prints the last reading and measures
-nothing, so a client can read it before each start.
-
-| Level | Usage | A client's response |
-| :--- | :--- | :--- |
-| `normal` | Below 80 percent of the ceiling | Start work |
-| `soft` | From 80 percent | Reclaim before more work |
-| `hard` | From 95 percent | Start no work |
-
-The level rises at once. It falls only after the usage has stayed lower for
-five minutes, so a reading near a threshold holds one level. The ceiling is
-the greater of half of the disk and 100 GiB unless the settings name
-another. Each reading says in its `enforced` field whether a filesystem
-limit enforces the ceiling, as [Arena](#arena) describes.
-
-With the owner's standing approval in the settings, `maintain` reclaims
-derived state, removes eligible landed linked checkouts, and trims the
-stores. The journal records the standing approval as the run's authority.
-
-Suds reads its settings from the file `settings.json`. On Linux the file
-lies in `~/.config/suds`, and on macOS it lies in
-`~/Library/Application Support/Suds`. No command writes the file, and a
-file that Suds cannot parse stops the run.
-
-```json
-{
-  "roots": ["/home/me/workspace"],
-  "standing_approval": true,
-  "idle_minutes": 60,
-  "ceiling_bytes": null,
-  "tolerate_unreadable_processes": false,
-  "budgets": { "docker.images": 42949672960 }
-}
-```
-
-The `schedule` command prints the units that run `suds maintain` every 30
-minutes: a service and a timer for systemd, or an agent for launchd. It
-writes for the scheduler of this system, and `--scheduler` names the other
-one. The option `--minutes` sets another time between two runs.
-
-With `--install`, the command plans the installation and changes nothing.
-The plan lists each file that it creates, replaces, or keeps, each command
-of the scheduler that it runs, and the text of each unit. With `--apply`
-too, the command writes each file beneath the user's own directory of units
-and then runs `systemctl --user` or `launchctl`, so it needs no
-administrator. The journal records each file and each command, and
-`suds journal` lists the run. A file that changed after the plan stays as
-it stands, and no command runs after it. Suds follows no symbolic link at a
-unit's path, so a linked unit fails the plan.
-
-With `--check`, the command reads the placed units and changes nothing. Its
-status is 0 when the units are the units of this release, and 1 when no
-unit stands in place or the placed units are stale. Units are stale when an
-earlier release wrote them, when they state no search path, or when they
-run another Suds program than the one that checks. The minutes and the
-search path are a person's choice, so the check accepts each value. A
-file that Suds cannot read fails the check with the reason.
-
-A scheduler starts a unit with a short search path of its own, which names
-no program that a version manager installed. The units therefore carry the
-search path of the shell that ran `suds schedule`, so a scheduled run finds
-the program of each store as that shell finds it.
-
-A run also looks beyond the search path. When the path resolves no program
-of a store, Suds takes the program from the first known directory that
-holds it. Those are the directories of mise, asdf, Cargo, Go, pnpm, Volta,
-Nix, and Homebrew, with `~/.local/bin` and `/usr/local/bin`. A unit with a
-stale search path therefore still trims its stores.
-
-A program from such a directory may start another, as a launcher of pnpm
-starts Node. Its command therefore runs with those directories on its
-search path, and the plan shows that path. A directory that the search
-could not read stands on the error stream, since a program may lie there
-unseen.
-
-## Arena
-
-```sh
-suds arena                       # the first root of the settings
-suds arena --root ~/workspace --format json
-```
-
-The arena is the development storage under its ceiling. The command reports
-the ceiling, the size and the free space of the root's filesystem, and
-whether a filesystem enforces the ceiling. It writes a table or one
-`suds.arena/v1` document.
-
-A filesystem enforces the ceiling when the root lies on a filesystem of its
-own that is no larger than the ceiling: an APFS volume under a quota, or a
-partition of that size. Every other root and every store must lie on that
-same filesystem, and the report lists each one that lies outside it. Suds
-audits no root through a symbolic link. Development storage then cannot fill the system's
-volume, whatever fills the arena. Suds reads what any user can read, so it
-cannot see a quota group of btrfs or a project quota of XFS, and it reports
-such a root as not enforced.
-
-Where nothing enforces the ceiling, the command prints the commands that
-would enforce it. APFS takes `diskutil apfs addVolume` with a quota. A btrfs
-filesystem takes a subvolume under a quota group, and XFS takes a project
-quota. Most of the commands need an administrator. Suds runs none of them and requests no privilege. Each command quotes its
-paths for a shell. The plan
-creates an empty location under the limit and moves nothing.
-
-Until a filesystem enforces the ceiling, Suds holds it by measurement
-alone, through the pressure reading of each maintenance run.
-
-## JSON Output
-
-The `--format json` option writes exactly one JSON document to standard
-output and nothing else. The document carries the schema tag
-`suds.inspection/v1`, the operating system and architecture, the time of
-the observation, and the overall status, `complete` or `partial`. Each
-root's entry carries these fields:
-
-- `id`, `kind`, and the normalized `path`
-- `status`, one of `complete`, `partial`, `absent`, or `unreadable`
-- `elapsed_ms`, the duration of the root's scan
-- `logical_bytes` and `allocated_bytes`
-- `files`, `directories`, `symlinks`, and `others`
-- `oldest_modified` and `newest_modified`, in RFC 3339 form and UTC
-- `children`, every direct child with the same measurements and its type
-- `skipped_mount_count` and `skipped_mounts`, the mount points that the
-  scan did not enter
-- `error_count` and `errors`, the traversal errors with their paths, kinds,
-  and messages
-
-The `errors` and `skipped_mounts` lists hold at most ten entries each, and
-the counts beside them cover every occurrence. A root's measurement covers
-every entry beneath the root, and a child's measurement covers the child
-and every entry beneath it. Paths that are not valid UTF-8 appear with
-replacement characters. Suds records each native path internally, so the
-replacement affects only the report.
-
-## Moves
-
-```sh
-suds plan move --from ~/Downloads/report.pdf --to ~/Documents/Research --output plan.json
-suds apply plan.json        # one suds.run/v1 JSON document on standard output
-suds journal                # every run, most recent first (--format json for JSON)
-suds undo RUN               # return each moved entry to its original path
-```
-
-The `plan` command reads metadata and moves nothing. It writes one
-`suds.plan/v1` document, which names every source and destination by its
-path's bytes in hexadecimal beside a display string, and records each
-entry's device, inode, type, size, and modification time. Every `--from`
-entry must lie in one directory. Planning resolves both directories to
-their canonical paths, and the preview shows them. The command refuses a
-symbolic link or a special file, a destination that exists, a destination
-inside the source, a directory that contains a mount point, and a
-destination on another filesystem. It also refuses to replace an existing
-output file. Where the measurement of a selected directory cannot read an
-entry, the plan and its preview name that entry with the reason.
-
-The `apply` command accepts only a plan that `suds plan` built and
-recorded in the journal, unchanged, and each plan runs once. Immediately before each move, Suds verifies the entry's
-recorded identity, the identity and canonical path of both directories,
-and that the destination is free, and it refuses an entry that holds the
-journal directory. Suds then renames the entry with the
-kernel's no-replace flag, so the move is atomic and overwrites nothing.
-After the rename, Suds confirms that the destination holds the planned
-entry. When another process swapped the source in the meantime, Suds
-returns the swapped entry and refuses the move. A refused move leaves the
-other moves to proceed. The `undo` command
-reverses each move that remains applied, in reverse order. It refuses a move
-whose entry changed after the move and a move whose original path now holds
-another entry. Suds never merges, renames to avoid a conflict, copies, or
-deletes.
-
-The journal is an append-only file of `suds.journal/v1` records. On macOS
-it lies in `~/Library/Application Support/Suds/journal`. Its place on Linux
-is `~/.local/state/suds/journal`, and `XDG_STATE_HOME` moves it. The option
-`--journal DIR` names another directory. Suds records each
-move before and after its rename. When a run stops between those records,
-the next `apply` or `undo` examines both paths. If the entry lies at
-exactly one of them, Suds records which, and otherwise it records the move as
-`unresolved` and changes nothing. Suds opens no journal file through a
-symbolic link. A full disk or an interruption can cut an append short, and
-the bytes that remain form no record, so a reader sets them aside and the
-next writer removes them.
-
-| Status | Meaning for `plan`, `apply`, and `undo` |
-| :--- | :--- |
-| `0` | Suds wrote the plan, or every move succeeded. |
-| `1` | Suds refused the plan, or it refused one or more moves. |
-| `2` | The invocation failed, or Suds refused the plan file, the run, or the journal before any move. |
-
-### Known Limitation
-
-No system call renames an entry on the condition of its inode. Another
-process can therefore swap a source between Suds's last check and the
-rename. Suds detects the swap and returns the swapped entry. When yet
-another entry has taken the source path by then, Suds overwrites nothing,
-leaves both entries in place, and records the move as `unresolved` with
-what it found at each path.
-
-## Measurements
-
-- **Logical bytes** sum the sizes of regular files.
-- **Allocated bytes** sum the 512-byte blocks that each entry occupies,
-  including directories and symbolic links. On APFS, clones, compression,
-  snapshots, and purgeable storage can make the space that removal would
-  recover differ from this estimate.
-- **Hard-linked files** contribute their bytes once for each root, through
-  the first link that the scan reaches, and each link still counts as a
+Each command that changes the disk prints its plan first and changes
+nothing without `--apply`. The journal records each run, and
+`suds journal` lists the runs.
+
+---
+
+## Capabilities
+
+- **Measures development storage**: the `suds inspect` command reports each
+  checkout, its build output, and each shared store, toolchain, and virtual
+  machine, as a table or as one JSON document →
+  [inspection guide](docs/guides/inspect.md)
+- **Reclaims build output**: the `suds reclaim` command removes build state
+  that its ecosystem's layout proves and that no process uses. It also
+  removes a linked worktree that Git finds clean and that a remote holds →
+  [reclamation guide](docs/guides/reclaim.md)
+- **Holds stores to budgets**: the `suds stores` command trims the stores of
+  Go, pnpm, ccache, mise, and Docker through each store's own program →
+  [store budgets guide](docs/guides/stores.md)
+- **Keeps a ceiling without a person**: the `suds maintain` command
+  measures on a schedule and records the pressure against the ceiling. A
+  client registers the checkouts that it works in, and Suds removes
+  nothing beneath them →
+  [clients and schedule guide](docs/guides/maintenance.md)
+- **Reports the ceiling**: the `suds arena` command states the ceiling of
+  development storage and whether a filesystem enforces it →
+  [arena guide](docs/guides/arena.md)
+- **Moves entries through a plan**: the `suds plan`, `suds apply`, and
+  `suds undo` commands move a directory's children and return them →
+  [moves guide](docs/guides/moves.md)
+- **Shows the workstation in a window**: the desktop application draws the
+  pressure, a storage map of each project, and the stores. It plans a
+  reclaim for a person's approval and lists the journal's runs →
+  [desktop guide](docs/guides/desktop.md)
+
+---
+
+## Guarantees
+
+- **No change without a plan**: Suds moves an entry or removes a directory
+  only through a recorded plan, and it copies and overwrites nothing. It
+  deletes only what a recorded reclaim plan names.
+- **A journal of each run**: the journal records each step of each run, and
+  the `suds undo` command returns each entry that a run moved.
+- **Each store's own program**: Suds removes no entry of a store itself.
+  Go, pnpm, ccache, mise, and Docker each trim their own store.
+- **Metadata alone**: Suds reads metadata and directory listings, and it
+  reads no extended attribute. The development profile opens the `.git`
+  file of each linked checkout, and no other inspection opens a regular
   file.
-- **Symbolic links** count as entries, and the scan never follows them. A
-  root that is itself a symbolic link, such as `/tmp` on macOS, counts as
-  one link, and the scan reads nothing beyond it. A default root whose path
-  beneath the home directory passes through a symbolic link is
-  `unreadable`, and its `errors` name the link. The operating system
-  resolves the directories above an explicit root, because the operator
-  names that path.
-- **Mount points** bound the scan. The scan stays on each root's filesystem
-  and reports every mount point it skips. On Linux 5.8 and later, the scan
-  also stops at a bind mount on the root's own device. When that check fails
-  for a directory, the scan records the error and leaves the directory
-  unmeasured.
-- **Read failures**, such as a permission refusal or a vanished entry, make
-  the root `partial` and appear in its `errors`. Suds never suppresses such
-  an error.
+- **No network and no privilege**: Suds sends no telemetry, makes no
+  network request, and never requests elevated privileges.
+- **No system path**: the default profile holds no system-owned path. For
+  an explicit root, Suds reads only the path that the caller names, with
+  the caller's own permissions.
 
-## Exit Status
+A report can reveal private file and directory names, so treat it as local
+machine data. Suds makes no claim about machine performance: optimization
+here means a measured reduction in storage use. [AGENTS.md](AGENTS.md)
+states the rules that bind each operation that changes a file.
 
-| Status | Meaning |
+---
+
+## Documentation
+
+| Topic | Where |
 | :--- | :--- |
-| `0` | The inspection completed. An absent root leaves this status unchanged. |
-| `1` | Suds produced a report, but one or more present roots are `partial` or `unreadable`. |
-| `2` | The invocation failed, no default profile exists for the platform, or Suds could not write the report. |
+| The `suds inspect` command, its profiles, and its JSON document | [Inspection guide](docs/guides/inspect.md) |
+| Removing build output and landed worktrees | [Reclamation guide](docs/guides/reclaim.md) |
+| Budgets of the shared stores | [Store budgets guide](docs/guides/stores.md) |
+| The registry of clients, the pressure, and the schedule | [Clients and schedule guide](docs/guides/maintenance.md) |
+| The ceiling and its enforcement | [Arena guide](docs/guides/arena.md) |
+| Moves, the journal, and undo | [Moves guide](docs/guides/moves.md) |
+| The desktop application | [Desktop guide](docs/guides/desktop.md) |
+| Decisions and their reasons | [`docs/decisions/`](docs/decisions/) |
+| Building and testing Suds | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Each release | [`CHANGELOG.md`](CHANGELOG.md) |
 
-## Safety Properties
+---
 
-- Suds sends no telemetry and makes no network request.
-- Suds reads metadata and directory listings, and it reads no extended
-  attribute. The development profile opens the `.git` file of each linked
-  checkout, and no other inspection opens a regular file.
-- Suds never requests elevated privileges.
-- Suds moves an entry only through a recorded plan, and it copies and
-  overwrites nothing. It deletes only what a recorded reclaim plan names:
-  build state that its ecosystem's layout proves, and a linked checkout
-  that Git finds clean and that a remote holds.
-- The default profile holds no system-owned path. For an explicit root,
-  Suds reads only the path that the caller names, with the caller's own
-  permissions.
-- The report can reveal private file and directory names. Treat it as local
-  machine data.
+## Status
 
-## Development
+Suds is under active development, and a release may change a command or a
+file format.
 
-| Command | Description |
-| :--- | :--- |
-| `task build` | Build the release binary |
-| `task test` | Run the unit and command-line tests |
-| `task lint` | Check formatting, Clippy lints, and YAML formatting |
-| `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
-| `task check` | Build, test, and lint |
-| `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
-| `task desktop` | Run the desktop application |
-| `task desktop:install` | Install the desktop application for this user |
-| `task desktop:check` | Build, test, and lint the desktop application and its view model |
+- The `suds` command runs on macOS on Apple silicon and on Linux on x64
+  and arm64.
+- The desktop application runs on Linux. Decision
+  [0005](docs/decisions/0005-macos-window.md) proposes a native window for
+  macOS, and no release holds one.
 
-The `task check` command needs no network service, container, or elevated
-privilege once `mise install` has run. The `task desktop:check` command
-needs a display's libraries, and CI runs it on Linux. [CONTRIBUTING.md](CONTRIBUTING.md)
-describes the conventions of the repository.
+---
 
 ## License
 
-Suds is available under the [Apache License 2.0](LICENSE).
+Pithecene LLC distributes Suds under the Apache License 2.0 (see
+[`LICENSE`](LICENSE)). Copyright © 2026 Pithecene LLC.
+
+Pithecene answers inquiries at contact@pithecene.sh.
+[`SECURITY.md`](SECURITY.md) describes the procedure for reporting a
+vulnerability.

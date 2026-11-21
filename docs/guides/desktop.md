@@ -5,6 +5,42 @@ check it, and how to give it a new view. Decision
 [0003](../decisions/0003-native-interface.md) states why the window is
 native and why its toolkit is Slint.
 
+## Views
+
+The window `suds-desktop` shows one workstation's development storage. It
+measures the roots that the settings name, as `suds maintain` measures
+them. A measurement changes nothing beneath a root. The window saves each
+whole reading in the state directory and opens with the saved one while it
+measures again.
+
+The window shows the pressure against the ceiling and each class of
+development storage. It groups the checkouts of one repository into a
+project: the repository's own checkout and each worktree. A storage map
+draws each project and each checkout as a rectangle with the area of its
+size on disk, and build state takes its own color. An outline beneath
+the map lists each project with its sums, and an open project lists its
+checkouts. A filter keeps the checkouts whose path holds its text, and the
+projects order by size, name, last change, or build state. A pane shows the
+selected project or checkout: its size, its build directories, and its
+use by a tool. A second pane groups the shared stores by
+ecosystem, by tool, or by storage class, and a click opens a group. An
+ecosystem is a language: Cargo and sccache both serve Rust. Each store
+stands against its budget, and a store over its budget shows in red.
+
+The button Free space plans a reclaim as `suds reclaim` plans one and
+lists each removal with its size and its evidence. A person clears the mark
+of a removal to leave it out, and nothing leaves the disk before the person
+approves the run. The journal records the run.
+
+The window also states a fault of the scheduled maintenance. A chip beside
+the pressure's level counts the notices, and a click on it lists them. A
+notice names absent or stale units or a schedule without a run in a day.
+Each store that the last scheduled run could not trim has a notice too.
+
+The button History lists each run that the journal records, most recent
+first, with its outcome and the bytes that it freed. A selected run lists
+its steps, and a step that did not succeed states its reason.
+
 ## Layers
 
 The window stands on three crates, and each one knows only the crate
@@ -188,6 +224,16 @@ DISPLAY=:96 import -window root window.png
 
 The first measurement of a large workspace takes some seconds, so the
 picture waits for it.
+
+A picture for a document shows no real workstation. The variable
+`SUDS_SHOW_READING` names a file in the form of `reading.json`. The window
+then shows that file's reading and measures nothing, and its refresh
+button does nothing. The plan and the history still read the real
+workstation.
+
+```sh
+SUDS_SHOW_READING=docs/assets/reading.json target/release/suds-desktop
+```
 
 ### Screen Reader Access
 

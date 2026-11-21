@@ -4370,9 +4370,14 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "suds-build",
  "suds-core",
  "tempfile",
 ]
+
+[[package]]
+name = "suds-build"
+version = "0.1.4"
 
 [[package]]
 name = "suds-core"
@@ -4391,6 +4396,7 @@ dependencies = [
  "i-slint-backend-testing",
  "slint",
  "slint-build",
+ "suds-build",
  "suds-core",
  "suds-view",
  "tempfile",

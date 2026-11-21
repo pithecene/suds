@@ -136,6 +136,9 @@ export component Window inherits Window {
     in property <[string]> notices;
     in property <bool> measured;
     in property <string> observed;
+    // What About states of this build: its version and commit, then its owner and licence.
+    in property <string> build;
+    in property <[string]> build-notice;
 
     in property <string> usage;
     in property <string> ceiling;
@@ -255,9 +258,9 @@ export component Window inherits Window {
 
     about := PopupWindow {
         x: (root.width - 360px) / 2;
-        y: (root.height - 300px) / 2;
+        y: (root.height - 420px) / 2;
         width: 360px;
-        height: 300px;
+        height: 420px;
         Card {
             background: Palette.background;
             VerticalLayout {
@@ -265,6 +268,11 @@ export component Window inherits Window {
                 spacing: 12px;
                 Text { text: "Suds"; font-size: 18px; font-weight: 600; horizontal-alignment: center; }
                 Caption { text: "Bounded development storage for one workstation."; horizontal-alignment: center; }
+                Text { text: "Version " + root.build; horizontal-alignment: center; wrap: word-wrap; }
+                VerticalLayout {
+                    spacing: 2px;
+                    for line in root.build-notice: Caption { text: line; horizontal-alignment: center; }
+                }
                 AboutSlint { }
             }
         }

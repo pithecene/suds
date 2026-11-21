@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// Suds measures storage and moves entries only through a reviewed plan,
 /// which the journal records and `suds undo` reverses.
 #[derive(Debug, Parser)]
-#[command(name = "suds", version)]
+#[command(name = "suds", version, long_version = suds_build::long_version())]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

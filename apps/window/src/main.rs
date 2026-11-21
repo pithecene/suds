@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use suds_core::development::Environment;
 use suds_core::reclaim::execute::ReclaimReport;
+use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
     Checkout, Observation, Project, Proposal, Sort, Workstation, map, observe, projects, propose,
 };
@@ -40,6 +41,9 @@ enum Pick {
 
 /// The height of one row of the outline, as `window.slint` draws it.
 const ROW: f32 = 38.0;
+
+/// The height of one row of the plan's removals, as `window.slint` draws it.
+const PLAN_ROW: f32 = 44.0;
 
 /// What the window holds from one event to the next.
 #[derive(Default)]
@@ -67,6 +71,13 @@ struct State {
     evidence: Option<usize>,
     /// Whether a plan or a run is in progress. A second request starts none.
     working: bool,
+    /// Whether a run is removing directories. The window stays until it ends.
+    applying: bool,
+    /// Whether a run began since the plan's view opened. A run that fails may still have
+    /// changed the disk.
+    ran: bool,
+    /// Whether a person asked the window to close during a run.
+    leaving: bool,
 }
 
 impl State {
@@ -78,6 +89,47 @@ impl State {
     /// Marks a plan or a run as in progress, unless one is already.
     fn work(&mut self) -> bool {
         !std::mem::replace(&mut self.working, true)
+    }
+
+    /// Begins a run of the marked part of the plan, and returns that part. A run in
+    /// progress, or a view without a plan, begins none.
+    fn approve(&mut self) -> Option<ReclaimPlan> {
+        let chosen = self.proposal.as_ref()?.chosen(&self.excluded);
+        if !self.work() {
+            return None;
+        }
+        (self.applying, self.ran) = (true, true);
+        Some(chosen)
+    }
+
+    /// Ends a run, and returns whether a person asked the window to close during it.
+    fn finish(&mut self) -> bool {
+        (self.working, self.applying) = (false, false);
+        self.leaving
+    }
+
+    /// Whether the window may close now. A run in progress keeps it open until the run
+    /// ends, so no removal stops halfway and the journal records each outcome.
+    fn leave(&mut self) -> bool {
+        self.leaving = self.applying;
+        !self.applying
+    }
+
+    /// Moves the evidence's selection by `step` rows of the plan and returns the new row.
+    /// The first move selects the first row.
+    fn step(&mut self, step: i32) -> Option<usize> {
+        let removals = &self.proposal.as_ref()?.removals;
+        let last = removals.len().checked_sub(1)?;
+        let now = self.evidence.and_then(|candidate| {
+            let mut rows = removals.iter();
+            rows.position(|entry| entry.candidate == candidate)
+        });
+        let row = match now {
+            Some(row) => row.saturating_add_signed(step as isize).min(last),
+            None => 0,
+        };
+        self.evidence = Some(removals[row].candidate);
+        Some(row)
     }
 
     fn checkouts(&self) -> &[Checkout] {
@@ -265,11 +317,16 @@ fn show_projects(window: &Window, state: &mut State, query: &str, sort: i32) {
 /// The outline's offset that shows the row at `row`, from its offset now and the height that
 /// it shows. The offsets count downward from the outline's top.
 fn revealing(row: i32, offset: f32, visible: f32) -> f32 {
-    let top = row as f32 * ROW;
+    revealing_of(row, ROW, offset, visible)
+}
+
+/// The offset of a list with rows of `height` that shows the row at `row`.
+fn revealing_of(row: i32, height: f32, offset: f32, visible: f32) -> f32 {
+    let top = row as f32 * height;
     if top < offset {
         top
-    } else if top + ROW > offset + visible {
-        top + ROW - visible
+    } else if top + height > offset + visible {
+        top + height - visible
     } else {
         offset
     }
@@ -391,7 +448,7 @@ fn plan_reclaim(window: &Window, state: &mut State, tolerate: bool) {
     if !state.work() {
         return;
     }
-    (state.proposal, state.evidence) = (None, None);
+    (state.proposal, state.evidence, state.ran) = (None, None, false);
     state.excluded.clear();
     window.set_page(1);
     window.set_planning(true);
@@ -447,19 +504,15 @@ fn plan_toggle(window: &Window, state: &mut State, candidate: i32) {
 
 /// Applies the approved part of the plan on a thread of its own and shows what the run did.
 fn plan_apply(window: &Window, state: &mut State) {
-    let Some(proposal) = &state.proposal else {
+    let Some(chosen) = state.approve() else {
         return;
     };
-    let chosen = proposal.chosen(&state.excluded);
-    if !state.work() {
-        return;
-    }
     window.set_applying(true);
     background(
         window,
         move || suds_view::apply(&Environment::of_process(), &chosen, now()),
         |window, state, report: Result<ReclaimReport, String>| {
-            state.working = false;
+            let leaving = state.finish();
             window.set_applying(false);
             match report {
                 Err(reason) => {
@@ -472,8 +525,25 @@ fn plan_apply(window: &Window, state: &mut State) {
                     window.set_has_outcome(true);
                 }
             }
+            // A person asked the window to close during the run, and the run has ended.
+            if leaving {
+                let _ = slint::quit_event_loop();
+            }
         },
     );
+}
+
+/// Moves the evidence's selection by `step` rows and scrolls the plan until it shows the row.
+fn plan_step(window: &Window, state: &mut State, step: i32) {
+    let Some(row) = state.step(step) else {
+        return;
+    };
+    show_choice(window, state);
+    let (row, visible) = (i32::try_from(row).unwrap_or(0), window.get_plan_visible());
+    if visible > 0.0 {
+        let offset = revealing_of(row, PLAN_ROW, -window.get_plan_y(), visible);
+        window.set_plan_y(-offset);
+    }
 }
 
 thread_local! {
@@ -558,8 +628,28 @@ fn main() -> Result<(), slint::PlatformError> {
         ..State::default()
     }));
 
-    window.on_quit(|| {
-        let _ = slint::quit_event_loop();
+    // The key and the desktop's close button both wait for a run in progress.
+    window.on_quit({
+        let (weak, state) = (window.as_weak(), state.clone());
+        move || {
+            if state.borrow_mut().leave() {
+                let _ = slint::quit_event_loop();
+            } else if let Some(window) = weak.upgrade() {
+                window.set_closing(true);
+            }
+        }
+    });
+    window.window().on_close_requested({
+        let (weak, state) = (window.as_weak(), state.clone());
+        move || {
+            if state.borrow_mut().leave() {
+                return slint::CloseRequestResponse::HideWindow;
+            }
+            if let Some(window) = weak.upgrade() {
+                window.set_closing(true);
+            }
+            slint::CloseRequestResponse::KeepWindowShown
+        }
     });
     window.on_refresh({
         let weak = window.as_weak();
@@ -619,6 +709,7 @@ fn main() -> Result<(), slint::PlatformError> {
         state.evidence = candidate.filter(|candidate| state.evidence != Some(*candidate));
         show_choice(&window, state);
     }));
+    window.on_plan_step(on!(|window, state, step| plan_step(&window, state, step)));
     window.on_plan_apply(on!(|window, state| plan_apply(&window, state)));
     window.on_plan_close({
         let (weak, state) = (window.as_weak(), state.clone());
@@ -628,8 +719,9 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             window.set_page(0);
             state.borrow_mut().proposal = None;
-            // A run changed the disk, so the storage's figures are stale.
-            if window.get_has_outcome() {
+            // A run that began may have changed the disk, whether it ended well or not, so
+            // the storage's figures are stale.
+            if state.borrow().ran {
                 measure(&window, state.clone());
             }
         }
@@ -648,7 +740,76 @@ mod tests {
     use suds_core::stores::Budgets;
     use suds_view::{Sort, workstation};
 
-    use super::{Pick, ROW, Row, State, revealing};
+    use suds_core::reclaim::plan::{RECLAIM_SCHEMA, ReclaimPlan, Subject};
+    use suds_view::{Entry, Proposal};
+
+    use super::{PLAN_ROW, Pick, ROW, Row, State, revealing, revealing_of};
+
+    /// A state that shows a plan of removals with these candidates.
+    fn planned(candidates: &[usize]) -> State {
+        let plan = ReclaimPlan {
+            schema: RECLAIM_SCHEMA.into(),
+            id: "plan-1".into(),
+            created_at: "2026-11-21T00:00:00Z".into(),
+            idle_seconds: 3600,
+            tolerate_unreadable_processes: false,
+            candidates: Vec::new(),
+        };
+        let entry = |candidate: &usize| Entry {
+            candidate: *candidate,
+            path: format!("/work/{candidate}"),
+            checkout: format!("/work/{candidate}"),
+            project: "work".into(),
+            subject: Subject::LinkedCheckout,
+            bytes: 1,
+            within: None,
+            evidence: Vec::new(),
+        };
+        State {
+            proposal: Some(Proposal {
+                removals: candidates.iter().map(entry).collect(),
+                ..Proposal::of(plan, Vec::new())
+            }),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn the_keys_move_the_evidence_through_the_plan_and_stop_at_its_ends() {
+        let mut state = planned(&[7, 3, 5]);
+        assert_eq!(state.step(1), Some(0));
+        assert_eq!(state.evidence, Some(7));
+        assert_eq!(state.step(1), Some(1));
+        assert_eq!(state.step(5), Some(2));
+        assert_eq!(state.evidence, Some(5));
+        assert_eq!(state.step(-9), Some(0));
+        assert_eq!(planned(&[]).step(1), None);
+        assert_eq!(State::default().step(1), None);
+
+        // The plan scrolls by its own rows' height.
+        assert_eq!(
+            revealing_of(5, PLAN_ROW, 0.0, 2.0 * PLAN_ROW),
+            4.0 * PLAN_ROW
+        );
+    }
+
+    #[test]
+    fn a_run_keeps_the_window_open_and_marks_the_storage_stale() {
+        let mut state = planned(&[7]);
+        assert!(state.leave());
+        assert!(!state.ran);
+
+        assert!(state.approve().is_some());
+        // A second approval starts no run, and the window waits for the first.
+        assert!(state.approve().is_none());
+        assert!(state.ran);
+        assert!(!state.leave());
+        // The run ends and reports the wish to close. A run that failed is stale too.
+        assert!(state.finish());
+        assert!(state.ran);
+        assert!(state.leave());
+        assert!(State::default().approve().is_none());
+    }
 
     /// A state that shows a reading of the named checkouts, each with its size and its repository.
     fn showing(checkouts: &[(&str, u64, Option<&str>)]) -> State {

@@ -56,7 +56,8 @@ approves in the plan's view.
 | Control and Q | Closes the window |
 | Control and F | Moves to the filter |
 | Control and R | Measures again |
-| Up and Down | Move through the outline |
+| Up and Down | Move through the outline, or through the plan's removals |
+| Space | Marks or clears the selected removal of the plan |
 | Right and Left | Open and close the selected project |
 | Escape | Lets the selection go, or leaves the plan's view |
 
@@ -105,6 +106,11 @@ While the system hides the working directory of a process that the person
 owns, the plan keeps each directory. The view names those processes, and
 its button plans again and tolerates them, which is the effect of the
 option `--tolerate-unreadable-processes`.
+
+The window stays open during a run. A request to close it waits until the
+run ends, so no removal stops halfway and the journal records each outcome.
+A run that fails may still have changed the disk, so the window measures
+again after a failed run too.
 
 A plan of a partial inspection can miss a directory. The view then states
 the count of roots and of entries that Suds could not read.

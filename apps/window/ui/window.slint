@@ -1,5 +1,6 @@
 // The Suds window. Its first view shows one workstation's development
-// storage: the pressure, the classes, each checkout, and each store.
+// storage: the pressure, the classes, each checkout, and each store. Its
+// second view shows a reclaim plan, which a person approves or leaves.
 import { AboutSlint, Button, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
@@ -10,6 +11,10 @@ export struct FrameItem { id: int, x: length, y: length, w: length, h: length, b
 export struct TileItem { x: length, y: length, w: length, h: length, bx: length, by: length, bw: length, bh: length, id: int, name: string, tip: string, tint: color }
 export struct BuildItem { path: string, ecosystem: string, size: string, modified: string }
 export struct FactItem { label: string, value: string }
+// One removal of a reclaim plan, one reason that the plan keeps directories, and one result of a run.
+export struct PlanItem { id: int, name: string, caption: string, reason: string, size: string, included: bool, checkout: bool }
+export struct KeptItem { label: string, detail: string }
+export struct OutcomeItem { path: string, detail: string, removed: bool }
 export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
 
 global Tones {
@@ -131,6 +136,36 @@ component IconButton inherits Rectangle {
     }
 }
 
+// A box that a person marks, for a row of the plan.
+component Check inherits Rectangle {
+    in property <bool> checked;
+    in property <string> label;
+    callback toggled();
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border-width: scope.has-focus ? 2px : 1px;
+    border-color: scope.has-focus || root.checked ? Palette.accent-background : Tones.muted;
+    background: root.checked ? Palette.accent-background : transparent;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checked: root.checked;
+    accessible-checkable: true;
+    accessible-action-default => { root.toggled(); }
+    forward-focus: scope;
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    TouchArea { clicked => { root.toggled(); } }
+    if root.checked: Text { text: "✓"; color: Palette.accent-foreground; font-size: 11px; font-weight: 700; accessible-role: none; }
+}
+
 component Card inherits Rectangle {
     background: Palette.control-background;
     border-width: 1px;
@@ -169,6 +204,33 @@ export component Window inherits Window {
     in property <[FactItem]> detail-facts;
     in property <[BuildItem]> detail-builds;
 
+    // The reclaim plan's view: 0 shows the storage, and 1 shows the plan.
+    in property <int> page;
+    in property <bool> planning;
+    in property <bool> applying;
+    in property <string> plan-error;
+    in property <[PlanItem]> plan-rows;
+    in property <[KeptItem]> plan-kept;
+    in property <string> plan-summary;
+    in property <int> plan-count;
+    // The words on the button that approves the run.
+    in property <string> plan-action;
+    // What the plan says of a partial inspection and of hidden processes, and whether those processes keep each directory.
+    in property <string> plan-hidden;
+    in property <bool> plan-held;
+    in property <int> plan-selected: -1;
+    // The plan's scroll offset and the height that it shows, for a row that a key selects.
+    in-out property <length> plan-y;
+    out property <length> plan-visible;
+    // Whether a person asked the window to close during a run.
+    in property <bool> closing;
+    in property <[string]> plan-evidence;
+    in property <bool> has-outcome;
+    in property <[OutcomeItem]> outcome-rows;
+    in property <string> outcome-summary;
+    // Whether the window asks once more before a run.
+    in-out property <bool> confirming;
+
     in-out property <string> query;
     in-out property <int> sort: 0;
     in-out property <int> selected: -1;
@@ -188,6 +250,14 @@ export component Window inherits Window {
     callback pick-project(frame: int);
     callback layout(width: length, height: length);
     callback quit();
+    // The plan's view: build a plan, mark a removal, read its evidence, approve the run, and leave.
+    callback plan(tolerate: bool);
+    callback plan-toggle(id: int);
+    callback plan-pick(id: int);
+    // A key's move through the removals, which selects a row and changes no mark.
+    callback plan-step(step: int);
+    callback plan-apply();
+    callback plan-close();
 
     // What the pointer rests on in the map.
     property <string> hover;
@@ -235,6 +305,25 @@ export component Window inherits Window {
             if (event.modifiers.control && event.text == "r") {
                 root.refresh();
                 return accept;
+            }
+            if (root.page == 1) {
+                if (event.text == Key.Escape && !root.applying) {
+                    root.plan-close();
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.plan-step(1);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    root.plan-step(-1);
+                    return accept;
+                }
+                if (event.text == " " && root.plan-selected >= 0) {
+                    root.plan-toggle(root.plan-selected);
+                    return accept;
+                }
+                return reject;
             }
             if (event.text == Key.DownArrow && root.selected < root.rows.length - 1) {
                 root.move(root.selected + 1);
@@ -323,6 +412,19 @@ export component Window inherits Window {
                                 alignment: center;
                                 Spinner { width: 16px; height: 16px; indeterminate: true; }
                             }
+                            if root.page == 0: VerticalLayout {
+                                alignment: center;
+                                Button {
+                                    text: "Free space…";
+                                    height: 24px;
+                                    enabled: !root.loading;
+                                    accessible-label: "Free space. Suds plans what it can remove and removes nothing before an approval.";
+                                    clicked => {
+                                        root.plan(false);
+                                        keys.focus();
+                                    }
+                                }
+                            }
                             IconButton {
                                 icon: @image-url("../assets/refresh.svg");
                                 label: "Measure again. Control and R does the same.";
@@ -393,7 +495,287 @@ export component Window inherits Window {
                 }
             }
 
-            if root.measured: HorizontalLayout {
+            if root.measured && root.page == 1: HorizontalLayout {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                Card {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    accessible-role: groupbox;
+                    accessible-label: "Reclaim plan";
+                    VerticalLayout {
+                        HorizontalLayout {
+                            padding: 10px;
+                            padding-left: 16px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            height: 46px;
+                            Heading { text: root.has-outcome ? "RECLAIM RUN" : "RECLAIM PLAN"; vertical-alignment: center; }
+                            Caption {
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                text: root.planning ? "" : root.has-outcome ? "" : root.plan-summary;
+                            }
+                            Button {
+                                text: root.has-outcome ? "Done" : "Back";
+                                enabled: !root.applying;
+                                accessible-label: "Return to the storage. Escape does the same.";
+                                clicked => { root.plan-close(); }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Tones.hairline; }
+
+                        if root.planning || root.applying: VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            spacing: 10px;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Spinner { width: 16px; height: 16px; indeterminate: true; }
+                                Text {
+                                    vertical-alignment: center;
+                                    text: root.applying ? "Removing what the plan names…" : "Planning what Suds can remove…";
+                                }
+                            }
+                            Caption {
+                                horizontal-alignment: center;
+                                text: root.closing ? "The window closes once the run ends." : root.applying ? "Suds verifies each directory again before it removes it." : "Suds asks Git about each checkout and reads the working directory of each process. Nothing changes.";
+                            }
+                        }
+
+                        if !root.planning && !root.applying && root.plan-error != "": VerticalLayout {
+                            vertical-stretch: 1;
+                            padding: 16px;
+                            alignment: start;
+                            Text { text: root.plan-error; wrap: word-wrap; }
+                        }
+
+                        if !root.planning && !root.applying && root.plan-error == "" && root.has-outcome: VerticalLayout {
+                            vertical-stretch: 1;
+                            HorizontalLayout {
+                                padding: 16px;
+                                Text { text: root.outcome-summary; wrap: word-wrap; }
+                            }
+                            Rectangle { height: 1px; background: Tones.hairline; }
+                            ListView {
+                                vertical-stretch: 1;
+                                accessible-role: list;
+                                accessible-label: "What the run did with each directory";
+                                for result in root.outcome-rows: Rectangle {
+                                    height: 38px;
+                                    accessible-role: list-item;
+                                    accessible-label: result.path + ", " + result.detail;
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 16px;
+                                        spacing: 10px;
+                                        Text {
+                                            width: 14px;
+                                            text: result.removed ? "✓" : "–";
+                                            color: result.removed ? Tones.normal : Tones.soft;
+                                            vertical-alignment: center;
+                                            accessible-role: none;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            horizontal-stretch: 1;
+                                            Text { text: result.path; overflow: elide; }
+                                            Caption { text: result.detail; }
+                                        }
+                                    }
+                                    Rectangle { y: parent.height - 1px; height: 1px; background: Tones.hairline; }
+                                }
+                            }
+                        }
+
+                        if !root.planning && !root.applying && root.plan-error == "" && !root.has-outcome: VerticalLayout {
+                            vertical-stretch: 1;
+                            if root.plan-hidden != "": HorizontalLayout {
+                                padding: 12px;
+                                padding-left: 16px;
+                                spacing: 12px;
+                                Text { text: root.plan-hidden; wrap: word-wrap; horizontal-stretch: 1; font-size: 12px; vertical-alignment: center; }
+                                if root.plan-held: VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        text: "Plan without them";
+                                        accessible-label: "Plan again, and proceed although the system hides those processes";
+                                        clicked => {
+                                            root.plan(true);
+                                            keys.focus();
+                                        }
+                                    }
+                                }
+                            }
+                            if root.plan-hidden != "": Rectangle { height: 1px; background: Tones.hairline; }
+                            if root.plan-rows.length == 0: VerticalLayout {
+                                vertical-stretch: 1;
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "The plan removes nothing."; horizontal-alignment: center; font-weight: 600; }
+                                Caption { text: "Each directory that Suds considered has a reason to stay."; horizontal-alignment: center; }
+                            }
+                            if root.plan-rows.length > 0: ListView {
+                                vertical-stretch: 1;
+                                accessible-role: list;
+                                accessible-label: "Directories that the plan removes, largest first. Up and Down select a removal, and Space marks it.";
+                                content-y <=> root.plan-y;
+                                init => { root.plan-visible = self.visible-height; }
+                                changed visible-height => { root.plan-visible = self.visible-height; }
+                                for row in root.plan-rows: Rectangle {
+                                    height: 44px;
+                                    accessible-role: list-item;
+                                    accessible-action-default => { root.plan-pick(row.id); }
+                                    accessible-label: row.name + ", " + row.caption + ", " + row.size + ", " + row.reason;
+                                    accessible-item-selectable: true;
+                                    accessible-item-selected: row.id == root.plan-selected;
+                                    background: row.id == root.plan-selected ? Palette.selection-background : touch.has-hover ? Tones.hover : transparent;
+                                    touch := TouchArea {
+                                        clicked => {
+                                            root.plan-pick(row.id);
+                                            keys.focus();
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 16px;
+                                        spacing: 12px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Check {
+                                                checked: row.included;
+                                                label: "Remove " + row.name;
+                                                toggled => { root.plan-toggle(row.id); }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle { width: 8px; height: 8px; border-radius: 2px; background: row.checkout ? Tones.linked : Tones.build; }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            horizontal-stretch: 1;
+                                            Text {
+                                                text: row.name;
+                                                overflow: elide;
+                                                opacity: row.included ? 1 : 0.5;
+                                                color: row.id == root.plan-selected ? Palette.selection-foreground : Palette.foreground;
+                                            }
+                                            Caption { text: row.caption; }
+                                        }
+                                        Text {
+                                            width: 84px;
+                                            text: row.size;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                            opacity: row.included ? 1 : 0.5;
+                                        }
+                                    }
+                                    Rectangle { y: parent.height - 1px; height: 1px; background: Tones.hairline; }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Tones.hairline; }
+                            HorizontalLayout {
+                                padding: 12px;
+                                padding-left: 16px;
+                                spacing: 12px;
+                                height: 56px;
+                                Caption {
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    text: root.confirming ? "A removal is permanent. A build makes build state again, and a remote holds a removed worktree's commits." : "Suds removes nothing before an approval, and verifies each directory again before it removes it.";
+                                }
+                                if root.confirming: VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        text: "Cancel";
+                                        clicked => { root.confirming = false; }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        primary: true;
+                                        enabled: root.plan-count > 0;
+                                        text: root.confirming ? "Remove permanently" : root.plan-action;
+                                        accessible-label: root.confirming ? "Remove permanently, " + root.plan-summary : root.plan-action + ". The window asks once more.";
+                                        clicked => {
+                                            if (root.confirming) {
+                                                root.confirming = false;
+                                                root.plan-apply();
+                                            } else {
+                                                root.confirming = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    width: 340px;
+                    spacing: 12px;
+
+                    Card {
+                        vertical-stretch: 0;
+                        clip: true;
+                        accessible-role: groupbox;
+                        accessible-label: "Evidence for the selected removal";
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+                            Heading { text: "EVIDENCE"; }
+                            if root.plan-evidence.length == 0: Caption { text: "Select a removal to read each fact that the plan found for it."; wrap: word-wrap; }
+                            for fact[position] in root.plan-evidence: Text {
+                                text: fact;
+                                font-size: 12px;
+                                wrap: position == 0 ? char-wrap : word-wrap;
+                                color: position == 0 ? Tones.muted : Palette.foreground;
+                            }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+                        min-height: 140px;
+                        clip: true;
+                        accessible-role: groupbox;
+                        accessible-label: "What the plan keeps, by reason";
+                        VerticalLayout {
+                            padding-top: 16px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                Heading { text: "KEPT"; }
+                            }
+                            ScrollView {
+                                VerticalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-bottom: 16px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    if root.plan-kept.length == 0 && !root.planning: Caption { text: "The plan keeps nothing that it considered."; wrap: word-wrap; }
+                                    for group in root.plan-kept: VerticalLayout {
+                                        spacing: 2px;
+                                        accessible-role: list-item;
+                                        accessible-label: group.label + ", " + group.detail;
+                                        Text { text: group.label; font-size: 12px; wrap: word-wrap; }
+                                        Caption { text: group.detail; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.measured && root.page == 0: HorizontalLayout {
                 spacing: 12px;
                 vertical-stretch: 1;
 

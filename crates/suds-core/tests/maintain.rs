@@ -18,6 +18,8 @@ use suds_core::state::{Directories, Settings};
 use suds_core::stores::Programs;
 use tempfile::TempDir;
 
+mod support;
+
 const GIB: u64 = 1024 * 1024 * 1024;
 /// A time long after the fixture's files changed.
 const LATER: i64 = 4_000_000_000;
@@ -76,8 +78,7 @@ impl Fixture {
         fs::write(repo.join("target/debug/app"), "binary").unwrap();
 
         let docker = root.join("docker");
-        fs::write(&docker, "#!/bin/sh\necho '{}'\n").unwrap();
-        fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+        support::program(&docker, "#!/bin/sh\necho '{}'\n", "755");
         let environment = Environment {
             home: Some(root.join("home")),
             variables: HashMap::new(),

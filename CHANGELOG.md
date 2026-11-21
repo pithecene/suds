@@ -22,6 +22,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The web-view application leaves the repository**: the Tauri application of decision 0001, its React frontend, and the pinned Node.js and pnpm go. Each window of Suds is native: the Slint window on Linux, and on macOS the Swift window that decision 0005 proposes. macOS holds no window before that one. The window of the web view showed the inspection of a root and planned the moves of Downloads entries, and the command line still serves both.
 
+### Fixed
+
+- **The tests of the store adapters no longer fail by chance**: a test wrote a stub program and ran it at once. The system refused the stub while another test's new process held the file open. A shell now writes each stub.
+
 ## [0.1.4] - 2026-11-21
 
 ### Added

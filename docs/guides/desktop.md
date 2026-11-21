@@ -44,11 +44,13 @@ its steps, and a step that did not succeed states its reason.
 ## Layers
 
 The window stands on three crates, and each one knows only the crate
-beneath it.
+beneath it. A fourth crate, `suds-build`, holds the text that a build
+states about itself.
 
 | Crate | Path | Holds |
 | :--- | :--- | :--- |
 | `suds-core` | `crates/suds-core` | The measurements, the plans, the registry, and the journal |
+| `suds-build` | `crates/suds-build` | The version, the commit, the owner, and the licence that a build states |
 | `suds-view` | `crates/suds-view` | Each view as plain values, without an interface toolkit |
 | `suds-desktop` | `apps/desktop` | The Slint interface and its filling code |
 
@@ -96,6 +98,11 @@ and shows its icon through that entry, which the window claims by the
 identifier `suds`. The window draws no menu bar on Linux. Its first card
 carries the two buttons, to measure again and to show About. The Tab key
 reaches each button, and Return or Space presses it.
+
+About states the version, the commit of the build with its date, the
+copyright of Pithecene LLC, the licence, and the toolkit's attribution.
+The crate `suds-build` holds that text, and `suds --version` prints the
+same lines.
 
 A measurement writes nothing: no pressure reading and no journal entry.
 The window changes the disk in one place, a reclaim run that a person

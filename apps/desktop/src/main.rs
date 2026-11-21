@@ -774,6 +774,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // A desktop finds the window's name and icon in the entry `suds.desktop`, by this identifier.
     // The window takes it when it first shows.
     slint::set_xdg_app_id("suds")?;
+    window.set_build(suds_build::build().into());
+    window.set_build_notice(model(suds_build::notice().map(SharedString::from).to_vec()));
     let home = Environment::of_process().home;
     let state = Rc::new(RefCell::new(State {
         home: home.map(|home| home.to_string_lossy().into_owned()),

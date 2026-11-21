@@ -5,8 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use suds_core::development::Environment;
+use suds_core::organize::journal::{Journal, JournalState, RunKind, RunStatus};
 use suds_core::schedule::{
-    Scheduler, Standing, Unit, UnitFile, activation, files, place, standing,
+    Change, Scheduler, Standing, Step, Unit, UnitFile, activation, files, install, place,
+    plan_install, standing,
 };
 use tempfile::TempDir;
 
@@ -178,4 +180,137 @@ fn a_unit_with_one_file_of_two_is_stale() {
     fs::remove_file(&units[1].path).unwrap();
     let reason = stale(standing(Scheduler::Systemd, &environment, None));
     assert!(reason.contains("is missing"), "{reason}");
+}
+
+fn journal(environment: &Environment) -> Journal {
+    let directory = environment.home.as_ref().unwrap().join("journal");
+    Journal::open(&directory).unwrap()
+}
+
+#[test]
+fn an_installation_plans_each_file_and_changes_nothing_before_its_run() {
+    let (_temp, environment, program) = home();
+    let scheduler = Scheduler::Systemd;
+    let plan = plan_install(scheduler, &unit(&program), &environment).unwrap();
+    let changes: Vec<Change> = plan.files.iter().map(|file| file.change).collect();
+    assert_eq!(changes, [Change::Create, Change::Create]);
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(standing(scheduler, &environment, None), Standing::Absent);
+
+    let mut ran = Vec::new();
+    let mut journal = journal(&environment);
+    let mut stub = |step: &Step| {
+        ran.push(step.command.join(" "));
+        Ok(())
+    };
+    let report = install(&mut journal, &plan, &mut stub).unwrap();
+    assert_eq!(report.status, RunStatus::Complete);
+    assert_eq!(report.steps.len(), 4);
+    assert_eq!(ran.len(), 2);
+    assert_eq!(standing(scheduler, &environment, None), Standing::Current);
+
+    // The journal records the run with each file and each command.
+    let summaries = JournalState::from_records(journal.records()).summaries();
+    assert_eq!(summaries[0].kind, RunKind::Schedule);
+    assert_eq!(summaries[0].status, Some(RunStatus::Complete));
+    let steps: Vec<&str> = summaries[0]
+        .units
+        .iter()
+        .map(|unit| unit.step.as_str())
+        .collect();
+    assert!(steps[0].ends_with("suds-maintain.service"));
+    assert_eq!(steps[2], "systemctl --user daemon-reload");
+
+    // A second plan keeps each file, and its run still runs each command.
+    let again = plan_install(scheduler, &unit(&program), &environment).unwrap();
+    assert!(again.files.iter().all(|file| file.change == Change::Keep));
+    let report = install(&mut journal, &again, &mut |_| Ok(())).unwrap();
+    assert_eq!(
+        (report.status, report.steps.len()),
+        (RunStatus::Complete, 2)
+    );
+    let other = Unit {
+        minutes: 15,
+        ..unit(&program)
+    };
+    let replaced = plan_install(scheduler, &other, &environment).unwrap();
+    assert_eq!(replaced.files[0].change, Change::Keep);
+    assert_eq!(replaced.files[1].change, Change::Replace);
+}
+
+#[test]
+fn an_installation_stops_at_a_changed_file_and_at_a_failed_command() {
+    let (_temp, environment, program) = home();
+    let scheduler = Scheduler::Systemd;
+    let plan = plan_install(scheduler, &unit(&program), &environment).unwrap();
+    let mut journal = journal(&environment);
+
+    // The scheduler's own program fails, and the run states its reason.
+    let mut failing = |_: &Step| Err("exit status: 1".to_owned());
+    let report = install(&mut journal, &plan, &mut failing).unwrap();
+    assert_eq!(report.status, RunStatus::Partial);
+    let last = report.steps.last().unwrap();
+    assert_eq!(last.step, "systemctl --user daemon-reload");
+    assert_eq!(last.reason.as_deref(), Some("exit status: 1"));
+    assert_eq!(report.steps.len(), 3);
+
+    // A person edited a file after the plan, so the run leaves it and runs no command.
+    let stale = plan_install(scheduler, &unit(&program), &environment).unwrap();
+    let other = Unit {
+        minutes: 15,
+        ..unit(&program)
+    };
+    let plan = plan_install(scheduler, &other, &environment).unwrap();
+    let timer = &stale.files[1].file.path;
+    fs::write(timer, "by hand").unwrap();
+    let mut ran = 0;
+    let mut count = |_: &Step| {
+        ran += 1;
+        Ok(())
+    };
+    let report = install(&mut journal, &plan, &mut count).unwrap();
+    assert_eq!(report.status, RunStatus::Refused);
+    let reason = report.steps[0].reason.as_deref();
+    assert_eq!(reason, Some("the file changed after planning"));
+    assert_eq!(ran, 0);
+    assert_eq!(fs::read_to_string(timer).unwrap(), "by hand");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_and_an_unreadable_file_fail_the_reading_and_follow_nowhere() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (_temp, environment, program) = home();
+    let scheduler = Scheduler::Systemd;
+    let units = written(scheduler, &unit(&program), &environment);
+    place(&units).unwrap();
+    let service = &units[0].path;
+
+    // A text of another encoding is no unit of this release.
+    fs::write(service, [0xff, 0xfe]).unwrap();
+    let reason = stale(standing(scheduler, &environment, None));
+    assert!(reason.contains("cannot read the unit"), "{reason}");
+
+    let target = environment.home.as_ref().unwrap().join("elsewhere");
+    fs::write(&target, "kept").unwrap();
+    fs::remove_file(service).unwrap();
+    symlink(&target, service).unwrap();
+    let Standing::Unreadable(reason) = standing(scheduler, &environment, None) else {
+        panic!("a link is no unit's file");
+    };
+    assert!(reason.contains("is a symbolic link"), "{reason}");
+    let refused = plan_install(scheduler, &unit(&program), &environment);
+    assert!(refused.unwrap_err().contains("is a symbolic link"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "kept");
+
+    fs::remove_file(service).unwrap();
+    fs::write(service, "closed").unwrap();
+    fs::set_permissions(service, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::read(service).is_err();
+    let standing = standing(scheduler, &environment, None);
+    fs::set_permissions(service, fs::Permissions::from_mode(0o644)).unwrap();
+    // A superuser reads the closed file, which then holds no unit.
+    assert_eq!(matches!(standing, Standing::Unreadable(_)), denied);
+    assert_ne!(standing, Standing::Absent);
 }

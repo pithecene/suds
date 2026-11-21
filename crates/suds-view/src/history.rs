@@ -13,10 +13,11 @@ use suds_core::organize::journal::{
 use suds_core::reclaim::execute::Authority;
 use suds_core::state::Directories;
 
-/// One step of a run: a move, a removal, or a store's trim.
+/// One step of a run: a move, a removal, a store's trim, or a step that placed a unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
-    /// The path that the step moved or removed, or the store that it trimmed.
+    /// The path that the step moved, removed, or wrote, the store that it trimmed, or the
+    /// command that it ran.
     pub subject: String,
     /// For a move, the path that the entry took.
     pub destination: Option<String>,
@@ -109,7 +110,14 @@ fn steps(summary: &RunSummary) -> Vec<Step> {
             },
         }
     });
-    moves.chain(removals).chain(trims).collect()
+    let units = summary.units.iter().map(|unit| Step {
+        subject: unit.step.clone(),
+        destination: None,
+        succeeded: unit.reason.is_none(),
+        freed_bytes: 0,
+        note: unit.reason.clone(),
+    });
+    moves.chain(removals).chain(trims).chain(units).collect()
 }
 
 /// The authority of each reclaim run and of each stores run, by the run's name.

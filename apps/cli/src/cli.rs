@@ -126,9 +126,14 @@ pub struct ScheduleArgs {
     #[arg(long, value_name = "MINUTES", default_value_t = 30)]
     pub minutes: u64,
 
-    /// Place the units and make the scheduler take them up.
+    /// Plan the installation: each file that it writes and each command
+    /// that it runs. The plan changes nothing without `--apply`.
     #[arg(long, conflicts_with = "check")]
     pub install: bool,
+
+    /// Apply the installation's plan. The journal records each step.
+    #[arg(long, requires = "install")]
+    pub apply: bool,
 
     /// State whether the placed units are the units of this release. The
     /// status is 1 for absent or stale units.

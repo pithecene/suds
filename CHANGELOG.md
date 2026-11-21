@@ -34,6 +34,16 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bytes that it freed, and whose approval admitted it. A selected run lists
   each of its steps, and a step that did not succeed states its reason.
 
+### Fixed
+
+- **A scheduled run finds the program of each store**.
+
+  A scheduler gives each unit a short search path, and a version manager
+  installs a program such as `pnpm` in another directory. Each scheduled
+  run therefore failed to trim the program's store. The units of
+  `suds schedule` now carry the search path of the shell that ran the
+  command.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added

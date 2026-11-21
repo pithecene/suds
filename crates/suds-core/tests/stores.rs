@@ -15,6 +15,9 @@ use suds_core::stores::{
 };
 use tempfile::TempDir;
 
+mod support;
+use support::program;
+
 const GIB: u64 = 1024 * 1024 * 1024;
 /// A time long after every `newest_modified` of the fixture.
 const NOW: i64 = 2_000_000_000;
@@ -36,9 +39,7 @@ impl Stubs {
                 "#!/bin/sh\nvars=$(env | grep -E '^(GOCACHE|GOMODCACHE|MISE_DATA_DIR)=/stores' | sort | tr '\\n' ' ')\necho \"{name} $* | $vars| $(pwd)\" >> \"{}\"\necho refused >&2\nexit {status}\n",
                 dir.path().join("log").display()
             );
-            let path = dir.path().join(name);
-            fs::write(&path, script).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            program(&dir.path().join(name), &script, "755");
         }
         Stubs { dir }
     }
@@ -289,8 +290,7 @@ fn reads_the_build_cache_option_from_the_engine_help() {
     let dir = TempDir::new().unwrap();
     let stub = |name: &str, help: &str| {
         let path = dir.path().join(name);
-        fs::write(&path, format!("#!/bin/sh\necho '{help}'\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        program(&path, &format!("#!/bin/sh\necho '{help}'\n"), "755");
         path
     };
     let buildx = stub("buildx", "      --max-used-space bytes   Maximum amount");
@@ -352,15 +352,11 @@ fn a_command_receives_the_bytes_of_a_path_that_is_not_utf8() {
     fs::create_dir(&store_path).unwrap();
     let log = root.join("received");
     let ccache = root.join("ccache");
-    fs::write(
-        &ccache,
-        format!(
-            "#!/bin/sh\ntest -d \"$2\" && echo found > \"{}\"\n",
-            log.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&ccache, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = format!(
+        "#!/bin/sh\ntest -d \"$2\" && echo found > \"{}\"\n",
+        log.display()
+    );
+    program(&ccache, &script, "755");
     let mut scanned = scan(vec![store(
         "ccache.cache",
         Ecosystem::Ccache,
@@ -425,21 +421,20 @@ fn a_program_outside_the_search_path_resolves_in_a_version_managers_directory() 
 
     let temp = TempDir::new().unwrap();
     let home = temp.path().canonicalize().unwrap();
-    let place = |directory: &str, name: &str, mode: u32| {
+    let place = |directory: &str, name: &str, mode: &str| {
         let path = home.join(directory).join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        program(&path, "#!/bin/sh\n", mode);
         path
     };
-    let shim = place(".local/share/mise/shims", "pnpm", 0o755);
+    let shim = place(".local/share/mise/shims", "pnpm", "755");
     // A later place holds the program too, and the first place wins.
-    place(".local/bin", "pnpm", 0o755);
+    place(".local/bin", "pnpm", "755");
     // A file that no user may run is no program.
-    place(".local/share/mise/shims", "ccache", 0o644);
-    let later = place(".cargo/bin", "ccache", 0o755);
-    place("searched", "docker", 0o755);
-    place(".local/bin", "docker", 0o755);
+    place(".local/share/mise/shims", "ccache", "644");
+    let later = place(".cargo/bin", "ccache", "755");
+    place("searched", "docker", "755");
+    place(".local/bin", "docker", "755");
 
     let searched = ("PATH".to_owned(), home.join("searched").into());
     let environment = Environment {

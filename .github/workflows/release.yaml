@@ -1,7 +1,8 @@
 # Releases a version of Suds. An annotated tag vX.Y.Z holds the release notes,
 # which `bosun release X.Y.Z --notes notes.md` checks and writes. Each
-# platform's job builds the command-line program at the tag and packs it, and
-# the release job publishes the archives under the tag's notes.
+# platform's job builds the command-line program at the tag and packs it. A
+# Linux job packs the desktop application beside it. The release job
+# publishes the archives under the tag's notes.
 
 name: 🚀 Release
 
@@ -51,6 +52,11 @@ jobs:
       - name: 🧰 Mise
         uses: jdx/mise-action@v4
 
+      # The desktop application links the system's fontconfig, whose development files a runner may lack.
+      - name: 🧱 Install the Desktop Application's Libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libfontconfig1-dev
+
       - name: 🔨 Build the Archive
         shell: bash
         env:
@@ -68,6 +74,15 @@ jobs:
           mkdir -p "$root/bin" "$RUNNER_TEMP/archives"
           cp target/release/suds "$root/bin/suds"
           cp LICENSE README.md "$root/"
+          # The desktop application runs on Linux. The archive holds its
+          # installer with the desktop entry and the icon that it places.
+          if [ "$RUNNER_OS" = Linux ]; then
+            cargo build --release --locked --package suds-desktop
+            cp target/release/suds-desktop "$root/bin/suds-desktop"
+            mkdir -p "$root/share/suds/desktop/assets"
+            cp apps/desktop/install.sh "$root/share/suds/desktop/"
+            cp apps/desktop/assets/suds.desktop apps/desktop/assets/suds.svg "$root/share/suds/desktop/assets/"
+          fi
           name="suds-$version-$PLATFORM.tar.gz"
           tar -czf "$RUNNER_TEMP/archives/$name" -C "$root" .
           # GNU systems ship sha256sum, and macOS ships shasum.

@@ -13,6 +13,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The desktop application shows a reading from a named file**: the variable `SUDS_SHOW_READING` names a file in the form of the saved reading. The window shows that reading and measures nothing, so a picture of the window shows no real workstation.
 - **A build states its commit, its owner, and its licence**: the `suds --version` command prints the version, then the commit of the build with its date. The copyright of Pithecene LLC, the licence, and the contact address follow. The `suds -V` command still prints the version alone. The desktop application shows the same in About.
+- **A release for Linux holds the desktop application**: each archive for Linux holds `bin/suds-desktop` and the script `share/suds/desktop/install.sh`. The script installs the binary, the desktop entry, and the icon for one user, where the window built only from source before.
 
 ### Changed
 

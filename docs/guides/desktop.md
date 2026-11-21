@@ -90,8 +90,19 @@ file. A reading of another schema counts as none. A reading that Suds
 could not save or could not read adds a notice, and the saved reading
 opens with the notices of the entries that it left unread.
 
-The command `task desktop:install` installs the window for one user: the
-binary, the desktop entry `suds.desktop`, and the icon. The entry and the
+An archive of a release for Linux holds the window as `bin/suds-desktop`,
+beside the script `share/suds/desktop/install.sh`. The script installs
+the archive's binary without an argument:
+
+```sh
+sh "$(mise where github:pithecene/suds)/share/suds/desktop/install.sh"
+```
+
+The binary needs the system's fontconfig library and a Wayland or an X11
+session. From a checkout, the command `task desktop:install` builds the
+window and runs the same script. The script installs the window for one
+user: the binary as `~/.local/bin/suds-desktop`, the desktop entry
+`suds.desktop`, and the icon. The entry and the
 icon go beneath `XDG_DATA_HOME`, or beneath `~/.local/share` without one,
 and the entry names the binary by its full path. A desktop names the window
 and shows its icon through that entry, which the window claims by the
@@ -288,7 +299,6 @@ command line.
   another idle time, still needs the command line.
 - The map has no key of its own. A person reaches each of its entries
   through the outline.
-- A release publishes no archive of the window.
 - The window shows no inspection of a root and plans no move of a
   Downloads entry. The web-view application of decision 0001 held both
   and left the repository, and the command line serves both.

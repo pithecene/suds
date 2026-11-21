@@ -495,6 +495,12 @@ no program that a version manager installed. The units therefore carry the
 search path of the shell that ran `suds schedule`, so a scheduled run finds
 the program of each store as that shell finds it.
 
+A run also looks beyond the search path. When the path resolves no program
+of a store, Suds takes the program from the first known directory that
+holds it. Those are the directories of mise, asdf, Cargo, Go, pnpm, Volta,
+Nix, and Homebrew, with `~/.local/bin` and `/usr/local/bin`. A unit with a
+stale search path therefore still trims its stores.
+
 ## Arena
 
 ```sh

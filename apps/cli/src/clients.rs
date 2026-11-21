@@ -104,7 +104,7 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
     let context = Context {
         directories: &directories,
         environment: &Environment::of_process(),
-        programs: &Programs::default(),
+        programs: &Programs::resolved(&Environment::of_process()),
         git: &Git::default(),
         now: now_seconds(),
     };

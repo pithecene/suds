@@ -12,7 +12,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::development::{self, DevelopmentScan, Store, StoreClass, StoreStatus};
+use crate::development::{self, DevelopmentScan, Environment, Store, StoreClass, StoreStatus};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
@@ -101,6 +101,74 @@ impl Default for Programs {
     }
 }
 
+/// Where a version manager or a package manager places its programs,
+/// beneath the home directory. A scheduler's search path names none of them.
+const HOME_PLACES: [&str; 9] = [
+    ".local/share/mise/shims",
+    ".asdf/shims",
+    ".local/bin",
+    ".cargo/bin",
+    "go/bin",
+    ".local/share/pnpm",
+    "Library/pnpm",
+    ".volta/bin",
+    ".nix-profile/bin",
+];
+
+/// The same places outside the home directory.
+const SYSTEM_PLACES: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/local/go/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+];
+
+/// Whether `path` is a file that this user may run.
+fn runs(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = path
+        .metadata()
+        .map(|meta| (meta.is_file(), meta.permissions().mode()));
+    mode.is_ok_and(|(file, mode)| file && mode & 0o111 != 0)
+}
+
+impl Programs {
+    /// Each program as a run of `environment` finds it. A name that the
+    /// search path resolves stays a name. Another name becomes the path of
+    /// the program in the first known place that holds it, so a run under a
+    /// scheduler's short search path still finds a store's program.
+    pub fn resolved(environment: &Environment) -> Self {
+        let searched = environment.variables.get("PATH");
+        let searched: Vec<PathBuf> =
+            searched.map_or_else(Vec::new, |path| std::env::split_paths(path).collect());
+        let home = environment.home.as_ref();
+        let known = HOME_PLACES
+            .iter()
+            .filter_map(|place| Some(home?.join(place)));
+        let known: Vec<PathBuf> = known
+            .chain(SYSTEM_PLACES.iter().map(PathBuf::from))
+            .collect();
+        let find = |name: PathBuf| {
+            if searched
+                .iter()
+                .any(|directory| runs(&directory.join(&name)))
+            {
+                return name;
+            }
+            let mut places = known.iter().map(|directory| directory.join(&name));
+            places.find(|path| runs(path)).unwrap_or(name)
+        };
+        let named = Programs::default();
+        Programs {
+            go: find(named.go),
+            pnpm: find(named.pnpm),
+            ccache: find(named.ccache),
+            mise: find(named.mise),
+            docker: find(named.docker),
+        }
+    }
+}
+
 /// One word of a program's command: plain text, or a native path, whose
 /// bytes the command receives unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,10 +244,17 @@ impl Trim {
         for (name, path) in &self.environment {
             command.env(name, path.as_path());
         }
-        let output = command
-            .current_dir("/")
-            .output()
-            .map_err(|err| format!("could not run {}: {err}", self.program.display()))?;
+        let output = command.current_dir("/").output().map_err(|err| {
+            let program = self.program.display();
+            let absent = err.kind() == std::io::ErrorKind::NotFound;
+            // The reason names the search, so a person knows where a program must stand.
+            let searched = if absent && self.program.is_relative() {
+                ", and neither the search path nor a version manager's directory holds it"
+            } else {
+                ""
+            };
+            format!("could not run {program}: {err}{searched}")
+        })?;
         if output.status.success() {
             Ok(())
         } else {

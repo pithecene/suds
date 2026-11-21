@@ -417,3 +417,37 @@ fn reports_a_machine_and_trims_none() {
         Decision::Audit { .. }
     ));
 }
+
+#[test]
+fn a_program_outside_the_search_path_resolves_in_a_version_managers_directory() {
+    use suds_core::development::Environment;
+
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let place = |directory: &str, name: &str, mode: u32| {
+        let path = home.join(directory).join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    };
+    let shim = place(".local/share/mise/shims", "pnpm", 0o755);
+    // A later place holds the program too, and the first place wins.
+    place(".local/bin", "pnpm", 0o755);
+    // A file that no user may run is no program.
+    place(".local/share/mise/shims", "ccache", 0o644);
+    let later = place(".cargo/bin", "ccache", 0o755);
+    place("searched", "docker", 0o755);
+    place(".local/bin", "docker", 0o755);
+
+    let searched = ("PATH".to_owned(), home.join("searched").into());
+    let environment = Environment {
+        home: Some(home.clone()),
+        variables: [searched].into(),
+    };
+    let programs = Programs::resolved(&environment);
+    assert_eq!(programs.pnpm, shim);
+    assert_eq!(programs.ccache, later);
+    // The search path resolves the name, so the name stays as it stood.
+    assert_eq!(programs.docker, Path::new("docker"));
+}

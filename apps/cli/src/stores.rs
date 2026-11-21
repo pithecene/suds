@@ -27,7 +27,7 @@ fn run(args: &StoresArgs) -> Result<ExitCode, String> {
         let (id, bytes) = parse_budget(word)?;
         budgets.set(&id, bytes);
     }
-    let programs = Programs::default();
+    let programs = Programs::resolved(&Environment::of_process());
     // An inspection without a workspace measures the stores alone, and each
     // root adds what its checkouts hold.
     let workspaces = crate::workspaces_of(&args.roots)?;

@@ -154,6 +154,8 @@ fn a_proposal_lists_what_the_plan_removes_and_why_it_keeps_the_rest() {
     assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]), "{sizes:?}");
     assert_eq!(proposal.kept, []);
 
+    assert!(proposal.complete());
+
     let all = proposal.removing(&BTreeSet::new());
     assert_eq!(all, (2, proposal.plan.removable_bytes()));
 }
@@ -230,4 +232,68 @@ fn an_approved_run_removes_the_chosen_entries_and_the_journal_records_it() {
     };
     assert_eq!(records.iter().filter(removed).count(), 1);
     assert!(matches!(records[0].event, Event::ReclaimPlanned { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proposal_states_what_the_inspection_missed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workstation = Workstation::new();
+    let root = workstation.repo.parent().unwrap();
+    // No directory holds the second root, and the first holds a directory that refuses a reading.
+    let settings = workstation.directories().settings();
+    let roots = [root.to_owned(), root.with_file_name("absent")];
+    write(
+        &settings,
+        &serde_json::json!({ "roots": roots }).to_string(),
+    );
+    let closed = root.join("closed");
+    fs::create_dir_all(&closed).unwrap();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    let refused = fs::read_dir(&closed).is_err();
+
+    let proposal = workstation.propose();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(proposal.unmeasured, 1);
+    // A superuser reads the closed directory, and the inspection then misses no entry.
+    assert_eq!(proposal.unread > 0, refused);
+    assert!(!proposal.complete());
+    assert_eq!(proposal.removals.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_repository_whose_path_is_no_text_keeps_its_own_project() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let workstation = Workstation::new();
+    // The directory's name holds a byte that no text encodes.
+    let root = workstation.repo.parent().unwrap();
+    let odd = root.join(OsStr::from_bytes(b"odd\xff"));
+    fs::create_dir_all(&odd).unwrap();
+    git(&odd, &["init"]);
+    write(&odd.join(".gitignore"), "target/\n");
+    git(
+        &odd,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/team/odd.git",
+        ],
+    );
+    write(&odd.join("Cargo.toml"), "[package]");
+    write(&odd.join("target/CACHEDIR.TAG"), "Signature: cargo");
+
+    let proposal = workstation.propose();
+    let build = odd.join("target").to_string_lossy().into_owned();
+    let mut entries = proposal.removals.iter();
+    let entry = entries.find(|entry| entry.path == build);
+    assert_eq!(
+        entry.expect("the plan removes the path").project,
+        "team/odd"
+    );
 }

@@ -6,7 +6,7 @@
 //! command line.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use suds_core::development::{self, Environment};
 use suds_core::organize::journal::Journal;
@@ -59,19 +59,24 @@ pub struct Proposal {
     pub kept: Vec<KeptGroup>,
     /// Each process of this user whose working directory the system hides.
     pub hidden: Vec<String>,
+    /// The entries that the inspection could not read. A directory beneath
+    /// one stands in no list of the plan.
+    pub unread: u64,
+    /// The roots that the inspection could not measure.
+    pub unmeasured: usize,
 }
 
 /// The name of the project that holds the repository at `repository`.
-fn project_of(repository: &str) -> String {
-    match remote::origin(Path::new(repository)) {
+fn project_of(repository: &Path) -> String {
+    match remote::origin(repository) {
         Some(origin) => project::name(&origin, true),
-        None => project::name(repository, false),
+        None => project::name(&repository.to_string_lossy(), false),
     }
 }
 
 impl Proposal {
     /// Arranges `plan`, with each process whose working directory the system
-    /// hid at planning.
+    /// hid at planning. A proposal of a whole inspection leaves nothing unread.
     pub fn of(plan: ReclaimPlan, hidden: Vec<String>) -> Self {
         let removed = |position: &usize| plan.candidates[*position].decision == Decision::Remove;
         // A removed checkout takes its build state with it, so each entry
@@ -81,16 +86,17 @@ impl Proposal {
             .filter(|position| plan.candidates[*position].subject == Subject::LinkedCheckout)
             .map(|position| (plan.candidates[position].path.as_path(), position))
             .collect();
-        let mut projects: HashMap<String, String> = HashMap::new();
+        // The native path names the repository, so two paths with one lossy text stay apart.
+        let mut projects: HashMap<PathBuf, String> = HashMap::new();
         let mut removals: Vec<Entry> = (0..plan.candidates.len())
             .filter(removed)
             .map(|position| {
                 let candidate = &plan.candidates[position];
                 let repository = candidate.repository.as_ref().unwrap_or(&candidate.checkout);
-                let repository = repository.display();
+                let repository = repository.as_path();
                 let project = projects
-                    .entry(repository.clone())
-                    .or_insert_with(|| project_of(&repository))
+                    .entry(repository.to_owned())
+                    .or_insert_with(|| project_of(repository))
                     .clone();
                 let holder = checkouts.get(candidate.checkout.as_path()).copied();
                 Entry {
@@ -137,7 +143,15 @@ impl Proposal {
             removals,
             kept,
             hidden,
+            unread: 0,
+            unmeasured: 0,
         }
+    }
+
+    /// Whether the inspection read each root whole. A plan of a partial
+    /// inspection can miss a directory.
+    pub fn complete(&self) -> bool {
+        self.unread == 0 && self.unmeasured == 0
     }
 
     /// Whether the plan kept a candidate only because the system hides a
@@ -229,7 +243,12 @@ pub fn propose(environment: &Environment, tolerate: bool, now: i64) -> Result<Pr
         tolerate_unreadable_processes: tolerate,
     };
     let plan = plan::plan_reclaim(&scan, &observed, &Git::default(), policy, now);
-    Ok(Proposal::of(plan, hidden))
+    // An unread entry may hold a checkout, so the proposal states what the inspection missed.
+    Ok(Proposal {
+        unread: scan.error_count,
+        unmeasured: scan.workspaces.iter().filter(|w| !w.measured).count(),
+        ..Proposal::of(plan, hidden)
+    })
 }
 
 /// Applies `plan` on a person's approval. The core verifies each removal

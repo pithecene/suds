@@ -85,6 +85,14 @@ pub fn notice(error_count: u64, registry_error: Option<&str>) -> String {
     lines.join("\n")
 }
 
+/// Each notice of a whole reading: what the reading left unread, then what the scheduled
+/// maintenance needs from a person.
+pub fn notices(unread: &str, upkeep: &str) -> Vec<SharedString> {
+    let lines = unread.lines().chain(upkeep.lines());
+    let stated = lines.filter(|line| !line.is_empty());
+    stated.map(SharedString::from).collect()
+}
+
 /// What the scheduled maintenance needs from a person, or nothing for a sound schedule.
 /// A scheduled run that fails tells nobody, so the window states it.
 pub fn upkeep(upkeep: &Upkeep) -> String {
@@ -573,6 +581,15 @@ mod tests {
             complete: true,
         };
         assert!(pressure_facts(&card).starts_with("150% of the ceiling"));
+    }
+
+    #[test]
+    fn each_line_of_a_reading_and_of_the_schedule_is_one_notice() {
+        assert!(super::notices("", "").is_empty());
+        let unread = super::notice(2, Some("no such file"));
+        let listed = super::notices(&unread, "The scheduled maintenance has not run yet.");
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[2], "The scheduled maintenance has not run yet.");
     }
 
     #[test]

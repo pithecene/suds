@@ -4,62 +4,51 @@ Status: Proposed (2026-11-21).
 
 ## Context
 
-Decision 0003 chose one interface in Rust for macOS and Linux, drawn with
-Slint. Its open questions named a second reading of the owner's word
-native: the system's own controls. That reading makes a shell for each
-system the decision.
+Decision 0003 specifies one Slint interface in Rust for macOS and Linux.
+It leaves open whether a native window must use the system's own controls.
 
-On 2026-11-21 the owner stated that reading. Suds has a window, and the
-owner asks for a macOS window to match it, built with Swift and the
-system's own interface kit.
+On 2026-11-21 the owner asked for a macOS window that matches the Slint
+window and uses Swift and the system's own controls.
 
-The trial of decision 0003 ran on no macOS workstation. It measured no
-menu bar, no dialog, and no screen reader there.
+The trial for decision 0003 ran on Linux. Menu bars, dialogs, and screen
+reader access still need testing on macOS.
 
 ## Decision
 
 1. On macOS, Suds's window is a native application in Swift. It draws
-   with the system's own controls. This item replaces item 3 of decision
-   0003 on macOS.
+   with the system's own controls. This item replaces items 3 and 4 of
+   decision 0003 on macOS.
 2. On Linux, the window stays the Slint interface of decision 0003.
-3. The macOS window shows the subjects of item 1 of decision 0003. It
-   matches the Slint window's views, so a person who uses both systems
-   meets the same workstation.
-4. The macOS window removes nothing by a path of its own. Item 5 of
-   decision 0003 stands, and each change runs through the plan, the
-   approval, and the journal.
-5. `suds-core` stays the one implementation of each measurement and each
-   rule. The Swift window computes none of them itself.
+3. The macOS window follows the Slint window's views and covers the
+   development storage subjects listed in item 1 of decision 0003.
+4. As item 5 of decision 0003 requires, the macOS window uses the same
+   process as the command line to change the workstation's files. The
+   window presents a plan for approval, and `suds-core` applies the
+   approved plan and records the result in the journal.
+5. Both windows call `suds-core` in process for measurements and
+   maintenance rules, as item 2 of decision 0003 requires.
 
 ## Alternatives
 
-- **Slint on macOS too.** One frontend serves both systems, and each
-  change lands once. The window then draws its own controls on macOS, and
-  the owner asks for the system's own.
+- **Slint on macOS too.** Developers would maintain one frontend for both
+  systems. Slint draws its own controls on macOS, and the owner asked
+  for the system's own controls.
 - **SwiftUI on macOS and GTK on Linux.** Each system receives its own
-  controls. Linux would lose a working window for a new one, and the owner
-  asked only about macOS.
-- **The web view of decision 0001.** It reuses the React components. The
-  owner asked for a native window, and decision 0003 removed the web view
-  for that reason.
+  controls. Developers would replace the working Linux window as well, and
+  the owner asked only about macOS.
+- **The web view of decision 0001.** Developers could reuse the React
+  components. The owner asked for the system's own controls.
 
 ## Consequences
 
-- A change to a view lands twice, once in Swift and once in Slint.
-- The repository pins a Swift toolchain, and its check gains a job on
-  macOS.
-- The macOS window reaches `suds-core` across a language boundary, which
-  the Slint window does not cross.
+- Contributors update both frontends when they change a shared view.
+- Contributors pin a Swift toolchain and add a check for the Swift window
+  to the macOS CI job.
 - The Slint window's attribution dialog stays on Linux alone.
 
 ## Open Questions
 
-- **The bridge to the core.** The window could call `suds-core` through
-  generated bindings in process, or read the command line's JSON output in
-  a separate process. Decision 0003 put the core in the window's process.
-- **The kit.** SwiftUI gives the newer declarative views, and AppKit gives
-  finer control of tables with many rows. The trial of decision 0003 drew
-  100,000 rows, and neither kit has that measurement yet.
-- **Memory as a subject.** The owner named memory on macOS beside this
-  window. Suds measures storage alone today, so a view of memory would
-  give Suds a third subject.
+- **Swift bindings.** Which bindings should the Swift window use to call
+  `suds-core`?
+- **SwiftUI or AppKit.** The Slint trial drew up to 100,000 rows on Linux.
+  How does each macOS toolkit handle a table of that size?

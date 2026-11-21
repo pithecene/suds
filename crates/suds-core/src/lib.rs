@@ -21,6 +21,7 @@ pub mod reclaim;
 pub mod registry;
 pub mod roots;
 pub mod scan;
+pub mod schedule;
 pub mod state;
 pub mod stores;
 pub mod timestamp;

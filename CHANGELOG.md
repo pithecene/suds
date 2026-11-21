@@ -34,6 +34,16 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bytes that it freed, and whose approval admitted it. A selected run lists
   each of its steps, and a step that did not succeed states its reason.
 
+- **The `schedule` command installs and checks its units**.
+
+  With `--install`, `suds schedule` plans the installation of its units,
+  and with `--apply` too it places them and starts the schedule through
+  `systemctl --user` or `launchctl`. The journal records the run. With
+  `--check`, the command states whether the placed units are the units of
+  this release, so a unit from an earlier release no longer keeps its
+  faults unseen. The command now writes for the scheduler of this system
+  unless `--scheduler` names one.
+
 ### Fixed
 
 - **A scheduled run finds the program of each store**.

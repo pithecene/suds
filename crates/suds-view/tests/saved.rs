@@ -54,7 +54,8 @@ fn view() -> Workstation {
         }],
         stores: vec![Store {
             id: "pnpm.store".into(),
-            ecosystem: "pnpm".into(),
+            ecosystem: "JavaScript".into(),
+            tool: "pnpm".into(),
             class: "Shared stores".into(),
             path: "/home/a/.local/share/pnpm/store".into(),
             bytes: 12 << 30,

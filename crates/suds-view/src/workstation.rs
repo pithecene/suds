@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use suds_core::development::{
-    self, CheckoutKind, DevelopmentReport, DevelopmentScan, StoreClass, StoreStatus,
+    self, CheckoutKind, DevelopmentReport, DevelopmentScan, Ecosystem, StoreClass, StoreStatus,
 };
 use suds_core::pressure::{Level, Pressure};
 use suds_core::registry::{self, Event, Reading, Standings};
@@ -98,8 +98,11 @@ pub enum StoreStanding {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     pub id: String,
-    /// The language or the tool whose files the store holds.
+    /// The language whose files the store holds. A store of no one language
+    /// names its kind instead.
     pub ecosystem: String,
+    /// The tool that owns the store. One ecosystem has several tools.
+    pub tool: String,
     /// The class of the store's storage, as the view's classes name it.
     pub class: String,
     pub path: String,
@@ -246,6 +249,19 @@ fn checkouts(scan: &DevelopmentScan, standings: &Standings) -> Vec<Checkout> {
     rows
 }
 
+/// The ecosystem of a tool: the language that the tool serves. The core names
+/// each tool, and several tools serve one language.
+fn language(tool: Ecosystem) -> &'static str {
+    match tool {
+        Ecosystem::Cargo | Ecosystem::Sccache => "Rust",
+        Ecosystem::Go => "Go",
+        Ecosystem::Node | Ecosystem::Pnpm => "JavaScript",
+        Ecosystem::Ccache | Ecosystem::Cmake | Ecosystem::Vcpkg => "C and C++",
+        Ecosystem::Mise => "Many languages",
+        Ecosystem::Lima => "Virtual machines",
+    }
+}
+
 fn stores(report: &DevelopmentReport, budgets: &Budgets) -> Vec<Store> {
     let largest = report
         .stores
@@ -268,7 +284,8 @@ fn stores(report: &DevelopmentReport, budgets: &Budgets) -> Vec<Store> {
             };
             Store {
                 id: store.id.clone(),
-                ecosystem: store.ecosystem.label().to_owned(),
+                ecosystem: language(store.ecosystem).to_owned(),
+                tool: store.ecosystem.label().to_owned(),
                 class: match store.class {
                     StoreClass::SharedStore => "Shared stores",
                     StoreClass::Toolchain => "Toolchains",

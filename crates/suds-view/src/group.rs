@@ -5,14 +5,16 @@ use crate::workstation::{Store, StoreStanding};
 /// What the stores of one group share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Grouping {
-    /// The language or the tool whose files the stores hold.
+    /// The language whose files the stores hold.
     #[default]
     Ecosystem,
+    /// The tool that owns the stores, a layer beneath the ecosystem.
+    Tool,
     /// The class of storage: a shared store, a toolchain, or a machine.
     Class,
 }
 
-/// The stores that share one ecosystem or one class.
+/// The stores that share one ecosystem, one tool, or one class.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoreGroup {
     pub label: String,
@@ -40,6 +42,7 @@ pub fn store_groups(stores: &[Store], grouping: Grouping) -> Vec<StoreGroup> {
     for store in stores {
         let label = match grouping {
             Grouping::Ecosystem => &store.ecosystem,
+            Grouping::Tool => &store.tool,
             Grouping::Class => &store.class,
         };
         let over = usize::from(store.standing == StoreStanding::Over);

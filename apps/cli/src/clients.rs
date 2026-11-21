@@ -29,6 +29,16 @@ fn directories() -> Result<Directories, String> {
         .ok_or_else(|| "no home directory exists for this process".to_owned())
 }
 
+/// The program of each store as this run finds it. The search states on the error stream
+/// each directory that it could not read, since a program may stand there unseen.
+pub(crate) fn resolved_programs() -> Programs {
+    let resolution = Programs::resolved(&Environment::of_process());
+    for failure in &resolution.unread {
+        eprintln!("suds: {}", escape(failure));
+    }
+    resolution.programs
+}
+
 pub fn register_command(args: &HoldArgs) -> ExitCode {
     finish(hold(args, Event::Registered))
 }
@@ -105,7 +115,7 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
     let context = Context {
         directories: &directories,
         environment: &Environment::of_process(),
-        programs: &Programs::default(),
+        programs: &resolved_programs(),
         git: &Git::default(),
         now: now_seconds(),
     };

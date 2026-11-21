@@ -12,7 +12,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::development::{self, DevelopmentScan, Store, StoreClass, StoreStatus};
+use crate::development::{self, DevelopmentScan, Environment, Store, StoreClass, StoreStatus};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
@@ -86,6 +86,20 @@ pub struct Programs {
     pub ccache: PathBuf,
     pub mise: PathBuf,
     pub docker: PathBuf,
+    /// The search path of a program that Suds found beyond the process's
+    /// search path. Such a program may start another, as a launcher of
+    /// pnpm starts Node, and that one stands beside it.
+    pub search: Option<PathBuf>,
+}
+
+/// The programs as a run finds them, with each directory that the search
+/// could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub programs: Programs,
+    /// Each failure of the search, apart from an absent file. A program
+    /// may stand in such a directory unseen.
+    pub unread: Vec<String>,
 }
 
 impl Default for Programs {
@@ -97,6 +111,100 @@ impl Default for Programs {
             ccache: PathBuf::from("ccache"),
             mise: PathBuf::from("mise"),
             docker: PathBuf::from("docker"),
+            search: None,
+        }
+    }
+}
+
+/// Where a version manager or a package manager places its programs,
+/// beneath the home directory. A scheduler's search path names none of them.
+const HOME_PLACES: [&str; 9] = [
+    ".local/share/mise/shims",
+    ".asdf/shims",
+    ".local/bin",
+    ".cargo/bin",
+    "go/bin",
+    ".local/share/pnpm",
+    "Library/pnpm",
+    ".volta/bin",
+    ".nix-profile/bin",
+];
+
+/// The same places outside the home directory.
+const SYSTEM_PLACES: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/local/go/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+];
+
+/// Whether `path` is a file that this user may run. An absent file is no
+/// program, and every other failure of the reading is the caller's to state.
+fn runs(path: &Path) -> std::io::Result<bool> {
+    use std::io::ErrorKind::{NotADirectory, NotFound};
+    use std::os::unix::fs::PermissionsExt;
+    match path.metadata() {
+        Ok(meta) => Ok(meta.is_file() && meta.permissions().mode() & 0o111 != 0),
+        Err(err) if matches!(err.kind(), NotFound | NotADirectory) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+impl Programs {
+    /// Each program as a run of `environment` finds it. A name that the
+    /// search path resolves stays a name. Another name becomes the path of
+    /// the program in the first known place that holds it, so a run under a
+    /// scheduler's short search path still finds a store's program.
+    pub fn resolved(environment: &Environment) -> Resolution {
+        let searched = environment.variables.get("PATH");
+        let searched: Vec<PathBuf> =
+            searched.map_or_else(Vec::new, |path| std::env::split_paths(path).collect());
+        let home = environment.home.as_ref();
+        let known = HOME_PLACES
+            .iter()
+            .filter_map(|place| Some(home?.join(place)));
+        let known: Vec<PathBuf> = known
+            .chain(SYSTEM_PLACES.iter().map(PathBuf::from))
+            .collect();
+        let mut unread = Vec::new();
+        let mut beyond = false;
+        let mut holds = |path: &Path| {
+            runs(path).unwrap_or_else(|err| {
+                unread.push(format!("could not read {}: {err}", path.display()));
+                false
+            })
+        };
+        let mut find = |name: PathBuf| {
+            if searched
+                .iter()
+                .any(|directory| holds(&directory.join(&name)))
+            {
+                return name;
+            }
+            let mut places = known.iter().map(|directory| directory.join(&name));
+            let found = places.find(|path| holds(path));
+            beyond |= found.is_some();
+            found.unwrap_or(name)
+        };
+        let named = Programs::default();
+        let (go, pnpm, ccache) = (find(named.go), find(named.pnpm), find(named.ccache));
+        let (mise, docker) = (find(named.mise), find(named.docker));
+        // A program beyond the search path runs with the known places on its own path.
+        let places = searched
+            .iter()
+            .chain(known.iter().filter(|place| place.is_dir()));
+        let search = std::env::join_paths(places).ok().map(PathBuf::from);
+        unread.dedup();
+        Resolution {
+            programs: Programs {
+                go,
+                pnpm,
+                ccache,
+                mise,
+                docker,
+                search: search.filter(|_| beyond),
+            },
+            unread,
         }
     }
 }
@@ -176,10 +284,17 @@ impl Trim {
         for (name, path) in &self.environment {
             command.env(name, path.as_path());
         }
-        let output = command
-            .current_dir("/")
-            .output()
-            .map_err(|err| format!("could not run {}: {err}", self.program.display()))?;
+        let output = command.current_dir("/").output().map_err(|err| {
+            let program = self.program.display();
+            let absent = err.kind() == std::io::ErrorKind::NotFound;
+            // The reason names the search, so a person knows where a program must stand.
+            let searched = if absent && self.program.is_relative() {
+                ", and neither the search path nor a version manager's directory holds it"
+            } else {
+                ""
+            };
+            format!("could not run {program}: {err}{searched}")
+        })?;
         if output.status.success() {
             Ok(())
         } else {
@@ -275,7 +390,11 @@ fn trim_of(id: &str, path: Option<&Path>, budget: u64, inputs: &Inputs<'_>) -> O
         ),
         _ => return None,
     };
-    Some(trim)
+    // A program that Suds found beyond the search path starts its own programs there.
+    Some(match &programs.search {
+        Some(search) if trim.program.is_absolute() => trim.with("PATH", search),
+        _ => trim,
+    })
 }
 
 /// What a plan decides for one store.

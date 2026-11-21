@@ -504,6 +504,18 @@ no program that a version manager installed. The units therefore carry the
 search path of the shell that ran `suds schedule`, so a scheduled run finds
 the program of each store as that shell finds it.
 
+A run also looks beyond the search path. When the path resolves no program
+of a store, Suds takes the program from the first known directory that
+holds it. Those are the directories of mise, asdf, Cargo, Go, pnpm, Volta,
+Nix, and Homebrew, with `~/.local/bin` and `/usr/local/bin`. A unit with a
+stale search path therefore still trims its stores.
+
+A program from such a directory may start another, as a launcher of pnpm
+starts Node. Its command therefore runs with those directories on its
+search path, and the plan shows that path. A directory that the search
+could not read stands on the error stream, since a program may lie there
+unseen.
+
 ## Arena
 
 ```sh

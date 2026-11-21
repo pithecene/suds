@@ -51,6 +51,7 @@ impl Stubs {
             ccache: stub("ccache"),
             mise: stub("mise"),
             docker: stub("docker"),
+            search: None,
         }
     }
 
@@ -416,4 +417,90 @@ fn reports_a_machine_and_trims_none() {
         decision(&second, "lima.machine"),
         Decision::Audit { .. }
     ));
+}
+
+#[test]
+fn a_program_outside_the_search_path_resolves_in_a_version_managers_directory() {
+    use suds_core::development::Environment;
+
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let place = |directory: &str, name: &str, mode: u32| {
+        let path = home.join(directory).join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    };
+    let shim = place(".local/share/mise/shims", "pnpm", 0o755);
+    // A later place holds the program too, and the first place wins.
+    place(".local/bin", "pnpm", 0o755);
+    // A file that no user may run is no program.
+    place(".local/share/mise/shims", "ccache", 0o644);
+    let later = place(".cargo/bin", "ccache", 0o755);
+    place("searched", "docker", 0o755);
+    place(".local/bin", "docker", 0o755);
+
+    let searched = ("PATH".to_owned(), home.join("searched").into());
+    let environment = Environment {
+        home: Some(home.clone()),
+        variables: [searched].into(),
+    };
+    let resolution = Programs::resolved(&environment);
+    let programs = &resolution.programs;
+    assert_eq!(programs.pnpm, shim);
+    assert_eq!(programs.ccache, later);
+    // The search path resolves the name, so the name stays as it stood.
+    assert_eq!(programs.docker, Path::new("docker"));
+    assert_eq!(resolution.unread, Vec::<String>::new());
+
+    // A found program starts its own programs from the searched and the known places.
+    let search = programs
+        .search
+        .clone()
+        .expect("a program stands beyond the search path");
+    let places: Vec<PathBuf> = std::env::split_paths(&search).collect();
+    assert_eq!(places[0], home.join("searched"));
+    assert!(places.contains(&home.join(".local/share/mise/shims")));
+    assert!(!places.contains(&home.join(".asdf/shims")));
+
+    // A directory that refuses a reading stands in the result.
+    let closed = home.join(".local/share/mise/shims");
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = fs::metadata(closed.join("pnpm")).is_err();
+    let resolution = Programs::resolved(&environment);
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+    // A superuser reads the closed directory, and the search then misses nothing.
+    assert_eq!(!resolution.unread.is_empty(), denied);
+    if denied {
+        assert!(
+            resolution.unread[0].contains("mise/shims/"),
+            "{:?}",
+            resolution.unread
+        );
+        assert_eq!(resolution.programs.pnpm, home.join(".local/bin/pnpm"));
+    }
+}
+
+#[test]
+fn a_program_beyond_the_search_path_runs_with_the_known_places_on_its_path() {
+    let stubs = Stubs::new();
+    let found = Programs {
+        search: Some(PathBuf::from("/known/bin:/usr/bin")),
+        ..stubs.programs()
+    };
+    let named = Programs {
+        search: Some(PathBuf::from("/known/bin")),
+        ..Programs::default()
+    };
+    for (programs, carries) in [(found, true), (named, false)] {
+        let present = StoreStatus::Present;
+        let scan = scan(vec![store("pnpm.store", Ecosystem::Pnpm, 30, present)]);
+        let plan = plan(&scan, &programs, NOW);
+        let Decision::Trim { trim } = &plan.entries[0].decision else {
+            panic!("the store exceeds its budget");
+        };
+        let path = trim.environment.iter().find(|(name, _)| name == "PATH");
+        assert_eq!(path.is_some(), carries, "{}", trim.display());
+    }
 }

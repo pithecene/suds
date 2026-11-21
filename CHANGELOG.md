@@ -52,7 +52,9 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs a program such as `pnpm` in another directory. Each scheduled
   run therefore failed to trim the program's store. The units of
   `suds schedule` now carry the search path of the shell that ran the
-  command.
+  command. A run also takes a program that the search path lacks from the
+  directory of a version manager, so a unit of an earlier release trims
+  its stores too.
 
 ## [0.1.3] - 2026-11-20
 

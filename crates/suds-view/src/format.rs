@@ -50,6 +50,14 @@ impl Zone {
         local.map_or_else(String::new, |local| local.strftime("%Y-%m-%d").to_string())
     }
 
+    /// The date in this zone of the instant `seconds` after the Unix epoch, or
+    /// nothing for an instant beyond the calendar.
+    pub fn day_at(&self, seconds: i64) -> String {
+        let instant = Timestamp::from_second(seconds).ok();
+        let local = instant.map(|instant| instant.to_zoned(self.0.clone()));
+        local.map_or_else(String::new, |local| local.strftime("%Y-%m-%d").to_string())
+    }
+
     /// The hour and the minute of an RFC 3339 time in this zone, or the text
     /// itself for a time of another form.
     pub fn minute(&self, time: &str) -> String {
@@ -84,6 +92,10 @@ mod tests {
         assert_eq!(west.day("2026-11-20T01:14:01Z"), "2026-11-19");
         assert_eq!(west.minute("2026-11-20T01:14:01Z"), "20:14");
         assert_eq!(Zone::fixed(9).minute("2026-11-20T23:30:00Z"), "08:30");
+        // The instant 1795219200 is 2026-11-21T00:00:00Z.
+        assert_eq!(utc.day_at(1_795_219_200), "2026-11-21");
+        assert_eq!(west.day_at(1_795_219_200), "2026-11-20");
+        assert_eq!(utc.day_at(i64::MAX), "");
     }
 
     #[test]

@@ -39,18 +39,18 @@ pub fn store_groups(stores: &[Store], grouping: Grouping) -> Vec<StoreGroup> {
     let mut groups: Vec<StoreGroup> = Vec::new();
     for store in stores {
         let label = match grouping {
-            Grouping::Ecosystem => store.ecosystem,
-            Grouping::Class => store.class,
+            Grouping::Ecosystem => &store.ecosystem,
+            Grouping::Class => &store.class,
         };
         let over = usize::from(store.standing == StoreStanding::Over);
-        match groups.iter_mut().find(|group| group.label == label) {
+        match groups.iter_mut().find(|group| group.label == *label) {
             Some(group) => {
                 group.bytes = group.bytes.saturating_add(store.bytes);
                 group.over += over;
                 group.stores.push(store.clone());
             }
             None => groups.push(StoreGroup {
-                label: label.to_owned(),
+                label: label.clone(),
                 bytes: store.bytes,
                 share: 0.0,
                 over,

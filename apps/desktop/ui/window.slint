@@ -587,7 +587,7 @@ export component Window inherits Window {
                                 horizontal-stretch: 1;
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
-                                text: root.loading ? "Measuring…" : "Measured " + root.observed;
+                                text: root.loading ? "Measured " + root.observed + " · measuring again…" : "Measured " + root.observed;
                             }
                             if root.loading: VerticalLayout {
                                 alignment: center;

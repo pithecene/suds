@@ -4,11 +4,11 @@ use suds_view::{Grouping, Store, StoreStanding, store_groups};
 
 const GIB: u64 = 1 << 30;
 
-fn store(id: &str, ecosystem: &'static str, class: &'static str, bytes: u64) -> Store {
+fn store(id: &str, ecosystem: &str, class: &str, bytes: u64) -> Store {
     Store {
         id: id.to_owned(),
-        ecosystem,
-        class,
+        ecosystem: ecosystem.to_owned(),
+        class: class.to_owned(),
         path: format!("/stores/{id}"),
         bytes,
         budget_bytes: None,

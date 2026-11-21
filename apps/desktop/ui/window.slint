@@ -2,6 +2,7 @@
 // storage: the pressure, the classes, each checkout, and each store. Its
 // second view shows a reclaim plan, which a person approves or leaves.
 import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
+import { Check, IconButton, Push, Tones } from "controls.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
 // One row of the outline: a project, or one of its checkouts beneath it.
@@ -18,22 +19,6 @@ export struct OutcomeItem { path: string, detail: string, removed: bool }
 export struct StepItem { name: string, path: string, detail: string, done: bool }
 export struct RunItem { id: int, name: string, caption: string, size: string, state: string, rank: int }
 export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
-
-global Tones {
-    out property <color> normal: #2f9e6b;
-    out property <color> soft: #d98a00;
-    out property <color> hard: #d6453d;
-    out property <color> main: #4c7fe0;
-    out property <color> linked: #8a72f0;
-    out property <color> build: #e0951c;
-    out property <brush> muted: Palette.foreground.transparentize(0.42);
-    out property <brush> hairline: Palette.foreground.transparentize(0.86);
-    out property <brush> track: Palette.foreground.transparentize(0.88);
-    out property <brush> hover: Palette.foreground.transparentize(0.94);
-    out property <brush> pressed: Palette.foreground.transparentize(0.88);
-    // The outline of the map's rectangle beneath the pointer, fainter than a selection's.
-    out property <brush> outline: Palette.foreground.transparentize(0.45);
-}
 
 // A ring that turns while work runs. The toolkit's spinner draws its arc with square ends and
 // in steps at this size, so the window draws its own with round ends on a faint track.
@@ -134,126 +119,6 @@ component Key inherits HorizontalLayout {
         Rectangle { width: 8px; height: 8px; border-radius: 2px; background: root.tint; }
     }
     Caption { text: root.text; vertical-alignment: center; }
-}
-
-// A button that shows an icon alone and states its act to a screen reader.
-component IconButton inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
-    in property <bool> enabled: true;
-    callback clicked();
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    background: area.has-hover && root.enabled ? Tones.hover : transparent;
-    accessible-role: button;
-    accessible-label: root.label;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { root.clicked(); }
-    border-width: scope.has-focus ? 2px : 0px;
-    border-color: Palette.accent-background;
-    forward-focus: scope;
-    // The Tab key reaches the button, and Return or Space presses it.
-    scope := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.clicked();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    area := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-    Image {
-        source: root.icon;
-        width: 14px;
-        height: 14px;
-        colorize: Palette.foreground;
-        opacity: root.enabled ? 0.8 : 0.35;
-    }
-}
-
-// A button with a caption. The pointer becomes a hand above it, as above each thing that a click acts on.
-component Push inherits Rectangle {
-    in property <string> text;
-    in property <bool> enabled: true;
-    in property <bool> primary;
-    callback clicked();
-    height: 28px;
-    min-width: caption.preferred-width + 24px;
-    horizontal-stretch: 0;
-    border-radius: 5px;
-    border-width: scope.has-focus ? 2px : 1px;
-    border-color: scope.has-focus ? Palette.accent-background : root.primary ? Palette.accent-background : Tones.hairline;
-    background: root.primary ? Palette.accent-background : Palette.control-background;
-    opacity: root.enabled ? 1 : 0.5;
-    accessible-role: button;
-    accessible-label: root.text;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { root.clicked(); }
-    forward-focus: scope;
-    scope := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.clicked();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    // The shade of a hover and of a press lies above either background.
-    Rectangle {
-        border-radius: root.border-radius;
-        background: area.pressed ? Tones.pressed : area.has-hover ? Tones.hover : transparent;
-    }
-    area := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-    caption := Text {
-        text: root.text;
-        color: root.primary ? Palette.accent-foreground : Palette.foreground;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        accessible-role: none;
-    }
-}
-
-// A box that a person marks, for a row of the plan.
-component Check inherits Rectangle {
-    in property <bool> checked;
-    in property <string> label;
-    callback toggled();
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    border-width: scope.has-focus ? 2px : 1px;
-    border-color: scope.has-focus || root.checked ? Palette.accent-background : Tones.muted;
-    background: root.checked ? Palette.accent-background : transparent;
-    accessible-role: checkbox;
-    accessible-label: root.label;
-    accessible-checked: root.checked;
-    accessible-checkable: true;
-    accessible-action-default => { root.toggled(); }
-    forward-focus: scope;
-    scope := FocusScope {
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.toggled();
-                return accept;
-            }
-            return reject;
-        }
-    }
-    TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.toggled(); } }
-    if root.checked: Text { text: "✓"; color: Palette.accent-foreground; font-size: 11px; font-weight: 700; accessible-role: none; }
 }
 
 component Card inherits Rectangle {

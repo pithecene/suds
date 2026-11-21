@@ -1,7 +1,7 @@
 //! The text of a size and of a time, as every view writes them.
 
 use jiff::tz::{Offset, TimeZone};
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 
 /// A count of bytes in binary units, with one decimal above a kibibyte.
 pub fn bytes(count: u64) -> String {
@@ -39,9 +39,9 @@ impl Zone {
         Zone(TimeZone::fixed(offset))
     }
 
-    fn local(&self, time: &str) -> Option<Zoned> {
+    fn local(&self, time: &str) -> Option<ZonedDateTime> {
         let instant: Timestamp = time.parse().ok()?;
-        Some(instant.to_zoned(self.0.clone()))
+        Some(instant.to_zoned_datetime(self.0.clone()))
     }
 
     /// The date of an RFC 3339 time in this zone, or nothing for a time of another form.
@@ -54,7 +54,7 @@ impl Zone {
     /// nothing for an instant beyond the calendar.
     pub fn day_at(&self, seconds: i64) -> String {
         let instant = Timestamp::from_second(seconds).ok();
-        let local = instant.map(|instant| instant.to_zoned(self.0.clone()));
+        let local = instant.map(|instant| instant.to_zoned_datetime(self.0.clone()));
         local.map_or_else(String::new, |local| local.strftime("%Y-%m-%d").to_string())
     }
 

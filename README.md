@@ -21,11 +21,9 @@ mise use -g github:pithecene/suds
 This release measures storage and makes one change. It moves a
 directory's direct children into another directory on the same
 filesystem, and only through a plan that a person reviews. The `suds inspect`
-command and the web-view application read filesystem metadata beneath a set
-of user-owned roots. For each root, they report its storage use, its entry
-counts, and its largest direct children. The command writes a terminal
-table or one JSON document, and the web-view application shows the same
-measurements in a window.
+command reads filesystem metadata beneath a set of user-owned roots. For
+each root, it reports its storage use, its entry counts, and its largest
+direct children, as a terminal table or one JSON document.
 
 The `suds inspect --profile development` command finds each Git checkout
 beneath the directories that the caller names. It reports each checkout,
@@ -127,54 +125,26 @@ its steps, and a step that did not succeed states its reason.
 Run it with `task desktop`. Control and F moves to the filter, Control and R
 measures again, and the arrow keys move through the list. The window draws
 with [Slint](https://slint.dev/), without a web view, and runs on Linux
-(decision 0003). It replaces the web-view application below once it holds
-that application's views.
-
-## Web-View Application
-
-The web-view application runs on macOS. Its window lists the default roots
-and each folder that the user adds through the native folder picker. The
-application inspects them on a background thread and shows each root's result as soon
-as that root's scan ends, and the user can cancel a scan in progress. A
-cancelled root's result lists only the children that the scan finished
-before the cancellation, and its status is `partial`. For
-each root, the window shows the sizes, the counts, the status, the ranked
-direct children, the skipped mount points, and the traversal errors.
-
-In the Downloads location, the user can select direct children and choose
-**Move…**. The native folder picker asks for the destination, and a sheet
-shows the exact plan before anything moves. The sheet lists each move's
-outcome after the user applies the plan and offers to undo the run. The
-**History** sheet lists every run in the journal, with an undo for each run
-whose moves remain applied. The sheet first settles each move that an
-interruption left without an outcome.
-
-The application uses [Tauri](https://tauri.app/). The system's web view
-renders the window, and a Rust process holds every path. The web view may
-call eight application commands: list the locations, add a folder, start an
-inspection, cancel an inspection, build a move plan, apply a plan, list the
-journal, and undo a run. It receives no filesystem, shell, or network
-permission. The web view names each location, plan, and run by an opaque
-identifier, and each selected entry by its position in an inspection's
-result, rather than by a path. The file `apps/webview/src-tauri/capabilities/main.json`
-grants these commands.
+(decision 0003). On macOS, decision 0005 proposes a window in Swift with
+the system's own controls, and this release holds none. The command line
+serves each subject on both systems.
 
 ## Installation for Contributors
 
 Contributors build Suds from source. The [mise](https://mise.jdx.dev/)
-version manager installs the pinned Rust toolchain, Node.js, pnpm,
+version manager installs the pinned Rust toolchain,
 [Task](https://taskfile.dev/), and yamlfmt:
 
 ```sh
 mise install
 task build
 ./target/release/suds inspect
-task webview            # the web-view application, on macOS
+task desktop            # the desktop application, on Linux
 ```
 
 The repository is a Cargo workspace. The `crates/suds-core` crate holds the
-inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/webview` holds
-the web-view application. Neither interface invokes the other.
+inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/desktop` holds
+the desktop application. Neither interface invokes the other.
 
 ## Usage
 
@@ -604,9 +574,8 @@ destination on another filesystem. It also refuses to replace an existing
 output file. Where the measurement of a selected directory cannot read an
 entry, the plan and its preview name that entry with the reason.
 
-The `apply` command accepts only a plan that `suds plan` or the web-view
-application built and recorded in the journal, unchanged, and each plan
-runs once. Immediately before each move, Suds verifies the entry's
+The `apply` command accepts only a plan that `suds plan` built and
+recorded in the journal, unchanged, and each plan runs once. Immediately before each move, Suds verifies the entry's
 recorded identity, the identity and canonical path of both directories,
 and that the destination is free, and it refuses an entry that holds the
 journal directory. Suds then renames the entry with the
@@ -697,9 +666,6 @@ what it found at each path.
   permissions.
 - The report can reveal private file and directory names. Treat it as local
   machine data.
-- The web-view application's web view loads only the application's own
-  files and may call the eight application commands and nothing else. It
-  never holds a path that it could pass back to name a file.
 
 ## Development
 
@@ -711,12 +677,13 @@ what it found at each path.
 | `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
 | `task check` | Build, test, and lint |
 | `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
-| `task webview` | Run the web-view application in development mode |
-| `task webview:check` | Build the web frontend, then test and lint the web-view crate |
+| `task desktop` | Run the desktop application |
+| `task desktop:install` | Install the desktop application for this user |
+| `task desktop:check` | Build, test, and lint the desktop application and its view model |
 
 The `task check` command needs no network service, container, or elevated
-privilege once `mise install` has run. The `task webview:check` command
-also installs the frontend's pinned packages, and it runs on macOS. [CONTRIBUTING.md](CONTRIBUTING.md)
+privilege once `mise install` has run. The `task desktop:check` command
+needs a display's libraries, and CI runs it on Linux. [CONTRIBUTING.md](CONTRIBUTING.md)
 describes the conventions of the repository.
 
 ## License

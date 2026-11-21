@@ -236,6 +236,7 @@ command line.
 - The map has no key of its own. A person reaches each of its entries
   through the outline.
 - A release publishes no archive of the window.
-- The web-view application of decision 0001 still holds the inspection of a
-  root and the moves of Downloads entries. It leaves once the window holds
-  both.
+- The window shows no inspection of a root and plans no move of a
+  Downloads entry. The web-view application of decision 0001 held both
+  and left the repository, and the command line serves both.
+- macOS has no window. Decision 0005 proposes one in Swift.

@@ -66,9 +66,6 @@ rules hold for every release:
   implementations exist.
 - Keep each file's native path as its identity. A displayed string never
   names a file in an operation.
-- Let the desktop web view call application commands and nothing else: no
-  generic filesystem, shell, or network permission. Review the capability
-  file as code.
 
 ## Source Code Conventions
 
@@ -76,8 +73,8 @@ rules hold for every release:
 - Write no `unsafe` code, because the crate forbids it.
 - Pin each dependency to an exact version, and state the reason for each
   new dependency in its pull request.
-- Run `task check` before each commit, and `task webview:check` before a
-  commit that changes the web-view application.
+- Run `task check` before each commit, and `task desktop:check` before a
+  commit that changes the desktop application.
 
 ## Commits
 

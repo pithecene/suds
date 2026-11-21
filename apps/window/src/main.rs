@@ -18,8 +18,8 @@ use suds_core::development::Environment;
 use suds_core::reclaim::execute::ReclaimReport;
 use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
-    Checkout, History, Observation, Project, Proposal, Sort, Workstation, map, observe, projects,
-    propose,
+    Checkout, History, Observation, Project, Proposal, Sort, Upkeep, Workstation, map, observe,
+    projects, propose, upkeep,
 };
 
 slint::include_modules!();
@@ -370,8 +370,8 @@ fn reveal(window: &Window) {
     }
 }
 
-/// Draws one reading.
-fn show(window: &Window, state: &mut State, reading: Result<Observation, String>) {
+/// Draws one reading, with the standing of the scheduled maintenance beside it.
+fn show(window: &Window, state: &mut State, reading: Result<Observation, String>, upkeep: &Upkeep) {
     state.measuring = false;
     window.set_loading(false);
     let view = match reading {
@@ -388,7 +388,10 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
         }
         Ok(Observation::Measured(view)) => *view,
     };
-    window.set_notice(present::notice(view.error_count, view.registry_error.as_deref()).into());
+    let unread = present::notice(view.error_count, view.registry_error.as_deref());
+    let lines = [unread, present::upkeep(upkeep)];
+    let lines: Vec<String> = lines.into_iter().filter(|line| !line.is_empty()).collect();
+    window.set_notice(lines.join("\n").into());
     window.set_observed(present::observed(&view.observed_at).into());
     if let Some(card) = &view.pressure {
         let (level, rank) = present::level(card.level);
@@ -423,11 +426,13 @@ fn measure(window: &Window, state: Rc<RefCell<State>>) {
     // The state lives on the interface's thread, so the measuring thread carries only the weak handle.
     STATE.with(|slot| *slot.borrow_mut() = Some(state));
     std::thread::spawn(move || {
-        let reading = observe(&Environment::of_process(), now());
+        let environment = Environment::of_process();
+        let reading = observe(&environment, now());
+        let upkeep = upkeep(&environment, now());
         let _ = weak.upgrade_in_event_loop(move |window| {
             STATE.with(|slot| {
                 if let Some(state) = slot.borrow().as_ref() {
-                    show(&window, &mut state.borrow_mut(), reading);
+                    show(&window, &mut state.borrow_mut(), reading, &upkeep);
                 }
             });
         });

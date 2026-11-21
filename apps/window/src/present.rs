@@ -2,8 +2,10 @@
 
 use slint::{Color, SharedString};
 use suds_core::pressure::Level;
+use suds_core::schedule::Standing;
 use suds_view::{
-    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, bytes, day,
+    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, Upkeep, bytes,
+    day,
 };
 
 use crate::{BuildItem, ClassItem, FactItem, FrameItem, RowItem, StoreItem, TileItem};
@@ -62,6 +64,47 @@ pub fn notice(error_count: u64, registry_error: Option<&str>) -> String {
     if let Some(reason) = registry_error {
         lines.push(format!(
             "Suds could not read the registry, so no checkout shows its hold: {reason}"
+        ));
+    }
+    lines.join("\n")
+}
+
+/// What the scheduled maintenance needs from a person, or nothing for a sound schedule.
+/// A scheduled run that fails tells nobody, so the window states it.
+pub fn upkeep(upkeep: &Upkeep) -> String {
+    const INSTALL: &str =
+        "The command suds schedule --install plans a new one, and --apply places it.";
+    let mut lines = Vec::new();
+    match &upkeep.schedule {
+        Standing::Current => {}
+        Standing::Absent => lines.push(format!(
+            "No schedule runs the maintenance, so nothing holds the storage to its ceiling without a person. {INSTALL}"
+        )),
+        Standing::Stale(reason) => lines.push(format!(
+            "The maintenance schedule is stale: {reason}. {INSTALL}"
+        )),
+        Standing::Unreadable(reason) => lines.push(format!(
+            "Suds could not read the maintenance schedule: {reason}."
+        )),
+    }
+    if let Some(reason) = &upkeep.journal_error {
+        lines.push(format!(
+            "Suds could not read the journal, so the last scheduled run is unknown: {reason}"
+        ));
+    }
+    if upkeep.overdue {
+        lines.push(match &upkeep.last_run {
+            Some(at) => format!(
+                "The scheduled maintenance last ran on {}, more than a day ago.",
+                day(at)
+            ),
+            None => "The scheduled maintenance has not run yet.".to_owned(),
+        });
+    }
+    for trim in &upkeep.failed_trims {
+        lines.push(format!(
+            "The last scheduled run could not trim {}: {}.",
+            trim.store, trim.reason
         ));
     }
     lines.join("\n")
@@ -523,6 +566,72 @@ mod tests {
         let both = notice(1, Some("permission denied"));
         assert_eq!(both.lines().count(), 2);
         assert!(both.ends_with("no checkout shows its hold: permission denied"));
+    }
+
+    #[test]
+    fn a_sound_schedule_says_nothing_and_a_faulty_one_states_each_fault() {
+        use suds_core::schedule::Standing;
+        use suds_view::{FailedTrim, Upkeep};
+
+        let sound = Upkeep {
+            schedule: Standing::Current,
+            last_run: Some("2026-11-21T06:39:16Z".into()),
+            overdue: false,
+            failed_trims: Vec::new(),
+            journal_error: None,
+        };
+        assert_eq!(super::upkeep(&sound), "");
+
+        let absent = Upkeep {
+            schedule: Standing::Absent,
+            last_run: None,
+            ..sound.clone()
+        };
+        let line = super::upkeep(&absent);
+        assert!(
+            line.starts_with("No schedule runs the maintenance"),
+            "{line}"
+        );
+        assert!(line.ends_with("suds schedule --install plans a new one, and --apply places it."));
+
+        let trim = FailedTrim {
+            store: "pnpm.store".into(),
+            reason: "could not run pnpm".into(),
+        };
+        let faulty = Upkeep {
+            schedule: Standing::Stale("the unit states no search path".into()),
+            overdue: true,
+            failed_trims: vec![trim],
+            ..sound.clone()
+        };
+        let text = super::upkeep(&faulty);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("The maintenance schedule is stale: the unit states no"));
+        assert!(lines[0].ends_with("and --apply places it."));
+        assert_eq!(
+            lines[1],
+            "The scheduled maintenance last ran on 2026-11-21, more than a day ago."
+        );
+        assert_eq!(
+            lines[2],
+            "The last scheduled run could not trim pnpm.store: could not run pnpm."
+        );
+        let never = Upkeep {
+            last_run: None,
+            ..faulty
+        };
+        assert!(super::upkeep(&never).contains("has not run yet"));
+
+        let unread = Upkeep {
+            schedule: Standing::Unreadable("could not read /u: permission denied".into()),
+            journal_error: Some("the journal is corrupt".into()),
+            ..sound
+        };
+        let text = super::upkeep(&unread);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("Suds could not read the maintenance schedule: could not"));
+        assert!(lines[1].ends_with("is unknown: the journal is corrupt"));
     }
 
     #[test]

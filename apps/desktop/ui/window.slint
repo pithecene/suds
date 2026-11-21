@@ -1,7 +1,7 @@
 // The Suds window. Its first view shows one workstation's development
 // storage: the pressure, the classes, each checkout, and each store. Its
 // second view shows a reclaim plan, which a person approves or leaves.
-import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
+import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
 // One row of the outline: a project, or one of its checkouts beneath it.
@@ -33,6 +33,42 @@ global Tones {
     out property <brush> pressed: Palette.foreground.transparentize(0.88);
     // The outline of the map's rectangle beneath the pointer, fainter than a selection's.
     out property <brush> outline: Palette.foreground.transparentize(0.45);
+}
+
+// A ring that turns while work runs. The toolkit's spinner draws its arc with square ends and
+// in steps at this size, so the window draws its own with round ends on a faint track.
+component Busy inherits Rectangle {
+    property <angle> turn: 360deg * Math.mod(animation-tick() / 1ms, 900) / 900;
+    width: 16px;
+    height: 16px;
+    accessible-role: none;
+    Path {
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: Tones.track;
+        stroke-width: 1.75px;
+        MoveTo { x: 14; y: 8; }
+        ArcTo { x: 2; y: 8; radius-x: 6; radius-y: 6; sweep: true; }
+        ArcTo { x: 14; y: 8; radius-x: 6; radius-y: 6; sweep: true; }
+    }
+    Path {
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: Palette.accent-background;
+        stroke-width: 1.75px;
+        stroke-line-cap: round;
+        MoveTo {
+            x: 8 + 6 * Math.cos(root.turn);
+            y: 8 + 6 * Math.sin(root.turn);
+        }
+        ArcTo {
+            x: 8 + 6 * Math.cos(root.turn + 100deg);
+            y: 8 + 6 * Math.sin(root.turn + 100deg);
+            radius-x: 6;
+            radius-y: 6;
+            sweep: true;
+        }
+    }
 }
 
 component Caption inherits Text {
@@ -444,7 +480,7 @@ export component Window inherits Window {
             if !root.measured && root.notice == "": HorizontalLayout {
                 alignment: center;
                 spacing: 8px;
-                Spinner { width: 16px; height: 16px; indeterminate: true; }
+                Busy { }
                 Caption { text: "Measuring the development storage…"; vertical-alignment: center; }
             }
 
@@ -551,7 +587,7 @@ export component Window inherits Window {
                             }
                             if root.loading: VerticalLayout {
                                 alignment: center;
-                                Spinner { width: 16px; height: 16px; indeterminate: true; }
+                                Busy { }
                             }
                             if root.page == 0: VerticalLayout {
                                 alignment: center;
@@ -686,7 +722,7 @@ export component Window inherits Window {
                             HorizontalLayout {
                                 alignment: center;
                                 spacing: 8px;
-                                Spinner { width: 16px; height: 16px; indeterminate: true; }
+                                Busy { }
                                 Text {
                                     vertical-alignment: center;
                                     text: root.applying ? "Removing what the plan names…" : "Planning what Suds can remove…";
@@ -963,7 +999,7 @@ export component Window inherits Window {
                             vertical-stretch: 1;
                             alignment: center;
                             spacing: 8px;
-                            Spinner { width: 16px; height: 16px; indeterminate: true; }
+                            Busy { }
                             Text { vertical-alignment: center; text: "Reading the journal…"; }
                         }
                         if !root.history-loading && root.history-error != "": VerticalLayout {

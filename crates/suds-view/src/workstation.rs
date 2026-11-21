@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use suds_core::development::{self, CheckoutKind, DevelopmentReport, DevelopmentScan, StoreStatus};
+use suds_core::development::{
+    self, CheckoutKind, DevelopmentReport, DevelopmentScan, StoreClass, StoreStatus,
+};
 use suds_core::pressure::{Level, Pressure};
 use suds_core::registry::{self, Event, Reading, Standings};
 use suds_core::stores::Budgets;
@@ -93,6 +95,10 @@ pub enum StoreStanding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Store {
     pub id: String,
+    /// The language or the tool whose files the store holds.
+    pub ecosystem: &'static str,
+    /// The class of the store's storage, as the view's classes name it.
+    pub class: &'static str,
     pub path: String,
     pub bytes: u64,
     pub budget_bytes: Option<u64>,
@@ -259,6 +265,12 @@ fn stores(report: &DevelopmentReport, budgets: &Budgets) -> Vec<Store> {
             };
             Store {
                 id: store.id.clone(),
+                ecosystem: store.ecosystem.label(),
+                class: match store.class {
+                    StoreClass::SharedStore => "Shared stores",
+                    StoreClass::Toolchain => "Toolchains",
+                    StoreClass::Machine => "Machines",
+                },
                 path: store.path.clone(),
                 bytes,
                 budget_bytes,

@@ -8,6 +8,7 @@
 //! display, and the window of each system draws the same values.
 
 mod format;
+mod group;
 mod history;
 mod map;
 mod observe;
@@ -18,6 +19,7 @@ mod upkeep;
 mod workstation;
 
 pub use format::{Zone, bytes};
+pub use group::{Grouping, StoreGroup, store_groups};
 pub use history::{History, Run, Step, history};
 pub use map::{Frame, LABEL, Map, Rect, Tile, map, squarify};
 pub use observe::{Observation, observe};

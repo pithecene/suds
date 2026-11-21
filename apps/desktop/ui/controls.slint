@@ -146,3 +146,67 @@ export component Check inherits Rectangle {
     TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.toggled(); } }
     if root.checked: Text { text: "✓"; color: Palette.accent-foreground; font-size: 11px; font-weight: 700; accessible-role: none; }
 }
+
+// The line of a group that opens and shuts: its mark, its name, its caption, and its size.
+// A click toggles it, and so does Return or Space once the Tab key reaches it.
+export component GroupHead inherits Rectangle {
+    in property <string> name;
+    in property <string> caption;
+    in property <string> size;
+    in property <bool> open;
+    in property <brush> size-color: Palette.foreground;
+    callback toggled();
+    height: 16px;
+    border-radius: 3px;
+    border-width: scope.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    forward-focus: scope;
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                if (!event.repeat) {
+                    root.toggled();
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        Text {
+            width: 8px;
+            text: root.open ? "▾" : "▸";
+            font-size: 10px;
+            color: Tones.muted;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        Text {
+            text: root.name;
+            font-size: 12px;
+            font-weight: 600;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        // A group states its count beside its name, so its row takes two lines.
+        Text {
+            text: root.caption;
+            color: Tones.muted;
+            font-size: 11px;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.size;
+            font-size: 12px;
+            color: root.size-color;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.toggled(); }
+    }
+}

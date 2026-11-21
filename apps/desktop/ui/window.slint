@@ -2,7 +2,7 @@
 // storage: the pressure, the classes, each checkout, and each store. Its
 // second view shows a reclaim plan, which a person approves or leaves.
 import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
-import { Check, IconButton, Push, Tones } from "controls.slint";
+import { Check, GroupHead, IconButton, Push, Tones } from "controls.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
 // One row of the outline: a project, or one of its checkouts beneath it.
@@ -1357,42 +1357,29 @@ export component Window inherits Window {
                                                 root.store-toggle(store.id);
                                             }
                                         }
-                                        Rectangle {
+                                        if store.group: GroupHead {
+                                            name: store.id;
+                                            caption: store.budget;
+                                            size: store.size;
+                                            open: store.open;
+                                            size-color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground;
+                                            toggled => { root.store-toggle(store.id); }
+                                        }
+                                        if !store.group: HorizontalLayout {
                                             height: 16px;
-                                            HorizontalLayout {
-                                                spacing: 6px;
-                                                if store.group: Text {
-                                                    width: 8px;
-                                                    text: store.open ? "▾" : "▸";
-                                                    font-size: 10px;
-                                                    color: Tones.muted;
-                                                    vertical-alignment: center;
-                                                    accessible-role: none;
-                                                }
-                                                Text {
-                                                    text: store.id;
-                                                    font-size: 12px;
-                                                    font-weight: store.group ? 600 : 400;
-                                                    horizontal-stretch: store.group ? 0 : 1;
-                                                    overflow: elide;
-                                                    vertical-alignment: center;
-                                                }
-                                                // A group states its count beside its name, so its row takes two lines.
-                                                if store.group: Caption {
-                                                    text: store.budget;
-                                                    horizontal-stretch: 1;
-                                                    vertical-alignment: center;
-                                                }
-                                                Text {
-                                                    text: store.size;
-                                                    font-size: 12px;
-                                                    vertical-alignment: center;
-                                                    color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground;
-                                                }
+                                            spacing: 6px;
+                                            Text {
+                                                text: store.id;
+                                                font-size: 12px;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                                vertical-alignment: center;
                                             }
-                                            if store.group: TouchArea {
-                                                mouse-cursor: MouseCursor.pointer;
-                                                clicked => { root.store-toggle(store.id); }
+                                            Text {
+                                                text: store.size;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground;
                                             }
                                         }
                                         Meter { share: store.share; fill: store.over ? Tones.hard : Tones.normal; }

@@ -1,11 +1,11 @@
 //! Reads directories ahead of a traversal, on several threads.
 //!
-//! A traversal counts each entry in one order, so that its sums, its sampled
-//! errors, and its attribution of a hard-linked file depend on the tree
-//! alone. The reading of a directory has no such order. This module lists a
-//! directory and reads its entries' metadata on any thread, and the
-//! traversal takes each result in its own order. One set of threads serves
-//! every traversal of the process.
+//! A traversal counts each entry in one order, so its sums and its
+//! attribution of a hard-linked file depend on the tree alone. Any thread
+//! may read a directory, and the traversal takes each reading in its order.
+//! A reading first lists the names and asks the caller's rule, and then
+//! reads each entry's metadata. The same threads serve every traversal of
+//! the process.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -35,17 +35,43 @@ const HELD_LIMIT: usize = 100_000;
 pub(crate) struct Listing {
     names: Vec<OsString>,
     kinds: Vec<Option<EntryKind>>,
+    /// Whether each name holds ASCII alone.
+    plain: bool,
 }
 
 impl Listing {
     fn kind(&self, dir: &Path, name: &str) -> Option<EntryKind> {
-        let at = self
+        let found = self
             .names
-            .binary_search_by(|held| held.as_os_str().cmp(OsStr::new(name)))
-            .ok()?;
-        // A filesystem may state no kind in its listing, and the entry's own
-        // metadata then decides.
-        self.kinds[at].or_else(|| probed_kind(&dir.join(name)))
+            .binary_search_by(|held| held.as_os_str().cmp(OsStr::new(name)));
+        match found {
+            // A filesystem may state no kind in its listing, and the
+            // entry's own metadata then decides.
+            Ok(at) => self.kinds[at].or_else(|| probed_kind(&dir.join(name))),
+            // A filesystem that ignores case finds an entry under another
+            // spelling of its name. The filesystem then decides, as it
+            // decides for a caller that asks it for the name.
+            Err(_) if self.respelled(name) => probed_kind(&dir.join(name)),
+            Err(_) => None,
+        }
+    }
+
+    /// Whether the listing holds another spelling of `name`: a name that
+    /// differs from it in case alone.
+    fn respelled(&self, name: &str) -> bool {
+        self.names.iter().any(|held| {
+            let held = held.as_encoded_bytes();
+            if held.len() == name.len() {
+                return held != name.as_bytes() && held.eq_ignore_ascii_case(name.as_bytes());
+            }
+            // A letter outside ASCII may fold to an ASCII letter, as the
+            // Kelvin sign folds to the letter k.
+            !self.plain
+                && str::from_utf8(held).is_ok_and(|held| {
+                    held.to_lowercase() == name.to_lowercase()
+                        || held.to_uppercase() == name.to_uppercase()
+                })
+        })
     }
 }
 
@@ -111,22 +137,37 @@ pub(crate) struct Child {
     pub(crate) slot: Option<Arc<Slot>>,
 }
 
-/// What one reading of a directory found.
-pub(crate) struct Reading {
-    /// Whether the caller's rule claims the directory. A claimed directory
-    /// has no entries here, because the traversal never enters it.
+/// The first step of a directory's reading: its names, and the rule's
+/// answer about it.
+pub(crate) struct Head {
+    /// Whether the caller's rule claims the directory, so the traversal
+    /// never enters it.
     pub(crate) claimed: bool,
-    pub(crate) listing: Option<Arc<Listing>>,
+    listing: Option<Arc<Listing>>,
     /// The error that kept the directory's listing from the traversal.
     pub(crate) unlisted: Option<io::Error>,
     /// The error of each name that the listing could not state.
     pub(crate) unnamed: Vec<io::Error>,
+}
+
+impl Head {
+    pub(crate) fn layout<'a>(&'a self, dir: &'a Path) -> Layout<'a> {
+        match &self.listing {
+            Some(listing) => Layout::Listed(dir, listing),
+            None => Layout::Asked(dir),
+        }
+    }
+}
+
+/// The second step of a directory's reading: each entry with its metadata.
+/// A claimed directory and an unlisted one have no entries here.
+pub(crate) struct Body {
     pub(crate) children: Vec<Child>,
-    /// Whether the reading counts against the limit of held entries.
+    /// Whether the entries count against the limit of held entries.
     weighed: bool,
 }
 
-impl Reading {
+impl Body {
     /// The count that this reading holds against the limit of held entries.
     fn weight(&self) -> usize {
         self.children.len() + 1
@@ -139,19 +180,14 @@ impl Reading {
             .filter(|child| child.slot.is_some())
             .count()
     }
-
-    pub(crate) fn layout<'a>(&'a self, dir: &'a Path) -> Layout<'a> {
-        match &self.listing {
-            Some(listing) => Layout::Listed(dir, listing),
-            None => Layout::Asked(dir),
-        }
-    }
 }
 
 enum State {
     Waiting,
-    Running,
-    Read(Arc<Reading>),
+    Listing,
+    Listed(Arc<Head>),
+    Probing(Arc<Head>),
+    Read(Arc<Head>, Arc<Body>),
 }
 
 /// One directory that awaits its reading, or holds it.
@@ -165,7 +201,7 @@ pub(crate) struct Slot {
     /// and no rule claims the start.
     beside: Option<Arc<Listing>>,
     state: Mutex<State>,
-    read: Condvar,
+    changed: Condvar,
 }
 
 impl Slot {
@@ -179,7 +215,7 @@ impl Slot {
             place,
             beside,
             state: Mutex::new(State::Waiting),
-            read: Condvar::new(),
+            changed: Condvar::new(),
         })
     }
 
@@ -187,29 +223,33 @@ impl Slot {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes the reading for the calling thread, unless another thread has it.
-    fn take(&self) -> bool {
-        let mut state = self.state();
-        let waiting = matches!(*state, State::Waiting);
-        if waiting {
-            *state = State::Running;
-        }
-        waiting
+    fn set(&self, state: State) {
+        *self.state() = state;
+        self.changed.notify_all();
+    }
+
+    fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        self.changed
+            .wait(state)
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// Returns a taken directory to the waiting ones when its reading panics,
-/// so the traversal reads it itself and meets the same panic.
+/// Returns a directory to its last finished step when a step panics, so
+/// the traversal runs the step itself and meets the same panic.
 struct Taken<'a>(&'a Slot);
 
 impl Drop for Taken<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state();
-        if matches!(*state, State::Running) {
-            *state = State::Waiting;
-            drop(state);
-            self.0.read.notify_all();
-        }
+        let back = match &*state {
+            State::Listing => State::Waiting,
+            State::Probing(head) => State::Listed(Arc::clone(head)),
+            _ => return,
+        };
+        *state = back;
+        drop(state);
+        self.0.changed.notify_all();
     }
 }
 
@@ -270,9 +310,8 @@ impl Pool {
             match next(&mut shared) {
                 Some((ahead, slot)) => {
                     drop(shared);
-                    if slot.take() {
-                        ahead.fill(&slot);
-                    }
+                    ahead.list(&slot);
+                    ahead.probe(&slot);
                     drop((ahead, slot));
                     shared = self.shared();
                 }
@@ -336,22 +375,26 @@ impl Ahead {
         })
     }
 
-    pub(crate) fn joined(&self) -> bool {
+    fn joined(&self) -> bool {
         self.joined.load(Ordering::Relaxed)
     }
 
-    /// Lets the threads join, and hands them the directories that wait
-    /// beneath each of `read`, the directories that the traversal has read
-    /// and has yet to count.
-    pub(crate) fn join(self: &Arc<Self>, read: &[(&Slot, &Reading)]) {
+    /// Lets the threads join. They take the listed directories that the
+    /// traversal has yet to count, given with the next one last, and the
+    /// directories beneath the one that the traversal counts now. A system
+    /// with one processor has no threads, and the traversal reads alone.
+    pub(crate) fn join(self: &Arc<Self>, listed: &[Arc<Slot>], now: &Slot, body: &Body) {
         let pool = Pool::get();
         if pool.threads == 0 {
             return;
         }
         let mut shared = pool.shared();
-        for (slot, reading) in read {
-            offer(&mut shared.waiting, self.id, slot, reading);
+        for slot in listed {
+            let parent = &slot.place[..slot.place.len().saturating_sub(1)];
+            let group = shared.waiting.entry((self.id, parent.into())).or_default();
+            group.push(Arc::clone(slot));
         }
+        offer(&mut shared.waiting, self.id, now, body);
         shared.joined.push(Arc::clone(self));
         self.joined.store(true, Ordering::Relaxed);
         drop(shared);
@@ -366,32 +409,45 @@ impl Ahead {
         }
         let mut shared = Pool::get().shared();
         shared.joined.retain(|ahead| ahead.id != self.id);
-        let later = shared.waiting.split_off(&(self.id, Box::default()));
-        let mut later = later;
-        let rest = later.split_off(&(self.id + 1, Box::default()));
-        shared.waiting.extend(rest);
+        let mut own = shared.waiting.split_off(&(self.id, Box::default()));
+        let later = own.split_off(&(self.id + 1, Box::default()));
+        shared.waiting.extend(later);
         self.joined.store(false, Ordering::Relaxed);
     }
 
-    /// The reading of a directory. The traversal reads a directory that no
-    /// thread has taken, and waits for one that a thread reads.
-    pub(crate) fn reading(&self, slot: &Slot) -> Arc<Reading> {
+    /// The first step of a directory's reading. The traversal lists a
+    /// directory that no thread has taken, and waits for one that a thread
+    /// lists.
+    pub(crate) fn head(&self, slot: &Slot) -> Arc<Head> {
         loop {
-            if slot.take() {
-                self.fill(slot);
-            }
+            self.list(slot);
             let mut state = slot.state();
             loop {
                 match &*state {
-                    State::Read(reading) => return Arc::clone(reading),
-                    // The thread that read the directory panicked.
-                    State::Waiting => break,
-                    State::Running => {
-                        state = slot
-                            .read
-                            .wait(state)
-                            .unwrap_or_else(PoisonError::into_inner);
+                    State::Listed(head) | State::Probing(head) | State::Read(head, _) => {
+                        return Arc::clone(head);
                     }
+                    // The thread that listed the directory panicked.
+                    State::Waiting => break,
+                    State::Listing => state = slot.wait(state),
+                }
+            }
+        }
+    }
+
+    /// Both steps of a directory's reading. The traversal runs each step
+    /// that no thread has taken, and waits for a step that a thread runs.
+    pub(crate) fn body(&self, slot: &Slot) -> (Arc<Head>, Arc<Body>) {
+        loop {
+            self.list(slot);
+            self.probe(slot);
+            let mut state = slot.state();
+            loop {
+                match &*state {
+                    State::Read(head, body) => return (Arc::clone(head), Arc::clone(body)),
+                    // The thread that ran a step panicked.
+                    State::Waiting | State::Listed(_) => break,
+                    State::Listing | State::Probing(_) => state = slot.wait(state),
                 }
             }
         }
@@ -399,30 +455,55 @@ impl Ahead {
 
     /// Records that the traversal has counted a reading, so the threads may
     /// read further ahead.
-    pub(crate) fn counted(&self, reading: &Reading) {
-        if !reading.weighed {
+    pub(crate) fn counted(&self, body: &Body) {
+        if !body.weighed {
             return;
         }
-        let before = self.held.fetch_sub(reading.weight(), Ordering::Relaxed);
-        if before >= HELD_LIMIT && before - reading.weight() < HELD_LIMIT {
+        let before = self.held.fetch_sub(body.weight(), Ordering::Relaxed);
+        if before >= HELD_LIMIT && before - body.weight() < HELD_LIMIT {
             let pool = Pool::get();
             drop(pool.shared());
             pool.changed.notify_all();
         }
     }
 
-    fn fill(&self, slot: &Slot) {
+    /// Runs the first step for a directory that no thread has taken.
+    fn list(&self, slot: &Slot) {
+        {
+            let mut state = slot.state();
+            if !matches!(*state, State::Waiting) {
+                return;
+            }
+            *state = State::Listing;
+        }
         let taken = Taken(slot);
-        let mut reading = self.read(slot);
-        reading.weighed = self.joined();
-        let reading = Arc::new(reading);
-        if reading.weighed {
-            self.held.fetch_add(reading.weight(), Ordering::Relaxed);
+        let head = Arc::new(self.listed(slot));
+        slot.set(State::Listed(head));
+        drop(taken);
+    }
+
+    /// Runs the second step for a listed directory that no thread has taken.
+    fn probe(&self, slot: &Slot) {
+        let head = {
+            let mut state = slot.state();
+            let State::Listed(head) = &*state else {
+                return;
+            };
+            let head = Arc::clone(head);
+            *state = State::Probing(Arc::clone(&head));
+            head
+        };
+        let taken = Taken(slot);
+        let mut body = self.probed(slot, &head);
+        // The traversal counts no reading of a claimed directory.
+        body.weighed = self.joined() && !head.claimed;
+        if body.weighed {
+            self.held.fetch_add(body.weight(), Ordering::Relaxed);
             let pool = Pool::get();
             let mut shared = pool.shared();
             // A traversal that has ended takes no further directory.
             let added = if self.joined() {
-                offer(&mut shared.waiting, self.id, slot, &reading)
+                offer(&mut shared.waiting, self.id, slot, &body)
             } else {
                 0
             };
@@ -433,44 +514,47 @@ impl Ahead {
                 _ => pool.changed.notify_all(),
             }
         }
-        *slot.state() = State::Read(reading);
+        slot.set(State::Read(head, Arc::new(body)));
         drop(taken);
-        slot.read.notify_all();
     }
 
-    fn read(&self, slot: &Slot) -> Reading {
+    fn listed(&self, slot: &Slot) -> Head {
         let dir = slot.dir.as_path();
-        let mut reading = Reading {
+        let mut head = Head {
             claimed: false,
             listing: None,
             unlisted: None,
             unnamed: Vec::new(),
-            children: Vec::new(),
-            weighed: false,
         };
         match list(dir) {
             Ok((listing, unnamed)) => {
-                reading.listing = Some(Arc::new(listing));
-                reading.unnamed = unnamed;
+                head.listing = Some(Arc::new(listing));
+                head.unnamed = unnamed;
             }
-            Err(err) => reading.unlisted = Some(err),
+            Err(err) => head.unlisted = Some(err),
         }
         if let (Some(beside), Some(parent)) = (&slot.beside, dir.parent()) {
             let entry = Entry {
                 path: dir,
                 kind: EntryKind::Directory,
-                own: reading.layout(dir),
+                own: head.layout(dir),
                 beside: Layout::Listed(parent, beside),
             };
-            reading.claimed = (self.claims)(&entry);
+            head.claimed = (self.claims)(&entry);
         }
-        let Some(listing) = reading.listing.clone() else {
-            return reading;
+        head
+    }
+
+    fn probed(&self, slot: &Slot, head: &Head) -> Body {
+        let mut body = Body {
+            children: Vec::new(),
+            weighed: false,
         };
-        if reading.claimed {
-            return reading;
-        }
-        reading.children.reserve_exact(listing.names.len());
+        let Some(listing) = head.listing.as_ref().filter(|_| !head.claimed) else {
+            return body;
+        };
+        let dir = slot.dir.as_path();
+        body.children.reserve_exact(listing.names.len());
         for (index, name) in listing.names.iter().enumerate() {
             let path = dir.join(name);
             let probed = probe_at(&path, false, self.device, self.check_file_mounts);
@@ -480,17 +564,17 @@ impl Ahead {
             let slot = enters.then(|| {
                 let index = u32::try_from(index).unwrap_or(u32::MAX);
                 let place = slot.place.iter().copied().chain([index]).collect();
-                Slot::new(path.clone(), place, Some(Arc::clone(&listing)))
+                Slot::new(path.clone(), place, Some(Arc::clone(listing)))
             });
-            reading.children.push(Child { path, probed, slot });
+            body.children.push(Child { path, probed, slot });
         }
-        reading
+        body
     }
 }
 
 /// Queues the directories beneath a read one, and returns their count.
-fn offer(waiting: &mut Waiting, id: u64, slot: &Slot, reading: &Reading) -> usize {
-    let beneath: Vec<Arc<Slot>> = reading
+fn offer(waiting: &mut Waiting, id: u64, slot: &Slot, body: &Body) -> usize {
+    let beneath: Vec<Arc<Slot>> = body
         .children
         .iter()
         .rev()
@@ -518,13 +602,20 @@ fn list(dir: &Path) -> io::Result<(Listing, Vec<io::Error>)> {
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    let (names, kinds) = found.into_iter().unzip();
-    Ok((Listing { names, kinds }, unnamed))
+    let (names, kinds): (Vec<OsString>, Vec<_>) = found.into_iter().unzip();
+    let plain = names.iter().all(|name| name.as_encoded_bytes().is_ascii());
+    let listing = Listing {
+        names,
+        kinds,
+        plain,
+    };
+    Ok((listing, unnamed))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -624,5 +715,41 @@ mod tests {
         let part = at.join("s1");
         let (listing, _) = super::list(&part).unwrap();
         assert!(super::Layout::Listed(&part, &listing).file("link"));
+    }
+
+    /// A filesystem that ignores case finds `.git` under the name `.GIT`,
+    /// so a listing with another spelling asks the filesystem.
+    #[test]
+    fn a_listing_with_another_spelling_of_a_name_asks_the_filesystem() {
+        let dir = TempDir::new().unwrap();
+        for name in [".GIT", "\u{17f}tats", "trim.txt", "caf\u{e9}"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let (listing, _) = super::list(dir.path()).unwrap();
+        assert!(listing.respelled(".git"));
+        // The long s folds to the letter s.
+        assert!(listing.respelled("stats"));
+        assert!(!listing.respelled("trim.txt"));
+        assert!(!listing.respelled("README"));
+        let listed = super::Layout::Listed(dir.path(), &listing);
+        let asked = super::Layout::Asked(dir.path());
+        for name in [".git", "stats", "trim.txt", "README"] {
+            assert_eq!(listed.entry(name), asked.entry(name));
+        }
+    }
+
+    #[test]
+    fn a_traversal_reads_the_metadata_of_one_directory_at_a_time_before_the_threads_join() {
+        let dir = wide();
+        let device = fs::metadata(dir.path()).unwrap().dev();
+        let ahead = super::Ahead::new(Arc::new(|_| false), device, false);
+        let start = super::Slot::start(dir.path().to_path_buf());
+        let (_, body) = ahead.body(&start);
+        for child in &body.children {
+            let slot = child.slot.as_ref().unwrap();
+            assert!(!ahead.head(slot).claimed);
+            // The first step lists the directory and reads no entry of it.
+            assert!(matches!(*slot.state(), super::State::Listed(_)));
+        }
     }
 }

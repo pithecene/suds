@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::ahead::{Ahead, Claims, Entry, Layout, Reading, START_AT, Slot};
+use crate::ahead::{Ahead, Body, Claims, Entry, Head, Layout, START_AT, Slot};
 use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
@@ -392,23 +392,18 @@ impl Walker {
         // in reverse. The order of the count therefore depends on the tree
         // alone, whichever thread read a directory.
         let mut pending = vec![(start.to_path_buf(), Slot::start(start.to_path_buf()))];
+        // Whether the traversal has asked the threads to join, which it asks once.
+        let mut asked = false;
         while let Some((dir, slot)) = pending.pop() {
             if cancel.load(Ordering::Relaxed) {
                 self.cancelled = true;
                 break;
             }
-            let reading = ahead.reading(&slot);
-            if !ahead.joined() && pending.len() + reading.entered() >= START_AT {
-                let readings: Vec<_> = pending
-                    .iter()
-                    .map(|(_, slot)| ahead.reading(slot))
-                    .collect();
-                let mut read: Vec<(&Slot, &Reading)> = Vec::with_capacity(pending.len() + 1);
-                for ((_, slot), reading) in pending.iter().zip(&readings) {
-                    read.push((slot, reading));
-                }
-                read.push((&slot, &reading));
-                ahead.join(&read);
+            let (head, body) = ahead.body(&slot);
+            if !asked && pending.len() + body.entered() >= START_AT {
+                asked = true;
+                let listed: Vec<_> = pending.iter().map(|(_, slot)| Arc::clone(slot)).collect();
+                ahead.join(&listed, &slot, &body);
             }
             let mut rest = Replay {
                 ahead: &ahead,
@@ -418,8 +413,8 @@ impl Walker {
                 set_aside: &mut *set_aside,
                 pending: &mut pending,
             };
-            self.replay(&dir, &reading, &mut rest);
-            ahead.counted(&reading);
+            self.replay(&dir, &head, &body, &mut rest);
+            ahead.counted(&body);
             if self.cancelled {
                 break;
             }
@@ -430,7 +425,7 @@ impl Walker {
 
     /// Counts the entries of one directory from its reading, in the
     /// listing's order, and queues each directory to enter.
-    fn replay(&mut self, dir: &Path, reading: &Reading, rest: &mut Replay<'_, '_, '_>) {
+    fn replay(&mut self, dir: &Path, head: &Head, body: &Body, rest: &mut Replay<'_, '_, '_>) {
         let Replay {
             ahead,
             tally,
@@ -439,15 +434,15 @@ impl Walker {
             set_aside,
             pending,
         } = rest;
-        if let Some(err) = &reading.unlisted {
+        if let Some(err) = &head.unlisted {
             self.record_error(dir, err);
             return;
         }
-        for err in &reading.unnamed {
+        for err in &head.unnamed {
             self.record_error(dir, err);
         }
         let mut subdirs = Vec::new();
-        for child in &reading.children {
+        for child in &body.children {
             // A single directory can hold many entries, so a cancellation
             // request takes effect between entries.
             if cancel.load(Ordering::Relaxed) {
@@ -462,7 +457,7 @@ impl Walker {
                     continue;
                 }
             };
-            let entered = child.slot.as_ref().map(|slot| ahead.reading(slot));
+            let entered = child.slot.as_ref().map(|slot| ahead.head(slot));
             if !probed.mount {
                 if let Some(note) = note.as_deref_mut() {
                     note(&Entry {
@@ -471,11 +466,10 @@ impl Walker {
                         own: entered
                             .as_ref()
                             .map_or(Layout::Asked(path), |own| own.layout(path)),
-                        beside: reading.layout(dir),
+                        beside: head.layout(dir),
                     });
                 }
-                if let Some(entered) = entered.as_ref().filter(|entered| entered.claimed) {
-                    ahead.counted(entered);
+                if entered.as_ref().is_some_and(|entered| entered.claimed) {
                     set_aside.push(child.path.clone());
                     continue;
                 }

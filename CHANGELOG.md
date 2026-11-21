@@ -62,6 +62,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The desktop application's spinner draws a smooth ring**: the toolkit's spinner drew its arc in steps at the window's size, so the window now draws a ring of its own with round ends.
+
 - **A scheduled run finds the program of each store**.
 
   A scheduler gives each unit a short search path, and a version manager

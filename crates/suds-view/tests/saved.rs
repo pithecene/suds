@@ -70,9 +70,9 @@ fn view() -> Workstation {
 #[test]
 fn a_saved_reading_comes_back_whole() {
     let (_temp, environment) = home();
-    assert_eq!(last_reading(&environment), None);
+    assert_eq!(last_reading(&environment), Ok(None));
     save_reading(&environment, &view()).unwrap();
-    assert_eq!(last_reading(&environment), Some(view()));
+    assert_eq!(last_reading(&environment), Ok(Some(view())));
 
     // A second reading replaces the first and leaves no staged file.
     let later = Workstation {
@@ -80,7 +80,7 @@ fn a_saved_reading_comes_back_whole() {
         ..view()
     };
     save_reading(&environment, &later).unwrap();
-    assert_eq!(last_reading(&environment), Some(later));
+    assert_eq!(last_reading(&environment), Ok(Some(later)));
     let state = Directories::of(&environment).unwrap().state;
     let names: Vec<_> = fs::read_dir(state).unwrap().flatten().collect();
     assert_eq!(names.len(), 1);
@@ -93,9 +93,9 @@ fn a_reading_of_another_schema_or_another_form_counts_as_none() {
     let path = Directories::of(&environment).unwrap().reading();
     let text = fs::read_to_string(&path).unwrap();
     fs::write(&path, text.replace("suds.reading/v1", "suds.reading/v0")).unwrap();
-    assert_eq!(last_reading(&environment), None);
+    assert_eq!(last_reading(&environment), Ok(None));
     fs::write(&path, "{").unwrap();
-    assert_eq!(last_reading(&environment), None);
+    assert_eq!(last_reading(&environment), Ok(None));
 }
 
 #[test]
@@ -107,4 +107,15 @@ fn a_home_that_takes_no_file_states_the_failure() {
     fs::write(&state, "").unwrap();
     let failure = save_reading(&environment, &view()).unwrap_err();
     assert!(failure.starts_with("could not write "), "{failure}");
+}
+
+#[test]
+fn a_reading_that_suds_cannot_read_is_a_failure_and_not_an_absence() {
+    let (_temp, environment) = home();
+    // A directory stands at the reading's path, so the read fails for a reason other than absence.
+    let path = Directories::of(&environment).unwrap().reading();
+    fs::create_dir_all(&path).unwrap();
+    let failure = last_reading(&environment).unwrap_err();
+    assert!(failure.starts_with("could not read "), "{failure}");
+    assert!(failure.contains("reading.json"), "{failure}");
 }

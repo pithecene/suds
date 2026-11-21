@@ -5,6 +5,7 @@
 //! directory and shows the saved one while it measures again.
 
 use std::fs;
+use std::io::ErrorKind;
 
 use serde::{Deserialize, Serialize};
 use suds_core::development::Environment;
@@ -37,10 +38,21 @@ pub fn save_reading(environment: &Environment, view: &Workstation) -> Result<(),
 }
 
 /// The reading that the last measurement saved. A workstation without one
-/// has none, and a reading that this release cannot read counts as none,
-/// because the measurement that follows replaces it.
-pub fn last_reading(environment: &Environment) -> Option<Workstation> {
-    let path = Directories::of(environment)?.reading();
-    let saved: Saved = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (saved.schema == READING_SCHEMA).then_some(saved.view)
+/// has none. A reading that this release cannot parse counts as none too,
+/// because the measurement that follows replaces it. A file that Suds could
+/// not read is a failure, and the result states it.
+pub fn last_reading(environment: &Environment) -> Result<Option<Workstation>, String> {
+    let Some(directories) = Directories::of(environment) else {
+        return Ok(None);
+    };
+    let path = directories.reading();
+    let text = match fs::read(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("could not read {}: {err}", path.display())),
+    };
+    let saved = serde_json::from_slice::<Saved>(&text).ok();
+    Ok(saved
+        .filter(|saved| saved.schema == READING_SCHEMA)
+        .map(|saved| saved.view))
 }

@@ -48,8 +48,9 @@ takes most of a minute. The window therefore saves each whole reading as
 while it measures again. The storage's card states the saved reading's
 time, with its day for a reading of another day. The functions
 `suds_view::save_reading` and `suds_view::last_reading` write and read the
-file. A reading of another schema counts as none, and a reading that Suds
-could not save adds a notice.
+file. A reading of another schema counts as none. A reading that Suds
+could not save or could not read adds a notice, and the saved reading
+opens with the notices of the entries that it left unread.
 
 The command `task desktop:install` installs the window for one user: the
 binary, the desktop entry `suds.desktop`, and the icon. The entry and the

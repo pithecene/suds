@@ -109,6 +109,8 @@ struct State {
     grouping: Grouping,
     /// The labels of the groups whose stores the pane shows.
     shown: BTreeSet<String>,
+    /// The reason that Suds could not read the saved reading at the window's opening.
+    unread: Option<String>,
 }
 
 impl State {
@@ -399,7 +401,13 @@ fn show(
         Ok(Observation::Measured(view)) => *view,
     };
     let unread = present::notice(view.error_count, view.registry_error.as_deref());
-    let upkeep = [present::upkeep(upkeep), present::unsaved(unsaved)].join("\n");
+    let unread_saved = present::unread_saved(state.unread.as_deref());
+    let upkeep = [
+        present::upkeep(upkeep),
+        present::unsaved(unsaved),
+        unread_saved,
+    ]
+    .join("\n");
     // A whole reading's notices stand behind a chip, and the notice above the storage tells
     // only of a reading that failed.
     window.set_notices(model(present::notices(&unread, &upkeep)));
@@ -887,8 +895,15 @@ fn main() -> Result<(), slint::PlatformError> {
     STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
 
     // A measurement takes time, so the window opens with the reading that it saved last.
-    if let Some(view) = last_reading(&Environment::of_process()) {
-        draw(&window, &mut state.borrow_mut(), view);
+    match last_reading(&Environment::of_process()) {
+        Ok(Some(view)) => {
+            // The saved reading left the same entries unread, so its notices open with it.
+            window.set_notices(model(present::saved_notices(&view)));
+            draw(&window, &mut state.borrow_mut(), view);
+        }
+        Ok(None) => {}
+        // The notices show beside the figures, so the measurement that follows states this one.
+        Err(reason) => state.borrow_mut().unread = Some(reason),
     }
     measure(&window, state);
     window.run()

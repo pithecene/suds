@@ -8,7 +8,7 @@ use suds_core::schedule::Standing;
 
 use suds_view::{
     Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreGroup, StoreStanding, Tile,
-    Upkeep, Zone, bytes,
+    Upkeep, Workstation, Zone, bytes,
 };
 
 use crate::{BuildItem, ClassItem, FactItem, FrameItem, RowItem, StoreItem, TileItem};
@@ -71,6 +71,23 @@ pub fn unsaved(reason: Option<&str>) -> String {
         )
     };
     reason.map_or_else(String::new, stated)
+}
+
+/// The notice of a saved reading that Suds could not read, or nothing for a read one.
+pub fn unread_saved(reason: Option<&str>) -> String {
+    let stated = |reason| {
+        format!(
+            "Suds could not read the saved reading, so the window opened without figures: {reason}"
+        )
+    };
+    reason.map_or_else(String::new, stated)
+}
+
+/// The notices of the saved reading that the window opens with: what that reading left
+/// unread. The measurement that follows states the schedule's.
+pub fn saved_notices(view: &Workstation) -> Vec<SharedString> {
+    let unread = notice(view.error_count, view.registry_error.as_deref());
+    notices(&unread, "")
 }
 
 /// The line beneath the pressure's meter.
@@ -646,6 +663,34 @@ mod tests {
             complete: true,
         };
         assert!(pressure_facts(&card).starts_with("150% of the ceiling"));
+    }
+
+    #[test]
+    fn a_saved_reading_keeps_its_notices() {
+        use suds_view::Workstation;
+
+        let saved = Workstation {
+            observed_at: "2026-11-20T23:04:46Z".into(),
+            pressure: None,
+            classes: Vec::new(),
+            checkouts: Vec::new(),
+            stores: Vec::new(),
+            error_count: 3,
+            registry_error: Some("permission denied".into()),
+        };
+        let listed = super::saved_notices(&saved);
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].starts_with("Suds could not read 3 entries"));
+        assert!(listed[1].ends_with("permission denied"));
+        let whole = Workstation {
+            error_count: 0,
+            registry_error: None,
+            ..saved
+        };
+        assert!(super::saved_notices(&whole).is_empty());
+        assert_eq!(super::unread_saved(None), "");
+        let failure = super::unread_saved(Some("could not read /s/reading.json: denied"));
+        assert!(failure.starts_with("Suds could not read the saved reading"));
     }
 
     #[test]

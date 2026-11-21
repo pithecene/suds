@@ -2,9 +2,9 @@
 
 use suds_core::organize::journal::{RunKind, RunStatus};
 use suds_core::reclaim::execute::Authority;
-use suds_view::{History, Run, Step, bytes, day};
+use suds_view::{History, Run, Step, bytes};
 
-use crate::present::{count, observed, short};
+use crate::present::{count, day, observed, short};
 use crate::{RunItem, StepItem};
 
 /// The most characters of a path that a step's row shows.
@@ -180,7 +180,7 @@ mod tests {
         };
         let item = row(4, &reclaim);
         assert_eq!(item.id, 4);
-        assert_eq!(item.name, "Reclaim · 2026-11-21 05:41 UTC");
+        assert_eq!(item.name, "Reclaim · 2026-11-21 05:41");
         let caption = "1 of 2 directories removed · approved by a person";
         assert_eq!(item.caption, caption);
         assert_eq!(item.size, "3.0 GiB");
@@ -239,7 +239,7 @@ mod tests {
             ..run(RunKind::Stores, None, vec![trimmed, failed])
         };
         let item = row(0, &stores);
-        assert_eq!(item.name, "Store trim · 2026-11-21 05:41 UTC");
+        assert_eq!(item.name, "Store trim · 2026-11-21 05:41");
         let caption = "1 of 2 stores trimmed · under the standing approval";
         assert_eq!(item.caption, caption);
         assert_eq!((item.state.as_str(), item.rank), ("unfinished", 1));

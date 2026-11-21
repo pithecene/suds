@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use suds_core::development::Environment;
@@ -37,6 +38,13 @@ pub fn save_reading(environment: &Environment, view: &Workstation) -> Result<(),
     write_staged(&path, &text).map_err(failed)
 }
 
+/// The view of a saved reading's text, or nothing for a text of another
+/// form or of another schema.
+fn parse(text: &[u8]) -> Option<Workstation> {
+    let saved = serde_json::from_slice::<Saved>(text).ok()?;
+    (saved.schema == READING_SCHEMA).then_some(saved.view)
+}
+
 /// The reading that the last measurement saved. A workstation without one
 /// has none. A reading that this release cannot parse counts as none too,
 /// because the measurement that follows replaces it. A file that Suds could
@@ -46,13 +54,22 @@ pub fn last_reading(environment: &Environment) -> Result<Option<Workstation>, St
         return Ok(None);
     };
     let path = directories.reading();
-    let text = match fs::read(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(format!("could not read {}: {err}", path.display())),
-    };
-    let saved = serde_json::from_slice::<Saved>(&text).ok();
-    Ok(saved
-        .filter(|saved| saved.schema == READING_SCHEMA)
-        .map(|saved| saved.view))
+    match fs::read(&path) {
+        Ok(text) => Ok(parse(&text)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("could not read {}: {err}", path.display())),
+    }
+}
+
+/// The reading in the file at `path`, which a person names. No measurement
+/// follows such a reading, so an absent file and a file of another schema
+/// are both failures.
+pub fn reading_at(path: &Path) -> Result<Workstation, String> {
+    let text = fs::read(path).map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    parse(&text).ok_or_else(|| {
+        format!(
+            "{} holds no reading of the schema {READING_SCHEMA}",
+            path.display()
+        )
+    })
 }

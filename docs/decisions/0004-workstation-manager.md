@@ -24,12 +24,13 @@ A measurement of 2026-11-20 shows what the primitives lack on their own.
 `suds reclaim --checkouts` planned the removal of 506 linked checkouts on
 one workstation. Of those, 12 belonged to an open pull request, and 55 had
 moved their head the same day with no pull request. Each was clean, held
-only pushed commits, and had stood idle for an hour, so the plan was
-correct by its rules and wrong about the work.
+only pushed commits, and had stood idle for an hour. The plan followed its
+rules, and those rules read nothing that tells open work from finished
+work.
 
 ## Decision
 
-1. Suds has three layers. The primitives measure, plan, apply, journal,
+1. Suds has layers. The primitives measure, plan, apply, journal,
    and record holds. The manager reads the primitives' measurements and
    writes plans. The interfaces, which are the window, the command line,
    and a client's calls, show and invoke both.

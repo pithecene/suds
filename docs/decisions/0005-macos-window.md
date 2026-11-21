@@ -21,10 +21,10 @@ reader access still need testing on macOS.
 2. On Linux, the window stays the Slint interface of decision 0003.
 3. The macOS window follows the Slint window's views and covers the
    development storage subjects listed in item 1 of decision 0003.
-4. As item 5 of decision 0003 requires, the macOS window uses the same
-   process as the command line to change the workstation's files. The
-   window presents a plan for approval, and `suds-core` applies the
-   approved plan and records the result in the journal.
+4. The macOS window follows the plan, approval, and journal requirements
+   of item 5 of decision 0003. The window presents the plan for a person's
+   approval, then calls `suds-core` in process to apply the approved plan
+   and record the result in the same journal the command line uses.
 5. Both windows call `suds-core` in process for measurements and
    maintenance rules, as item 2 of decision 0003 requires.
 

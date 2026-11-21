@@ -46,7 +46,7 @@ fn key(checkout: &Checkout) -> &str {
 }
 
 /// A project's name from its key: the owner and the name of a remote, or a directory's name.
-fn name(key: &str, remote: bool) -> String {
+pub(crate) fn name(key: &str, remote: bool) -> String {
     let mut parts = key.rsplit('/').filter(|part| !part.is_empty());
     let last = parts.next().unwrap_or(key);
     match parts.next() {

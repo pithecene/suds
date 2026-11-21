@@ -56,6 +56,12 @@ pub fn parse(config: &str) -> Option<String> {
     None
 }
 
+/// The remote `origin` of the repository whose main checkout lies at
+/// `repository`, as Git keeps it in that checkout's configuration.
+pub fn origin(repository: &Path) -> Option<String> {
+    parse(&fs::read_to_string(repository.join(".git").join("config")).ok()?)
+}
+
 /// Gives each checkout the remote `origin` of its repository. Git keeps the
 /// remote in the main checkout's configuration, which the function reads once
 /// for each repository. A repository without that remote keeps none.
@@ -63,10 +69,9 @@ pub fn fill(checkouts: &mut [Checkout]) {
     let mut found: HashMap<String, Option<String>> = HashMap::new();
     for checkout in checkouts {
         let repository = checkout.repository.as_ref().unwrap_or(&checkout.path);
-        let origin = found.entry(repository.clone()).or_insert_with(|| {
-            let config = Path::new(repository).join(".git").join("config");
-            parse(&fs::read_to_string(config).ok()?)
-        });
+        let origin = found
+            .entry(repository.clone())
+            .or_insert_with(|| origin(Path::new(repository)));
         checkout.origin.clone_from(origin);
     }
 }

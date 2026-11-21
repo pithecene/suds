@@ -10,9 +10,28 @@ versions of Rust, rustfmt, Clippy,
 mise install
 ```
 
+The repository is a Cargo workspace. The `crates/suds-core` crate holds the
+inspection, the planner, the executor, and the journal. The `apps/cli`
+crate holds the `suds` command, and `apps/desktop` holds the desktop
+application. Neither interface invokes the other.
+
 ## Development Tasks
 
-The README's Development section lists each task and what it runs.
+| Command | Description |
+| :--- | :--- |
+| `task build` | Build the release binary |
+| `task test` | Run the unit and command-line tests |
+| `task lint` | Check formatting, Clippy lints, and YAML formatting |
+| `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
+| `task check` | Build, test, and lint |
+| `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
+| `task desktop` | Run the desktop application |
+| `task desktop:install` | Install the desktop application for this user |
+| `task desktop:check` | Build, test, and lint the desktop application and its view model |
+
+The `task check` command needs no network service, container, or elevated
+privilege once `mise install` has run. The `task desktop:check` command
+needs a display's libraries, and CI runs it on Linux.
 
 Each pull request passes `task check` on macOS and on Linux in CI, and
 `task desktop:check` on Linux.

@@ -2,8 +2,7 @@
 
 ## Supported Versions
 
-Suds has no release yet. Until its first release, only the `main` branch
-receives security fixes.
+Only the newest release of Suds receives security fixes.
 
 ## Reporting a Vulnerability
 

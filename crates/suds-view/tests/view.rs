@@ -194,7 +194,10 @@ fn the_view_orders_by_size_and_marks_each_hold_and_budget() {
     // The module cache lies over its budget of 10 GiB, and the build cache within its own.
     assert_eq!(view.stores[0].id, "go.module-cache");
     // The store names its tool and the language that the tool serves.
-    let names = (view.stores[0].ecosystem, view.stores[0].tool);
+    let names = (
+        view.stores[0].ecosystem.as_str(),
+        view.stores[0].tool.as_str(),
+    );
     assert_eq!(names, ("Go", "go"));
     assert_eq!(view.stores[0].standing, StoreStanding::Over);
     assert_eq!(view.stores[0].share, 1.0);

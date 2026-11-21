@@ -6,8 +6,7 @@
 //! derived state and eligible landed checkouts and trims stores under the
 //! standing approval of decision 0002. The journal records that authority.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
@@ -16,14 +15,13 @@ use crate::arena;
 use crate::development::{self, Environment};
 use crate::model::{ReportStatus, TraversalError};
 use crate::organize::journal::Journal;
-use crate::organize::plan::new_id;
 use crate::pressure::{self, Measurement, Pressure, Thresholds};
 use crate::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{CheckoutScope, Observed, Policy, plan_reclaim};
 use crate::registry;
-use crate::state::{Directories, Settings};
+use crate::state::{Directories, Settings, write_staged};
 use crate::stores::{self, Budgets, Inputs, Programs, StoresReport};
 
 /// The schema tag of a maintenance run's result.
@@ -160,25 +158,9 @@ pub fn read_pressure(path: &Path) -> Option<Pressure> {
     serde_json::from_slice(&text).ok()
 }
 
-/// Records a reading. Each writer stages its text in a file of its own
-/// and renames that file into place, so two runs never share a staged file
-/// and a reader never sees a part of a reading.
+/// Records a reading, as a file of Suds' own state.
 fn write_pressure(path: &Path, reading: &Pressure) -> Result<(), String> {
     let failed = |err: std::io::Error| format!("could not write {}: {err}", path.display());
-    if let Some(directory) = path.parent() {
-        fs::create_dir_all(directory).map_err(failed)?;
-    }
     let text = serde_json::to_vec_pretty(reading).map_err(|err| failed(err.into()))?;
-    let staged = path.with_extension(format!("{}.new", new_id("json")));
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)
-        .and_then(|mut file| file.write_all(&text).and_then(|()| file.sync_data()))
-        .and_then(|()| fs::rename(&staged, path));
-    if written.is_err() {
-        // A failed writer leaves no staged file behind.
-        let _ = fs::remove_file(&staged);
-    }
-    written.map_err(failed)
+    write_staged(path, &text).map_err(failed)
 }

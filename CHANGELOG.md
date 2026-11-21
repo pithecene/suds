@@ -62,6 +62,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The desktop application groups the shared stores**: the stores' pane shows one row for each ecosystem, for each tool, or for each class of storage. An ecosystem is a language, such as Rust for Cargo and sccache. A row states the group's size and the count of its stores over budget, and a click lists the group's stores.
 
+- **The desktop application opens with its last reading**: a measurement of a large workspace takes most of a minute, and the window showed no figure before it ended. The window now saves each whole reading in the state directory and opens with the saved one while it measures again.
+
 ### Fixed
 
 - **The desktop application's spinner draws a smooth ring**: the toolkit's spinner drew its arc in steps at the window's size, so the window now draws a ring of its own with round ends.

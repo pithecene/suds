@@ -1,18 +1,20 @@
 //! The directories and the settings that Suds keeps between runs.
 //!
-//! Suds keeps its journal, its registry, and its last pressure reading in a
-//! state directory, and it reads its settings from a configuration
+//! Suds keeps its journal, its registry, its last pressure reading, and the
+//! desktop application's last reading in a state directory. It reads its
+//! settings from a configuration
 //! directory. A person or an installer writes the settings, and Suds only
 //! reads them.
 
 use std::collections::HashMap;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::development::Environment;
+use crate::organize::plan::new_id;
 
 /// The directories of one user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,9 +63,36 @@ impl Directories {
         self.state.join("pressure.json")
     }
 
+    /// The last reading that the desktop application showed.
+    pub fn reading(&self) -> PathBuf {
+        self.state.join("reading.json")
+    }
+
     pub fn settings(&self) -> PathBuf {
         self.config.join("settings.json")
     }
+}
+
+/// Writes `text` at `path`, a file of Suds' own state. Each writer stages its
+/// text in a file of its own and renames that file into place, so two writers
+/// never share a staged file and a reader never sees a part of a text. The
+/// staged file is new, so the write follows no link.
+pub fn write_staged(path: &Path, text: &[u8]) -> io::Result<()> {
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let staged = path.with_extension(format!("{}.new", new_id("json")));
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(text).and_then(|()| file.sync_data()))
+        .and_then(|()| fs::rename(&staged, path));
+    if written.is_err() {
+        // A failed writer leaves no staged file behind.
+        let _ = fs::remove_file(&staged);
+    }
+    written
 }
 
 /// What the owner allows Suds to do without a person.

@@ -4,8 +4,8 @@ use suds_view::{Grouping, Store, StoreStanding, store_groups};
 
 const GIB: u64 = 1 << 30;
 
-fn store(id: &str, names: [&'static str; 3], bytes: u64) -> Store {
-    let [ecosystem, tool, class] = names;
+fn store(id: &str, names: [&str; 3], bytes: u64) -> Store {
+    let [ecosystem, tool, class] = names.map(str::to_owned);
     Store {
         id: id.to_owned(),
         ecosystem,

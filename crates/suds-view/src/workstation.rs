@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use suds_core::development::{
     self, CheckoutKind, DevelopmentReport, DevelopmentScan, Ecosystem, StoreClass, StoreStatus,
 };
@@ -10,7 +12,7 @@ use suds_core::registry::{self, Event, Reading, Standings};
 use suds_core::stores::Budgets;
 
 /// The usage of development storage against its ceiling.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PressureCard {
     pub level: Level,
     pub usage_bytes: u64,
@@ -24,9 +26,9 @@ pub struct PressureCard {
 }
 
 /// One class of development storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Class {
-    pub label: &'static str,
+    pub label: String,
     pub bytes: u64,
     pub count: u64,
     /// The class's share of all classes, from 0 to 1.
@@ -34,7 +36,7 @@ pub struct Class {
 }
 
 /// A client's hold on a checkout, as the registry last recorded it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hold {
     pub client: String,
     pub since: String,
@@ -45,16 +47,16 @@ pub struct Hold {
 }
 
 /// One directory of build state beneath a checkout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildState {
     pub path: String,
-    pub ecosystem: &'static str,
+    pub ecosystem: String,
     pub bytes: u64,
     pub newest_modified: String,
 }
 
 /// One checkout with its build state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkout {
     pub path: String,
     pub name: String,
@@ -81,7 +83,8 @@ impl Checkout {
 }
 
 /// How a store stands against its budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StoreStanding {
     Absent,
     Unreadable,
@@ -92,16 +95,16 @@ pub enum StoreStanding {
 }
 
 /// One shared store or toolchain.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     pub id: String,
     /// The language whose files the store holds. A store of no one language
     /// names its kind instead.
-    pub ecosystem: &'static str,
+    pub ecosystem: String,
     /// The tool that owns the store. One ecosystem has several tools.
-    pub tool: &'static str,
+    pub tool: String,
     /// The class of the store's storage, as the view's classes name it.
-    pub class: &'static str,
+    pub class: String,
     pub path: String,
     pub bytes: u64,
     pub budget_bytes: Option<u64>,
@@ -111,7 +114,7 @@ pub struct Store {
 }
 
 /// Everything the first view shows.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workstation {
     pub observed_at: String,
     pub pressure: Option<PressureCard>,
@@ -179,7 +182,7 @@ fn classes(report: &DevelopmentReport) -> Vec<Class> {
     let whole: u64 = each.iter().map(|(_, total)| total.allocated_bytes).sum();
     each.into_iter()
         .map(|(label, total)| Class {
-            label,
+            label: label.to_owned(),
             bytes: total.allocated_bytes,
             count: total.count,
             share: share(total.allocated_bytes, whole),
@@ -199,7 +202,7 @@ fn checkouts(scan: &DevelopmentScan, standings: &Standings) -> Vec<Checkout> {
                 .iter()
                 .map(|build| BuildState {
                     path: shown(&build.path),
-                    ecosystem: build.ecosystem.label(),
+                    ecosystem: build.ecosystem.label().to_owned(),
                     bytes: build.measure.allocated_bytes,
                     newest_modified: build.measure.newest_modified.clone().unwrap_or_default(),
                 })
@@ -281,13 +284,14 @@ fn stores(report: &DevelopmentReport, budgets: &Budgets) -> Vec<Store> {
             };
             Store {
                 id: store.id.clone(),
-                ecosystem: language(store.ecosystem),
-                tool: store.ecosystem.label(),
+                ecosystem: language(store.ecosystem).to_owned(),
+                tool: store.ecosystem.label().to_owned(),
                 class: match store.class {
                     StoreClass::SharedStore => "Shared stores",
                     StoreClass::Toolchain => "Toolchains",
                     StoreClass::Machine => "Machines",
-                },
+                }
+                .to_owned(),
                 path: store.path.clone(),
                 bytes,
                 budget_bytes,

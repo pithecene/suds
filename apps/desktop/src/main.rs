@@ -18,8 +18,8 @@ use suds_core::development::Environment;
 use suds_core::reclaim::execute::ReclaimReport;
 use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
-    Checkout, Grouping, History, Observation, Project, Proposal, Sort, Upkeep, Workstation, map,
-    observe, projects, propose, store_groups, upkeep,
+    Checkout, Grouping, History, Observation, Project, Proposal, Sort, Upkeep, Workstation,
+    last_reading, map, observe, projects, propose, save_reading, store_groups, upkeep,
 };
 
 slint::include_modules!();
@@ -109,6 +109,8 @@ struct State {
     grouping: Grouping,
     /// The labels of the groups whose stores the pane shows.
     shown: BTreeSet<String>,
+    /// The reason that Suds could not read the saved reading at the window's opening.
+    unread: Option<String>,
 }
 
 impl State {
@@ -375,7 +377,13 @@ fn reveal(window: &Window) {
 }
 
 /// Draws one reading, with the standing of the scheduled maintenance beside it.
-fn show(window: &Window, state: &mut State, reading: Result<Observation, String>, upkeep: &Upkeep) {
+fn show(
+    window: &Window,
+    state: &mut State,
+    reading: Result<Observation, String>,
+    upkeep: &Upkeep,
+    unsaved: Option<&str>,
+) {
     state.measuring = false;
     window.set_loading(false);
     let view = match reading {
@@ -393,11 +401,23 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
         Ok(Observation::Measured(view)) => *view,
     };
     let unread = present::notice(view.error_count, view.registry_error.as_deref());
+    let unread_saved = present::unread_saved(state.unread.as_deref());
+    let upkeep = [
+        present::upkeep(upkeep),
+        present::unsaved(unsaved),
+        unread_saved,
+    ]
+    .join("\n");
     // A whole reading's notices stand behind a chip, and the notice above the storage tells
     // only of a reading that failed.
-    window.set_notices(model(present::notices(&unread, &present::upkeep(upkeep))));
+    window.set_notices(model(present::notices(&unread, &upkeep)));
     window.set_notice("".into());
-    window.set_observed(present::observed(&view.observed_at).into());
+    draw(window, state, view);
+}
+
+/// Draws the figures of one reading: a measurement's, or the saved one's at the window's opening.
+fn draw(window: &Window, state: &mut State, view: Workstation) {
+    window.set_observed(present::measured(&view.observed_at, now()).into());
     if let Some(card) = &view.pressure {
         let (level, rank) = present::level(card.level);
         window.set_usage(suds_view::bytes(card.usage_bytes).into());
@@ -443,10 +463,16 @@ fn measure(window: &Window, state: Rc<RefCell<State>>) {
         let environment = Environment::of_process();
         let reading = observe(&environment, now());
         let upkeep = upkeep(&environment, now());
+        // The next window opens with this reading's figures, so the thread saves a whole one.
+        let unsaved = match &reading {
+            Ok(Observation::Measured(view)) => save_reading(&environment, view).err(),
+            _ => None,
+        };
         let _ = weak.upgrade_in_event_loop(move |window| {
             STATE.with(|slot| {
                 if let Some(state) = slot.borrow().as_ref() {
-                    show(&window, &mut state.borrow_mut(), reading, &upkeep);
+                    let state = &mut state.borrow_mut();
+                    show(&window, state, reading, &upkeep, unsaved.as_deref());
                 }
             });
         });
@@ -869,6 +895,17 @@ fn main() -> Result<(), slint::PlatformError> {
 
     STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
 
+    // A measurement takes time, so the window opens with the reading that it saved last.
+    match last_reading(&Environment::of_process()) {
+        Ok(Some(view)) => {
+            // The saved reading left the same entries unread, so its notices open with it.
+            window.set_notices(model(present::saved_notices(&view)));
+            draw(&window, &mut state.borrow_mut(), view);
+        }
+        Ok(None) => {}
+        // The notices show beside the figures, so the measurement that follows states this one.
+        Err(reason) => state.borrow_mut().unread = Some(reason),
+    }
     measure(&window, state);
     window.run()
 }

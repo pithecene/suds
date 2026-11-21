@@ -389,9 +389,10 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
         Ok(Observation::Measured(view)) => *view,
     };
     let unread = present::notice(view.error_count, view.registry_error.as_deref());
-    let lines = [unread, present::upkeep(upkeep)];
-    let lines: Vec<String> = lines.into_iter().filter(|line| !line.is_empty()).collect();
-    window.set_notice(lines.join("\n").into());
+    // A whole reading's notices stand behind a chip, and the notice above the storage tells
+    // only of a reading that failed.
+    window.set_notices(model(present::notices(&unread, &present::upkeep(upkeep))));
+    window.set_notice("".into());
     window.set_observed(present::observed(&view.observed_at).into());
     if let Some(card) = &view.pressure {
         let (level, rank) = present::level(card.level);

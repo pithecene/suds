@@ -58,6 +58,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The desktop application answers the pointer**: the pointer becomes a hand above each button, each row, and each rectangle of the storage map, and the map outlines the rectangle beneath the pointer.
 
+- **The desktop application lists its notices behind a chip**: a chip beside the pressure's level counts the notices of a reading and lists them on a click. The notices stood in a card above the storage before, and each line moved the storage down.
+
 ### Fixed
 
 - **A scheduled run finds the program of each store**.

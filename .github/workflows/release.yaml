@@ -59,7 +59,7 @@ jobs:
           version="${TAG#v}"
           cargo build --release --locked --package suds
           # The program states the version of its manifest, which the tag must match.
-          stated="$(target/release/suds --version)"
+          stated="$(target/release/suds -V)"
           if [ "$stated" != "suds $version" ]; then
             echo "the program states '$stated', and the tag names $version" >&2
             exit 1

@@ -114,8 +114,34 @@ pub fn action(removing: (usize, u64)) -> String {
     }
 }
 
+/// What a partial inspection left out of the plan, or nothing for a whole one.
+fn partial(proposal: &Proposal) -> String {
+    let mut missed = Vec::new();
+    if proposal.unmeasured > 0 {
+        missed.push(count(proposal.unmeasured, "root", "roots"));
+    }
+    if proposal.unread > 0 {
+        let unread = usize::try_from(proposal.unread).unwrap_or(usize::MAX);
+        missed.push(count(unread, "entry", "entries"));
+    }
+    if missed.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Suds could not read {}, so the plan may leave out a directory beneath them.",
+        missed.join(" and ")
+    )
+}
+
+/// The lines above the plan's rows: what the inspection missed, and the hidden processes.
+pub fn notice(proposal: &Proposal) -> String {
+    let lines = [partial(proposal), hidden(proposal)];
+    let lines: Vec<String> = lines.into_iter().filter(|line| !line.is_empty()).collect();
+    lines.join("\n")
+}
+
 /// What the plan says of the processes whose working directory the system hides.
-pub fn hidden(proposal: &Proposal) -> String {
+fn hidden(proposal: &Proposal) -> String {
     if proposal.hidden.is_empty() {
         return String::new();
     }
@@ -176,10 +202,48 @@ mod tests {
     use std::collections::BTreeSet;
 
     use suds_core::development::Ecosystem;
-    use suds_core::reclaim::plan::{Kept, Subject};
-    use suds_view::{Entry, KeptGroup};
+    use suds_core::reclaim::plan::{Kept, RECLAIM_SCHEMA, ReclaimPlan, Subject};
+    use suds_view::{Entry, KeptGroup, Proposal};
 
-    use super::{action, kept, row, summary};
+    use super::{action, kept, notice, row, summary};
+
+    fn proposal(hidden: &[&str], tolerate: bool) -> Proposal {
+        let plan = ReclaimPlan {
+            schema: RECLAIM_SCHEMA.into(),
+            id: "plan-1".into(),
+            created_at: "2026-11-21T00:00:00Z".into(),
+            idle_seconds: 3600,
+            tolerate_unreadable_processes: tolerate,
+            candidates: Vec::new(),
+        };
+        Proposal::of(plan, hidden.iter().map(|name| (*name).to_owned()).collect())
+    }
+
+    #[test]
+    fn the_notice_states_a_partial_inspection_and_the_hidden_processes() {
+        assert_eq!(notice(&proposal(&[], false)), "");
+
+        let held = notice(&proposal(&["7 (systemd)"], false));
+        assert!(held.contains("1 process that you own"), "{held}");
+        assert!(held.ends_with("the plan keeps each directory: 7 (systemd)."));
+        let tolerated = notice(&proposal(&["7 (systemd)"], true));
+        assert!(
+            tolerated.starts_with("The plan proceeds although"),
+            "{tolerated}"
+        );
+
+        let partial = Proposal {
+            unread: 2,
+            unmeasured: 1,
+            ..proposal(&["7 (systemd)"], true)
+        };
+        let lines: Vec<String> = notice(&partial).lines().map(str::to_owned).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "Suds could not read 1 root and 2 entries, so the plan may leave out a directory beneath them."
+        );
+    }
 
     fn entry(path: &str, checkout: &str, subject: Subject, within: Option<usize>) -> Entry {
         Entry {

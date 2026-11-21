@@ -106,6 +106,9 @@ owns, the plan keeps each directory. The view names those processes, and
 its button plans again and tolerates them, which is the effect of the
 option `--tolerate-unreadable-processes`.
 
+A plan of a partial inspection can miss a directory. The view then states
+the count of roots and of entries that Suds could not read.
+
 The function `suds_view::propose` builds the plan, and `suds_view::apply`
 runs it. The file `src/plan.rs` holds the view's text.
 

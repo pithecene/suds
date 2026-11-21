@@ -420,7 +420,7 @@ fn plan_reclaim(window: &Window, state: &mut State, tolerate: bool) {
                     let rows = rows.map(|entry| plan::row(entry, &state.excluded));
                     window.set_plan_rows(model(rows.collect()));
                     window.set_plan_kept(model(proposal.kept.iter().map(plan::kept).collect()));
-                    window.set_plan_hidden(plan::hidden(&proposal).into());
+                    window.set_plan_hidden(plan::notice(&proposal).into());
                     window.set_plan_held(proposal.held_by_hidden());
                     state.proposal = Some(proposal);
                     show_choice(window, state);

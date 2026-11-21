@@ -60,7 +60,8 @@ pub enum Command {
     /// settings' standing approval, also reclaim and trim the stores.
     Maintain(MaintainArgs),
 
-    /// Print the units that run `suds maintain` on a schedule.
+    /// Print, install, or check the units that run `suds maintain` on a
+    /// schedule.
     Schedule(ScheduleArgs),
 
     /// Report the ceiling of development storage, whether a filesystem
@@ -116,13 +117,23 @@ pub struct MaintainArgs {
 
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
-    /// The scheduler whose units Suds prints.
+    /// The scheduler of the units. The default is the scheduler of this
+    /// system: launchd on macOS, and systemd on Linux.
     #[arg(long, value_enum)]
-    pub scheduler: Scheduler,
+    pub scheduler: Option<Scheduler>,
 
     /// The time between two runs.
     #[arg(long, value_name = "MINUTES", default_value_t = 30)]
     pub minutes: u64,
+
+    /// Place the units and make the scheduler take them up.
+    #[arg(long, conflicts_with = "check")]
+    pub install: bool,
+
+    /// State whether the placed units are the units of this release. The
+    /// status is 1 for absent or stale units.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

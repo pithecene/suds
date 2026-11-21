@@ -3,8 +3,7 @@
 
 use std::env;
 use std::io::{self, Write};
-use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use suds_core::arena::{self, Arena};
 use suds_core::development::{self, Environment};
@@ -13,6 +12,7 @@ use suds_core::pressure::{Level, Pressure};
 use suds_core::reclaim::git::Git;
 use suds_core::registry::{self, Event, Record};
 use suds_core::roots;
+use suds_core::schedule::{self, Standing, Unit, UnitFile};
 use suds_core::state::{Directories, load_settings};
 use suds_core::stores::Programs;
 
@@ -217,181 +217,80 @@ pub fn schedule_command(args: &ScheduleArgs) -> ExitCode {
     finish(schedule(args))
 }
 
-/// Prints the units that run `suds maintain` on a schedule. Suds installs
-/// nothing, and a person or an installer places the units.
+/// Prints the units that run `suds maintain` on a schedule, places them, or
+/// checks the placed ones.
 fn schedule(args: &ScheduleArgs) -> Result<ExitCode, String> {
+    let scheduler = match args.scheduler {
+        Some(Scheduler::Systemd) => schedule::Scheduler::Systemd,
+        Some(Scheduler::Launchd) => schedule::Scheduler::Launchd,
+        None => schedule::Scheduler::native(),
+    };
+    let environment = Environment::of_process();
     let program = env::current_exe()
         .map_err(|err| format!("could not find the path of this program: {err}"))?;
-    // A scheduler starts a unit with its own short search path, which names no program
-    // that a version manager installed. The units carry this process's path, so a
-    // scheduled run finds each store's program as this shell finds it.
-    let path = env::var("PATH").ok().filter(|path| !path.is_empty());
+    let mut out = io::stdout().lock();
+    if args.check {
+        let standing = schedule::standing(scheduler, &environment, Some(&program));
+        let line = match &standing {
+            Standing::Current => "The placed units are the units of this release.".to_owned(),
+            Standing::Absent => {
+                "No unit stands in place, so no scheduler runs the maintenance.".to_owned()
+            }
+            Standing::Stale(reason) => format!("The placed units are stale: {reason}."),
+        };
+        writeln!(out, "{line}").map_err(|err| format!("failed to write the standing: {err}"))?;
+        return Ok(match standing {
+            Standing::Current => ExitCode::SUCCESS,
+            _ => ExitCode::from(crate::EXIT_PARTIAL),
+        });
+    }
+    // The units carry this process's search path, so a scheduled run finds each store's
+    // program as this shell finds it.
     let unit = Unit {
-        program: &program,
-        path: path.as_deref(),
+        program,
+        path: env::var("PATH").ok().filter(|path| !path.is_empty()),
         minutes: args.minutes,
     };
-    let text = match args.scheduler {
-        Scheduler::Systemd => systemd_units(&unit),
-        Scheduler::Launchd => launchd_agent(&unit),
-    };
-    let mut out = io::stdout().lock();
-    planned(out.write_all(text.as_bytes()).and_then(|()| out.flush()))
-}
-
-/// What a scheduler's unit states: the program, the search path of its run, and the time
-/// between two runs.
-struct Unit<'a> {
-    program: &'a Path,
-    path: Option<&'a str>,
-    minutes: u64,
-}
-
-fn systemd_units(unit: &Unit) -> String {
-    let Unit {
-        program, minutes, ..
-    } = unit;
-    // The manager expands `%` in a variable's value and leaves `$` alone there.
-    let path = unit.path.map_or_else(String::new, |path| {
-        let value = systemd_quote(&format!("PATH={path}"), false);
-        format!("Environment={value}\n")
-    });
-    format!(
-        "# ~/.config/systemd/user/suds-maintain.service\n\
-         [Unit]\n\
-         Description=Suds measures and reclaims development storage\n\
-         \n\
-         [Service]\n\
-         Type=oneshot\n\
-         {path}\
-         ExecStart={program} maintain\n\
-         # A run that kept or refused a directory ends with status {partial}.\n\
-         SuccessExitStatus={partial}\n\
-         \n\
-         # ~/.config/systemd/user/suds-maintain.timer\n\
-         [Unit]\n\
-         Description=Suds maintenance every {minutes} minutes\n\
-         \n\
-         [Timer]\n\
-         OnBootSec=5min\n\
-         OnUnitActiveSec={minutes}min\n\
-         \n\
-         [Install]\n\
-         WantedBy=timers.target\n",
-        program = systemd_quote(&program.to_string_lossy(), true),
-        partial = crate::EXIT_PARTIAL
-    )
-}
-
-/// Quotes `text` as one word of a systemd unit. The manager splits an unquoted line at
-/// each space and expands `%`. It expands `$` in a command line alone, so `command` states
-/// whether the word stands in one.
-fn systemd_quote(text: &str, command: bool) -> String {
-    let mut quoted = String::from("\"");
-    for character in text.chars() {
-        match character {
-            '"' | '\\' => {
-                quoted.push('\\');
-                quoted.push(character);
-            }
-            '%' => quoted.push_str("%%"),
-            '$' if command => quoted.push_str("$$"),
-            other => quoted.push(other),
+    let files = schedule::files(scheduler, &unit, &environment)
+        .ok_or("no home directory exists for this process, so the units have no place")?;
+    if !args.install {
+        return planned(print_units(&mut out, &files));
+    }
+    schedule::place(&files)?;
+    for file in &files {
+        let _ = writeln!(out, "wrote {}", escape(&file.path.to_string_lossy()));
+    }
+    for step in schedule::activation(scheduler, &files) {
+        let line = step.command.join(" ");
+        let (program, arguments) = step.command.split_first().ok_or("an empty command")?;
+        let status = Command::new(program).args(arguments).status();
+        let succeeded = status.as_ref().is_ok_and(|status| status.success());
+        if succeeded {
+            let _ = writeln!(out, "ran {}", escape(&line));
+        } else if step.required {
+            let reason = match status {
+                Ok(status) => status.to_string(),
+                Err(err) => err.to_string(),
+            };
+            return Err(format!(
+                "Suds placed the units, and `{line}` failed: {reason}"
+            ));
         }
     }
-    quoted.push('"');
-    quoted
+    planned(out.flush())
 }
 
-fn launchd_agent(unit: &Unit) -> String {
-    let program = xml_escape(&unit.program.to_string_lossy());
-    let path = unit.path.map_or_else(String::new, |path| {
-        format!(
-            "\t<key>EnvironmentVariables</key>\n\
-             \t<dict>\n\
-             \t\t<key>PATH</key>\n\
-             \t\t<string>{}</string>\n\
-             \t</dict>\n",
-            xml_escape(path)
-        )
-    });
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!-- ~/Library/LaunchAgents/sh.pithecene.suds.maintain.plist -->\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-         \t<key>Label</key>\n\
-         \t<string>sh.pithecene.suds.maintain</string>\n\
-         \t<key>ProgramArguments</key>\n\
-         \t<array>\n\
-         \t\t<string>{program}</string>\n\
-         \t\t<string>maintain</string>\n\
-         \t</array>\n\
-         {path}\
-         \t<key>StartInterval</key>\n\
-         \t<integer>{seconds}</integer>\n\
-         \t<key>RunAtLoad</key>\n\
-         \t<true/>\n\
-         </dict>\n\
-         </plist>\n",
-        seconds = unit.minutes.saturating_mul(60)
-    )
-}
-
-fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::{Unit, launchd_agent, systemd_units};
-
-    fn unit<'a>(program: &'a str, path: Option<&'a str>) -> Unit<'a> {
-        Unit {
-            program: Path::new(program),
-            path,
-            minutes: 30,
+/// Prints each file beneath a comment that names its place.
+fn print_units(out: &mut impl Write, files: &[UnitFile]) -> io::Result<()> {
+    for (position, file) in files.iter().enumerate() {
+        if position > 0 {
+            writeln!(out)?;
         }
+        // A property list takes no comment before its declaration.
+        if !file.contents.starts_with("<?xml") {
+            writeln!(out, "# {}", file.path.display())?;
+        }
+        out.write_all(file.contents.as_bytes())?;
     }
-
-    #[test]
-    fn the_units_run_the_maintenance_of_this_program() {
-        let plain = unit("/opt/suds & co/suds", None);
-        let units = systemd_units(&plain);
-        assert!(units.contains("ExecStart=\"/opt/suds & co/suds\" maintain\n"));
-        let odd = systemd_units(&unit("/opt/100% \"q\"/$x/suds", None));
-        assert!(odd.contains("ExecStart=\"/opt/100%% \\\"q\\\"/$$x/suds\" maintain\n"));
-        assert!(units.contains("OnUnitActiveSec=30min\n"));
-        assert!(units.contains("SuccessExitStatus=1\n"));
-        let agent = launchd_agent(&plain);
-        assert!(agent.contains("<string>/opt/suds &amp; co/suds</string>"));
-        assert!(agent.contains("<integer>1800</integer>"));
-        // A process without a search path states none.
-        assert!(!units.contains("Environment="));
-        assert!(!agent.contains("EnvironmentVariables"));
-    }
-
-    #[test]
-    fn the_units_carry_the_search_path_that_resolves_each_stores_program() {
-        let path = "/home/a/.local/share/mise/shims:/opt/50% $x & co/bin:/usr/bin";
-        let scheduled = unit("/opt/suds", Some(path));
-        let units = systemd_units(&scheduled);
-        // A variable's value doubles `%`, and the manager leaves `$` alone there.
-        let line =
-            "Environment=\"PATH=/home/a/.local/share/mise/shims:/opt/50%% $x & co/bin:/usr/bin\"\n";
-        assert!(units.contains(line), "{units}");
-        let service = units.find("[Service]").unwrap();
-        let start = units.find("ExecStart=").unwrap();
-        let variable = units.find("Environment=").unwrap();
-        assert!(service < variable && variable < start);
-
-        let agent = launchd_agent(&scheduled);
-        let value = "\t\t<key>PATH</key>\n\t\t<string>/home/a/.local/share/mise/shims:/opt/50% $x &amp; co/bin:/usr/bin</string>\n";
-        assert!(agent.contains(value), "{agent}");
-    }
+    out.flush()
 }

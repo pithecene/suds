@@ -412,7 +412,9 @@ suds register --checkout DIR --client bosun --attempt wf-12
 suds release --checkout DIR --client bosun --attempt wf-12
 suds pressure --format json
 suds maintain
-suds schedule --scheduler systemd       # or launchd
+suds schedule                          # print the units of this system
+suds schedule --install                # place them and start the schedule
+suds schedule --check                  # state whether the placed units are current
 ```
 
 The `register` command records that a client holds a checkout, and
@@ -472,8 +474,21 @@ file that Suds cannot parse stops the run.
 ```
 
 The `schedule` command prints the units that run `suds maintain` every 30
-minutes: a service and a timer for systemd, or an agent for launchd. Suds
-installs nothing, so a person or an installer places the units.
+minutes: a service and a timer for systemd, or an agent for launchd. It
+writes for the scheduler of this system, and `--scheduler` names the other
+one. The option `--minutes` sets another time between two runs.
+
+With `--install`, the command places the units and makes the scheduler take
+them up. It writes each file beneath the user's own directory of units and
+then runs `systemctl --user` or `launchctl`, so it needs no administrator.
+A second installation replaces the units of the first.
+
+With `--check`, the command reads the placed units and changes nothing. Its
+status is 0 when the units are the units of this release, and 1 when no
+unit stands in place or the placed units are stale. Units are stale when an
+earlier release wrote them, when they state no search path, or when they
+run another Suds program than the one that checks. The minutes and the
+search path are a person's choice, so the check accepts each value.
 
 A scheduler starts a unit with a short search path of its own, which names
 no program that a version manager installed. The units therefore carry the

@@ -18,6 +18,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The README shortens, and guides hold the reference**: the README states what Suds does, its guarantees, and a picture of the desktop application on an invented workstation. The reference of each command moves to a guide beneath `docs/guides`.
 - **The stores' pane names the group of mise Polyglot**: the group of a store that serves each language read Many languages before.
+- **A measurement reads directories on several threads**: an inspection, a reclaim plan, and a scheduled run read each directory's metadata on up to eight threads, and count the entries in one order as before. A report holds the same figures. On one workstation with 2.6 million files, the development inspection took 20 seconds before and takes 4.3 seconds now. A claim of a checkout or of build state now reads the directory's listing, so it asks the filesystem for no marker file.
 
 ### Removed
 

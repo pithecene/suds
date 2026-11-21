@@ -12,10 +12,12 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
+use crate::ahead::{Entry, Layout};
 use crate::inspection::ScanError;
 use crate::model::{EntryKind, Measure, Platform, ReportStatus, TraversalError};
 use crate::roots::normalize;
@@ -403,51 +405,55 @@ fn is_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-/// Whether `dir` holds the chain of directories `chain`, and whether the
-/// last one holds each of `files`. The check reads metadata alone, and a
-/// symbolic link at any step fails it.
-fn holds(dir: &Path, chain: &[&str], files: &[&str]) -> bool {
-    let mut at = dir.to_path_buf();
-    for name in chain {
-        at.push(name);
-        if !is_dir(&at) {
-            return false;
-        }
-    }
-    files.iter().all(|name| is_file(&at.join(name)))
-}
-
-/// Whether `dir` has the layout of Go's build cache: its notice, its trim
+/// Whether `own` has the layout of Go's build cache: its notice, its trim
 /// record, and the first and the last of its 256 directories.
-fn go_build_cache(dir: &Path) -> bool {
-    holds(dir, &[], &["README", "trim.txt"]) && is_dir(&dir.join("00")) && is_dir(&dir.join("ff"))
+fn go_build_cache(own: &Layout<'_>) -> bool {
+    own.file("README") && own.file("trim.txt") && own.dir("00") && own.dir("ff")
 }
 
-/// Whether `dir` holds a virtual machine of Lima: its configuration beside
+/// Whether `own` holds a virtual machine of Lima: its configuration beside
 /// a disk, or a data disk that Lima keeps apart from a machine.
-fn machine_at(dir: &Path) -> bool {
-    let disk = |name: &str| is_file(&dir.join(name));
-    (disk("lima.yaml") && (disk("diffdisk") || disk("basedisk"))) || disk("datadisk")
+fn machine_at(own: &Layout<'_>) -> bool {
+    (own.file("lima.yaml") && (own.file("diffdisk") || own.file("basedisk")))
+        || own.file("datadisk")
 }
 
-/// Classifies `dir` from the entries that its ecosystem writes. Build state
-/// has an owner, so the profile claims it only beneath a checkout.
-fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
+/// Classifies the directory at `dir` by asking the filesystem for each
+/// entry that its ecosystem writes.
+fn claim_at(dir: &Path, in_checkout: bool) -> Option<Claim> {
+    let beside = dir.parent().map(Layout::Asked);
+    claim(dir, &Layout::Asked(dir), beside.as_ref(), in_checkout)
+}
+
+/// Classifies one directory of a traversal from the listings that the
+/// traversal read.
+fn claim_of(entry: &Entry<'_>, in_checkout: bool) -> Option<Claim> {
+    claim(entry.path, &entry.own, Some(&entry.beside), in_checkout)
+}
+
+/// Classifies `dir` from the entries that its ecosystem writes: `own` is
+/// what the directory holds, and `beside` is what its parent holds. Build
+/// state has an owner, so the profile claims it only beneath a checkout.
+fn claim(
+    dir: &Path,
+    own: &Layout<'_>,
+    beside: Option<&Layout<'_>>,
+    in_checkout: bool,
+) -> Option<Claim> {
     // A vcpkg checkout holds a repository of its own, so its marker decides
     // before the `.git` entry.
-    if is_file(&dir.join(".vcpkg-root")) {
+    if own.file(".vcpkg-root") {
         return Some(Claim::Toolchain(Ecosystem::Vcpkg));
     }
-    if machine_at(dir) {
+    if machine_at(own) {
         return Some(Claim::Machine);
     }
-    let git = dir.join(".git");
-    match fs::symlink_metadata(&git) {
-        Ok(meta) if meta.is_dir() => return Some(Claim::Checkout(CheckoutKind::Main, None)),
-        Ok(meta) if meta.is_file() => {
+    match own.entry(".git") {
+        Some(EntryKind::Directory) => return Some(Claim::Checkout(CheckoutKind::Main, None)),
+        Some(EntryKind::File) => {
             // A submodule's file names a `modules` directory, so the
             // submodule stays a part of its parent checkout.
-            if let Some(repository) = linked_repository(dir, &git) {
+            if let Some(repository) = linked_repository(dir, &dir.join(".git")) {
                 return Some(Claim::Checkout(CheckoutKind::Linked, Some(repository)));
             }
         }
@@ -456,28 +462,35 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
     if !in_checkout {
         return None;
     }
-    let parent = dir.parent()?;
-    let beside = |name: &str| is_file(&parent.join(name));
+    let beside = beside?;
     let ecosystem = match dir.file_name()?.to_str() {
-        Some("target") if is_file(&dir.join("CACHEDIR.TAG")) && beside("Cargo.toml") => {
-            Ecosystem::Cargo
-        }
+        Some("target") if own.file("CACHEDIR.TAG") && beside.file("Cargo.toml") => Ecosystem::Cargo,
         // A workspace's root may hold no manifest of its own, and each
         // package manager writes a state file into the directory.
         Some("node_modules")
-            if beside("package.json")
-                || beside("pnpm-workspace.yaml")
-                || is_file(&dir.join(".modules.yaml"))
-                || is_file(&dir.join(".package-lock.json")) =>
+            if beside.file("package.json")
+                || beside.file("pnpm-workspace.yaml")
+                || own.file(".modules.yaml")
+                || own.file(".package-lock.json") =>
         {
             Ecosystem::Node
         }
-        Some("vcpkg_installed") if beside("vcpkg.json") => Ecosystem::Vcpkg,
-        _ if is_file(&dir.join("CMakeCache.txt")) => Ecosystem::Cmake,
+        Some("vcpkg_installed") if beside.file("vcpkg.json") => Ecosystem::Vcpkg,
+        _ if own.file("CMakeCache.txt") => Ecosystem::Cmake,
         // A project may point a cache into its own checkout, where each
         // checkout then fills a copy. The cache's program names it there.
-        _ if go_build_cache(dir) || holds(dir, &["cache", "download"], &[]) => Ecosystem::Go,
-        _ if holds(dir, &["0"], &["CACHEDIR.TAG", "stats"]) => Ecosystem::Ccache,
+        _ if go_build_cache(own)
+            || (own.dir("cache") && is_dir(&dir.join("cache").join("download"))) =>
+        {
+            Ecosystem::Go
+        }
+        _ if own.dir("0") && {
+            let first = dir.join("0");
+            is_file(&first.join("CACHEDIR.TAG")) && is_file(&first.join("stats"))
+        } =>
+        {
+            Ecosystem::Ccache
+        }
         _ => return None,
     };
     Some(Claim::Build(ecosystem))
@@ -486,7 +499,7 @@ fn claim(dir: &Path, in_checkout: bool) -> Option<Claim> {
 /// The ecosystem whose layout proves that `dir` is build state beneath a
 /// checkout.
 pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
-    match claim(dir, true) {
+    match claim_at(dir, true) {
         Some(Claim::Build(ecosystem)) => Some(ecosystem),
         _ => None,
     }
@@ -495,7 +508,7 @@ pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {
 /// The ecosystem whose layout proves that `dir` is a toolchain that a
 /// checkout fetched into its own tree.
 pub(crate) fn toolchain_at(dir: &Path) -> Option<Ecosystem> {
-    match claim(dir, true) {
+    match claim_at(dir, true) {
         Some(Claim::Toolchain(ecosystem)) => Some(ecosystem),
         _ => None,
     }
@@ -534,12 +547,14 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
             measured: true,
             unclassified: Measure::default(),
         };
-        if let Some(claimed) = claim(path, false) {
+        if let Some(claimed) = claim_at(path, false) {
             found.take(&mut scan, path.clone(), claimed, None);
-        } else if let Some(bounded) = scan.measure(path, &mut |dir| claim(dir, false).is_some()) {
+        } else if let Some(bounded) =
+            scan.measure(path, Arc::new(|entry| claim_of(entry, false).is_some()))
+        {
             workspace.unclassified = bounded.measure;
             for dir in bounded.set_aside {
-                if let Some(claimed) = claim(&dir, false) {
+                if let Some(claimed) = claim_at(&dir, false) {
                     found.take(&mut scan, dir, claimed, None);
                 }
             }
@@ -549,17 +564,20 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         results.push(workspace);
     }
     while let Some(mut checkout) = found.pending.pop_front() {
-        if let Some(bounded) = scan.measure(&checkout.path, &mut |dir| claim(dir, true).is_some()) {
+        if let Some(bounded) = scan.measure(
+            &checkout.path,
+            Arc::new(|entry| claim_of(entry, true).is_some()),
+        ) {
             checkout.own = bounded.measure;
             for dir in bounded.set_aside {
-                match claim(&dir, true) {
+                match claim_at(&dir, true) {
                     Some(Claim::Build(ecosystem)) => {
                         // A repository that the build fetched belongs to
                         // the build. Any other one is a checkout, and the
                         // report lists it as one.
                         let build = measure_build(&mut scan, &dir, ecosystem);
                         for path in build.unproven {
-                            if let Some(claimed) = claim(&path, false) {
+                            if let Some(claimed) = claim_at(&path, false) {
                                 found.take(&mut scan, path, claimed, Some(&checkout.path));
                             }
                         }
@@ -706,6 +724,11 @@ fn fetched_by(ecosystem: Ecosystem, build: &Path, dir: &Path) -> bool {
             .is_ok_and(|meta| meta.is_dir())
 }
 
+/// Whether the entry is a directory with a `.git` entry of any kind.
+fn holds_repository(entry: &Entry<'_>) -> bool {
+    entry.kind == EntryKind::Directory && entry.own.entry(".git").is_some()
+}
+
 /// Measures one directory of build state and surveys it. A repository that
 /// the build fetched counts toward the measure. Any other directory with a
 /// `.git` entry is a checkout, so the measurement sets it aside.
@@ -713,16 +736,18 @@ fn measure_build(scan: &mut SharedScan, path: &Path, ecosystem: Ecosystem) -> Bu
     let (mounts, errors) = (scan.skipped_mount_count(), scan.error_count());
     let foreign = scan.foreign_directory_count();
     let mut fetched = Vec::new();
-    let bounded = scan.measure(path, &mut |dir| {
-        if fs::symlink_metadata(dir.join(".git")).is_err() {
-            return false;
-        }
-        if fetched_by(ecosystem, path, dir) {
-            fetched.push(dir.to_path_buf());
-            return false;
-        }
-        true
-    });
+    let build = path.to_path_buf();
+    let bounded = scan.measure_with(
+        path,
+        Arc::new(move |entry| {
+            holds_repository(entry) && !fetched_by(ecosystem, &build, entry.path)
+        }),
+        &mut |entry| {
+            if holds_repository(entry) && fetched_by(ecosystem, path, entry.path) {
+                fetched.push(entry.path.to_path_buf());
+            }
+        },
+    );
     let (measure, unproven) = bounded.map_or_else(Default::default, |bounded| {
         (bounded.measure, bounded.set_aside)
     });
@@ -764,12 +789,11 @@ pub(crate) fn survey_tree_with(
     visit: &mut dyn FnMut(&Path, EntryKind),
 ) -> (Measure, Survey, Vec<PathBuf>) {
     let mut repositories = Vec::new();
-    let bounded = scan.measure_with(path, &mut |entry, kind| {
-        if kind == EntryKind::Directory && fs::symlink_metadata(entry.join(".git")).is_ok() {
-            repositories.push(entry.to_path_buf());
+    let bounded = scan.measure_with(path, Arc::new(|_| false), &mut |entry| {
+        if holds_repository(entry) {
+            repositories.push(entry.path.to_path_buf());
         }
-        visit(entry, kind);
-        false
+        visit(entry.path, entry.kind);
     });
     let survey = Survey {
         checkouts_beneath: 0,
@@ -782,7 +806,7 @@ pub(crate) fn survey_tree_with(
 }
 
 fn measure_whole(scan: &mut SharedScan, path: &Path) -> Measure {
-    scan.measure(path, &mut |_| false)
+    scan.measure(path, Arc::new(|_| false))
         .map(|bounded| bounded.measure)
         .unwrap_or_default()
 }

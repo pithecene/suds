@@ -10,9 +10,11 @@ use std::fs::{self, FileType, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::ahead::{Ahead, Body, Claims, Entry, Head, Layout, START_AT, Slot};
 use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
@@ -190,7 +192,26 @@ pub struct SharedScan {
     walker: Walker,
 }
 
-type EntryVisitor<'a> = dyn FnMut(&Path, EntryKind) -> bool + 'a;
+/// A rule that sees each entry beneath a measurement's start, in the
+/// traversal's order, before the measurement counts it.
+pub(crate) type Note<'a> = dyn FnMut(&Entry<'_>) + 'a;
+
+/// The rules of a bounded measurement.
+struct Rules<'a, 'b> {
+    claims: Claims,
+    note: &'a mut Note<'b>,
+}
+
+/// The state of one traversal that the count of a directory's entries
+/// reads and changes.
+struct Replay<'a, 'b, 'c> {
+    ahead: &'a Ahead,
+    tally: &'a mut Tally,
+    cancel: &'a AtomicBool,
+    note: &'a mut Option<&'b mut Note<'c>>,
+    set_aside: &'a mut Vec<PathBuf>,
+    pending: &'a mut Vec<(PathBuf, Arc<Slot>)>,
+}
 
 /// One measurement of a shared scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,25 +240,20 @@ impl SharedScan {
     }
 
     /// Measures the entry at `start` and everything beneath it on its
-    /// filesystem. The measurement asks `boundary` about each directory
-    /// beneath `start` and sets aside each one that the boundary claims. It
+    /// filesystem. The measurement asks `claims` about each directory
+    /// beneath `start` and sets aside each one that the rule claims. It
     /// returns `None` when it cannot measure `start` itself.
-    pub fn measure(
-        &mut self,
-        start: &Path,
-        boundary: &mut dyn FnMut(&Path) -> bool,
-    ) -> Option<BoundedMeasure> {
-        self.measure_with(start, &mut |path, kind| {
-            kind == EntryKind::Directory && boundary(path)
-        })
+    pub(crate) fn measure(&mut self, start: &Path, claims: Claims) -> Option<BoundedMeasure> {
+        self.measure_with(start, claims, &mut |_| {})
     }
 
-    /// Measures a tree and calls the visitor for each entry on its filesystem.
-    /// A visitor can set a directory aside before the scan enters it.
+    /// Measures as `measure` does, and shows `note` each entry beneath
+    /// `start` in the traversal's order.
     pub(crate) fn measure_with(
         &mut self,
         start: &Path,
-        visitor: &mut EntryVisitor<'_>,
+        claims: Claims,
+        note: &mut Note<'_>,
     ) -> Option<BoundedMeasure> {
         match fs::symlink_metadata(start) {
             Ok(meta) => self.walker.device = meta.dev(),
@@ -249,8 +265,9 @@ impl SharedScan {
         let mut tally = Tally::default();
         let mut set_aside = Vec::new();
         let never = AtomicBool::new(false);
+        let rules = Rules { claims, note };
         self.walker
-            .walk_within(start, &mut tally, &never, Some(visitor), &mut set_aside)?;
+            .walk_within(start, &mut tally, &never, Some(rules), &mut set_aside)?;
         Some(BoundedMeasure {
             measure: tally.into_measure(),
             set_aside,
@@ -292,10 +309,10 @@ impl SharedScan {
 
 /// The state that persists across one root's traversal.
 /// One entry's metadata, its kind, and whether a mount point stands there.
-struct Probed {
+pub(crate) struct Probed {
     meta: fs::Metadata,
-    kind: EntryKind,
-    mount: bool,
+    pub(crate) kind: EntryKind,
+    pub(crate) mount: bool,
 }
 
 struct Walker {
@@ -348,91 +365,136 @@ impl Walker {
     }
 
     /// Walks as `walk` does, and sets aside each directory beneath `start`
-    /// that `boundary` claims, without counting or entering it.
+    /// that `claims` claims, without counting or entering it. The walk shows
+    /// `note` each entry beneath `start` before it counts the entry.
     fn walk_within(
         &mut self,
         start: &Path,
         tally: &mut Tally,
         cancel: &AtomicBool,
-        mut boundary: Option<&mut EntryVisitor<'_>>,
+        rules: Option<Rules<'_, '_>>,
         set_aside: &mut Vec<PathBuf>,
     ) -> Option<EntryRevision> {
         // A bounded measurement starts where its caller chose, so its start
         // may be a mount point. A mount point beneath the start still ends
         // the traversal there.
-        let probed = self.probe(start, boundary.is_some())?;
+        let probed = self.probe(start, rules.is_some())?;
         let revision = self.count(start, &probed, tally)?;
-        if revision.kind == EntryKind::Directory {
-            // The listings arrive sorted, and the traversal pushes subdirectories
-            // onto the stack in reverse order, so the traversal order, and with
-            // it the sampled errors and hard-link attribution, depends only on
-            // the tree.
-            let mut pending = vec![start.to_path_buf()];
-            while let Some(dir) = pending.pop() {
-                if cancel.load(Ordering::Relaxed) {
-                    self.cancelled = true;
-                    break;
-                }
-                let Some(names) = self.list(&dir) else {
-                    continue;
-                };
-                let mut subdirs = Vec::new();
-                for name in names {
-                    // A single directory can hold many entries, so a
-                    // cancellation request takes effect between entries.
-                    if cancel.load(Ordering::Relaxed) {
-                        self.cancelled = true;
-                        break;
-                    }
-                    let path = dir.join(name);
-                    // One probe serves the boundary and the count, so each
-                    // entry costs one metadata call.
-                    let Some(probed) = self.probe(&path, false) else {
-                        continue;
-                    };
-                    if let Some(boundary) = boundary.as_deref_mut()
-                        && !probed.mount
-                        && boundary(&path, probed.kind)
-                    {
-                        set_aside.push(path);
-                        continue;
-                    }
-                    let visited = self.count(&path, &probed, tally);
-                    if visited.is_some_and(|revision| revision.kind == EntryKind::Directory) {
-                        subdirs.push(path);
-                    }
-                }
-                pending.extend(subdirs.into_iter().rev());
+        if revision.kind != EntryKind::Directory {
+            return Some(revision);
+        }
+        let (claims, mut note): (Claims, Option<&mut Note<'_>>) = match rules {
+            Some(rules) => (rules.claims, Some(rules.note)),
+            None => (Arc::new(|_| false), None),
+        };
+        let ahead = Ahead::new(claims, self.device, self.check_file_mounts);
+        // Each listing arrives sorted, and the stack takes subdirectories
+        // in reverse. The order of the count therefore depends on the tree
+        // alone, whichever thread read a directory.
+        let mut pending = vec![(start.to_path_buf(), Slot::start(start.to_path_buf()))];
+        // Whether the traversal has asked the threads to join, which it asks once.
+        let mut asked = false;
+        while let Some((dir, slot)) = pending.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                self.cancelled = true;
+                break;
+            }
+            let (head, body) = ahead.body(&slot);
+            if !asked && pending.len() + body.entered() >= START_AT {
+                asked = true;
+                let listed: Vec<_> = pending.iter().map(|(_, slot)| Arc::clone(slot)).collect();
+                ahead.join(&listed, &slot, &body);
+            }
+            let mut rest = Replay {
+                ahead: &ahead,
+                tally: &mut *tally,
+                cancel,
+                note: &mut note,
+                set_aside: &mut *set_aside,
+                pending: &mut pending,
+            };
+            self.replay(&dir, &head, &body, &mut rest);
+            ahead.counted(&body);
+            if self.cancelled {
+                break;
             }
         }
+        ahead.end();
         Some(revision)
+    }
+
+    /// Counts the entries of one directory from its reading, in the
+    /// listing's order, and queues each directory to enter.
+    fn replay(&mut self, dir: &Path, head: &Head, body: &Body, rest: &mut Replay<'_, '_, '_>) {
+        let Replay {
+            ahead,
+            tally,
+            cancel,
+            note,
+            set_aside,
+            pending,
+        } = rest;
+        if let Some(err) = &head.unlisted {
+            self.record_error(dir, err);
+            return;
+        }
+        for err in &head.unnamed {
+            self.record_error(dir, err);
+        }
+        let mut subdirs = Vec::new();
+        for child in &body.children {
+            // A single directory can hold many entries, so a cancellation
+            // request takes effect between entries.
+            if cancel.load(Ordering::Relaxed) {
+                self.cancelled = true;
+                break;
+            }
+            let path = child.path.as_path();
+            let probed = match &child.probed {
+                Ok(probed) => probed,
+                Err(err) => {
+                    self.record_error(path, err);
+                    continue;
+                }
+            };
+            let entered = child.slot.as_ref().map(|slot| ahead.head(slot));
+            if !probed.mount {
+                if let Some(note) = note.as_deref_mut() {
+                    note(&Entry {
+                        path,
+                        kind: probed.kind,
+                        own: entered
+                            .as_ref()
+                            .map_or(Layout::Asked(path), |own| own.layout(path)),
+                        beside: head.layout(dir),
+                    });
+                }
+                if entered.as_ref().is_some_and(|entered| entered.claimed) {
+                    set_aside.push(child.path.clone());
+                    continue;
+                }
+            }
+            let visited = self.count(path, probed, tally);
+            if visited.is_some_and(|revision| revision.kind == EntryKind::Directory)
+                && let Some(slot) = &child.slot
+            {
+                subdirs.push((child.path.clone(), Arc::clone(slot)));
+            }
+        }
+        pending.extend(subdirs.into_iter().rev());
     }
 
     /// Reads the metadata of one entry and decides whether a mount point
     /// stands there. With `chosen`, the entry is the start that a caller
     /// named, which may be a mount point.
     fn probe(&mut self, path: &Path, chosen: bool) -> Option<Probed> {
-        let meta = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
+        match probe_at(path, chosen, self.device, self.check_file_mounts) {
+            Ok(probed) => Some(probed),
             Err(err) => {
                 self.record_error(path, &err);
-                return None;
-            }
-        };
-        let kind = entry_kind(meta.file_type());
-        let mut mount = !chosen && meta.dev() != self.device;
-        if !chosen && !mount && (kind == EntryKind::Directory || self.check_file_mounts) {
-            // A failed check leaves the entry unmeasured and the root partial,
-            // because the scan cannot rule out a mount boundary.
-            match is_mount_root(path) {
-                Ok(root) => mount = root,
-                Err(err) => {
-                    self.record_error(path, &err);
-                    return None;
-                }
+                None
             }
         }
-        Some(Probed { meta, kind, mount })
     }
 
     /// Measures one probed entry without descending into it. A mount point
@@ -495,6 +557,25 @@ impl Walker {
             });
         }
     }
+}
+
+/// Reads the metadata of one entry on a filesystem of `device`, and decides
+/// whether a mount point stands there. A failed check of the mount point
+/// leaves the entry unmeasured and the root partial, because the scan cannot
+/// rule out a mount boundary.
+pub(crate) fn probe_at(
+    path: &Path,
+    chosen: bool,
+    device: u64,
+    check_file_mounts: bool,
+) -> io::Result<Probed> {
+    let meta = fs::symlink_metadata(path)?;
+    let kind = entry_kind(meta.file_type());
+    let mut mount = !chosen && meta.dev() != device;
+    if !chosen && !mount && (kind == EntryKind::Directory || check_file_mounts) {
+        mount = is_mount_root(path)?;
+    }
+    Ok(Probed { meta, kind, mount })
 }
 
 /// Checks the root of a removal, which a bounded measurement may enter even

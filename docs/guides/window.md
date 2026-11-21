@@ -121,7 +121,8 @@ screen reader as nothing, so each new element takes `accessible-role` and
 A new view takes four steps, in this order.
 
 1. Add the view's values and their test to `suds-view`. Read the core
-   through its public functions, and write nothing.
+   through its public functions. Only an approved run writes, as
+   `reclaim.rs` applies a plan through the core.
 2. Add the items' text to `present.rs`, with a test for each rule of
    wording.
 3. Declare the view's elements in `window.slint`, each with its role and

@@ -33,7 +33,7 @@ fn stores() -> Vec<Store> {
     vec![
         store(
             "mise.installs",
-            ["Many languages", "mise", "Toolchains"],
+            ["Polyglot", "mise", "Toolchains"],
             15 * GIB,
         ),
         over,
@@ -50,7 +50,7 @@ fn labels(groups: &[suds_view::StoreGroup]) -> Vec<&str> {
 #[test]
 fn the_tools_of_one_language_form_one_ecosystem_and_the_largest_group_leads() {
     let groups = store_groups(&stores(), Grouping::Ecosystem);
-    let expected = ["Rust", "Many languages", "JavaScript", "Virtual machines"];
+    let expected = ["Rust", "Polyglot", "JavaScript", "Virtual machines"];
     assert_eq!(labels(&groups), expected);
     assert_eq!(groups[0].bytes, 16 * GIB);
     assert_eq!(groups[0].share, 1.0);

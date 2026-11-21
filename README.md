@@ -109,6 +109,10 @@ lists each removal with its size and its evidence. A person clears the mark
 of a removal to leave it out, and nothing leaves the disk before the person
 approves the run. The journal records the run.
 
+The button History lists each run that the journal records, most recent
+first, with its outcome and the bytes that it freed. A selected run lists
+its steps, and a step that did not succeed states its reason.
+
 Run it with `task window`. Control and F moves to the filter, Control and R
 measures again, and the arrow keys move through the list. The window draws
 with [Slint](https://slint.dev/), without a web view, and runs on Linux

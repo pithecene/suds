@@ -27,7 +27,8 @@ Inside `apps/window`, these files divide the work.
   accessible role and label. It holds no logic beyond a selection or a key.
 - `src/present.rs` turns a value of the view model into an item's text. Its
   functions are pure, and its tests need no display. The file `src/plan.rs`
-  does the same for a reclaim plan.
+  does the same for a reclaim plan, and `src/history.rs` for the journal's
+  runs.
 - `src/main.rs` measures on a thread of its own, keeps the last reading,
   and answers the interface's callbacks.
 
@@ -56,10 +57,10 @@ approves in the plan's view.
 | Control and Q | Closes the window |
 | Control and F | Moves to the filter |
 | Control and R | Measures again |
-| Up and Down | Move through the outline, or through the plan's removals |
+| Up and Down | Move through the outline, the plan's removals, or the history's runs |
 | Space | Marks or clears the selected removal of the plan |
 | Right and Left | Open and close the selected project |
-| Escape | Lets the selection go, or leaves the plan's view |
+| Escape | Lets the selection go, or leaves the plan's view or the history |
 
 A click on a project's row opens or closes it. A second click on a selected
 checkout, or a click on the map's empty space, also lets the selection go.
@@ -118,6 +119,28 @@ the count of roots and of entries that Suds could not read.
 The function `suds_view::propose` builds the plan, and `suds_view::apply`
 runs it. The file `src/plan.rs` holds the view's text.
 
+### History
+
+The button History reads the journal and lists each run, most recent
+first: a reclaim, a store trim, or a move. The reading changes nothing and
+creates no journal. A row shows the run's start in UTC, the count of its
+steps that succeeded, the bytes that it freed, and its outcome. A reclaim
+and a store trim also state whose approval admitted them: a person's, or
+the standing approval of `suds maintain`.
+
+The journal marks a run without a step as refused. Such a run refused
+nothing, so the history labels it as idle work, apart from a refusal. A run
+without a completion record shows as unfinished.
+
+A selected run lists each of its steps in a pane. A step's row shows the
+end of its path, because the end tells two directories of one project
+apart, and a screen reader receives the whole path. A step that did not
+succeed states its reason.
+
+The function `suds_view::history` reads the journal, and the file
+`src/history.rs` holds the view's text. The history reverses no move yet,
+so an undo still needs `suds undo`.
+
 ## Check
 
 The command `task window:check` builds the window, runs the tests of `suds-window` and
@@ -175,8 +198,9 @@ command line.
 
 - The window runs on Linux alone. On macOS, the menu bar, the dialogs, and
   a screen reader's access have no measurement.
-- The registry's records, the journal, and the stores' trims have no view
-  yet.
+- The registry's records have no view yet. The window shows a store trim
+  in the history and starts none.
+- The history reverses no move. An undo still needs the command line.
 - The plan's view takes no option. A plan of every worktree, or one with
   another idle time, still needs the command line.
 - The map has no key of its own. A person reaches each of its entries

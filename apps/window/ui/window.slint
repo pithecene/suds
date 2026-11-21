@@ -15,6 +15,8 @@ export struct FactItem { label: string, value: string }
 export struct PlanItem { id: int, name: string, caption: string, reason: string, size: string, included: bool, checkout: bool }
 export struct KeptItem { label: string, detail: string }
 export struct OutcomeItem { path: string, detail: string, removed: bool }
+export struct StepItem { name: string, path: string, detail: string, done: bool }
+export struct RunItem { id: int, name: string, caption: string, size: string, state: string, rank: int }
 export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
 
 global Tones {
@@ -204,7 +206,7 @@ export component Window inherits Window {
     in property <[FactItem]> detail-facts;
     in property <[BuildItem]> detail-builds;
 
-    // The reclaim plan's view: 0 shows the storage, and 1 shows the plan.
+    // The page: 0 shows the storage, 1 shows the reclaim plan, and 2 shows the history.
     in property <int> page;
     in property <bool> planning;
     in property <bool> applying;
@@ -230,6 +232,18 @@ export component Window inherits Window {
     in property <string> outcome-summary;
     // Whether the window asks once more before a run.
     in-out property <bool> confirming;
+
+    // The history: the journal's runs, and the steps of the selected run.
+    in property <bool> history-loading;
+    in property <string> history-error;
+    in property <[RunItem]> history-rows;
+    in property <string> history-summary;
+    in property <int> history-selected: -1;
+    in property <string> history-run;
+    in property <[StepItem]> history-steps;
+    // The history's scroll offset and the height that it shows, for a row that a key selects.
+    in-out property <length> history-y;
+    out property <length> history-visible;
 
     in-out property <string> query;
     in-out property <int> sort: 0;
@@ -258,6 +272,11 @@ export component Window inherits Window {
     callback plan-step(step: int);
     callback plan-apply();
     callback plan-close();
+    // The history: read the journal, select a run, move through the runs by key, and leave.
+    callback history();
+    callback history-pick(id: int);
+    callback history-step(step: int);
+    callback history-close();
 
     // What the pointer rests on in the map.
     property <string> hover;
@@ -321,6 +340,21 @@ export component Window inherits Window {
                 }
                 if (event.text == " " && root.plan-selected >= 0) {
                     root.plan-toggle(root.plan-selected);
+                    return accept;
+                }
+                return reject;
+            }
+            if (root.page == 2) {
+                if (event.text == Key.Escape) {
+                    root.history-close();
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.history-step(1);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    root.history-step(-1);
                     return accept;
                 }
                 return reject;
@@ -421,6 +455,18 @@ export component Window inherits Window {
                                     accessible-label: "Free space. Suds plans what it can remove and removes nothing before an approval.";
                                     clicked => {
                                         root.plan(false);
+                                        keys.focus();
+                                    }
+                                }
+                            }
+                            if root.page == 0: VerticalLayout {
+                                alignment: center;
+                                Button {
+                                    text: "History";
+                                    height: 24px;
+                                    accessible-label: "History. Each run that the journal records.";
+                                    clicked => {
+                                        root.history();
                                         keys.focus();
                                     }
                                 }
@@ -769,6 +815,167 @@ export component Window inherits Window {
                                         Caption { text: group.detail; }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.measured && root.page == 2: HorizontalLayout {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                Card {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    accessible-role: groupbox;
+                    accessible-label: "History";
+                    VerticalLayout {
+                        HorizontalLayout {
+                            padding: 10px;
+                            padding-left: 16px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            height: 46px;
+                            Heading { text: "HISTORY"; vertical-alignment: center; }
+                            Caption {
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                text: root.history-summary;
+                            }
+                            Button {
+                                text: "Back";
+                                accessible-label: "Return to the storage. Escape does the same.";
+                                clicked => { root.history-close(); }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Tones.hairline; }
+
+                        if root.history-loading: HorizontalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            spacing: 8px;
+                            Spinner { width: 16px; height: 16px; indeterminate: true; }
+                            Text { vertical-alignment: center; text: "Reading the journal…"; }
+                        }
+                        if !root.history-loading && root.history-error != "": VerticalLayout {
+                            vertical-stretch: 1;
+                            padding: 16px;
+                            alignment: start;
+                            Text { text: root.history-error; wrap: word-wrap; }
+                        }
+                        if !root.history-loading && root.history-error == "" && root.history-rows.length == 0: VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "The journal records no run."; horizontal-alignment: center; font-weight: 600; }
+                            Caption { text: "A reclaim, a store's trim, and a move each leave a run here."; horizontal-alignment: center; }
+                        }
+                        if !root.history-loading && root.history-error == "" && root.history-rows.length > 0: ListView {
+                            vertical-stretch: 1;
+                            accessible-role: list;
+                            accessible-label: "Runs that the journal records, most recent first. Up and Down select a run.";
+                            content-y <=> root.history-y;
+                            init => { root.history-visible = self.visible-height; }
+                            changed visible-height => { root.history-visible = self.visible-height; }
+                            for row in root.history-rows: Rectangle {
+                                property <bool> picked: row.id == root.history-selected;
+                                property <brush> tint: self.picked ? Palette.selection-foreground : row.rank == 3 ? Tones.muted : row.rank == 2 ? Tones.hard : row.rank == 1 ? Tones.soft : Tones.normal;
+                                height: 44px;
+                                accessible-role: list-item;
+                                accessible-action-default => { root.history-pick(row.id); }
+                                accessible-label: row.name + ", " + row.state + ", " + row.caption + (row.size != "" ? ", freed " + row.size : "");
+                                accessible-item-selectable: true;
+                                accessible-item-selected: row.id == root.history-selected;
+                                background: row.id == root.history-selected ? Palette.selection-background : pointer.has-hover ? Tones.hover : transparent;
+                                pointer := TouchArea {
+                                    clicked => {
+                                        root.history-pick(row.id);
+                                        keys.focus();
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: row.name;
+                                            overflow: elide;
+                                            color: row.id == root.history-selected ? Palette.selection-foreground : Palette.foreground;
+                                        }
+                                        Caption { text: row.caption; overflow: elide; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: outcome.preferred-width + 16px;
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            background: tint.transparentize(0.84);
+                                            outcome := Text { text: row.state; color: tint; font-size: 11px; font-weight: 600; }
+                                        }
+                                    }
+                                    Text {
+                                        width: 84px;
+                                        text: row.size;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: Tones.hairline; }
+                            }
+                        }
+                    }
+                }
+
+                Card {
+                    width: 400px;
+                    clip: true;
+                    accessible-role: groupbox;
+                    accessible-label: "Steps of the selected run";
+                    VerticalLayout {
+                        padding-top: 16px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 4px;
+                            Heading { text: "RUN"; }
+                            if root.history-selected < 0: Caption { text: "Select a run to read what it did with each path."; wrap: word-wrap; }
+                            if root.history-selected >= 0: Caption { text: root.history-run; wrap: char-wrap; }
+                            if root.history-selected >= 0 && root.history-steps.length == 0: Caption { text: "The journal records no step of this run."; wrap: word-wrap; }
+                        }
+                        ListView {
+                            vertical-stretch: 1;
+                            accessible-role: list;
+                            accessible-label: "What the run did with each path";
+                            for result in root.history-steps: Rectangle {
+                                // A step that did not succeed shows its reason on two lines.
+                                height: result.done ? 38px : 54px;
+                                accessible-role: list-item;
+                                accessible-label: result.path + ", " + result.detail;
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 10px;
+                                    Text {
+                                        width: 14px;
+                                        text: result.done ? "✓" : "–";
+                                        color: result.done ? Tones.normal : Tones.soft;
+                                        vertical-alignment: center;
+                                        accessible-role: none;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text { text: result.name; overflow: elide; }
+                                        Caption { text: result.detail; wrap: word-wrap; overflow: elide; max-height: 28px; }
+                                    }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: Tones.hairline; }
                             }
                         }
                     }

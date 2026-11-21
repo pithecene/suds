@@ -27,6 +27,13 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by reason. A person leaves a removal out with its mark, and the journal
   records the approved run.
 
+- **The window shows the journal's runs as a history**.
+
+  The button History lists each reclaim, each store trim, and each move
+  that the journal records, most recent first. A run shows its outcome, the
+  bytes that it freed, and whose approval admitted it. A selected run lists
+  each of its steps, and a step that did not succeed states its reason.
+
 ## [0.1.3] - 2026-11-20
 
 ### Added

@@ -65,6 +65,21 @@ approves in the plan's view.
 A click on a project's row opens or closes it. A second click on a selected
 checkout, or a click on the map's empty space, also lets the selection go.
 
+### Scheduled Maintenance
+
+A scheduled run of `suds maintain` that fails tells nobody, so the window
+states the schedule's faults in the notice above the storage. Each
+measurement reads the scheduler's units, the time of the last pressure
+reading, and the journal's last stores run under the standing approval,
+and changes nothing. The notice states units that are absent or stale, a
+schedule without a run in a day, and each store that the last scheduled
+run could not trim. A sound schedule adds no line.
+
+The window installs nothing. Its notice names the command
+`suds schedule --install`, which plans the units, and `--apply`, which
+places them. The function `suds_view::upkeep` reads the standing, and
+`present::upkeep` holds the text.
+
 ### Projects
 
 A project is one repository, whichever directories hold its clones. The

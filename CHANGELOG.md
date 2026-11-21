@@ -34,6 +34,12 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bytes that it freed, and whose approval admitted it. A selected run lists
   each of its steps, and a step that did not succeed states its reason.
 
+- **The window states a fault of the scheduled maintenance**.
+
+  A scheduled run that fails told nobody. The window now states units that
+  are absent or stale, a schedule without a run in a day, and each store
+  that the last scheduled run could not trim.
+
 - **The `schedule` command installs and checks its units**.
 
   With `--install`, `suds schedule` plans the installation of its units,

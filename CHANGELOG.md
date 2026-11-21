@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The stores' pane names the group of mise Polyglot**: the group of a store that serves each language read Many languages before.
+
 ## [0.1.4] - 2026-11-21
 
 ### Added

@@ -257,7 +257,8 @@ fn language(tool: Ecosystem) -> &'static str {
         Ecosystem::Go => "Go",
         Ecosystem::Node | Ecosystem::Pnpm => "JavaScript",
         Ecosystem::Ccache | Ecosystem::Cmake | Ecosystem::Vcpkg => "C and C++",
-        Ecosystem::Mise => "Many languages",
+        // Mise installs the toolchains of each language, so it belongs to none of them.
+        Ecosystem::Mise => "Polyglot",
         Ecosystem::Lima => "Virtual machines",
     }
 }

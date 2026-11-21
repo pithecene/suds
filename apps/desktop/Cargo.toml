@@ -13,6 +13,7 @@ name = "suds-desktop"
 path = "src/main.rs"
 
 [dependencies]
+suds-build.workspace = true
 suds-core.workspace = true
 suds-view.workspace = true
 # The interface toolkit of decision 0003, under its royalty-free licence for

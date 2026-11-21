@@ -12,12 +12,14 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **The desktop application shows a reading from a named file**: the variable `SUDS_SHOW_READING` names a file in the form of the saved reading. The window shows that reading and measures nothing, so a picture of the window shows no real workstation.
+- **A build states its commit, its owner, and its licence**: the `suds --version` command prints the version, then the commit of the build with its date. The copyright of Pithecene LLC, the licence, and the contact address follow. The `suds -V` command still prints the version alone. The desktop application shows the same in About.
 - **A release for Linux holds the desktop application**: each archive for Linux holds `bin/suds-desktop` and the script `share/suds/desktop/install.sh`. The script installs the binary, the desktop entry, and the icon for one user, where the window built only from source before.
 
 ### Changed
 
 - **The README shortens, and guides hold the reference**: the README states what Suds does, its guarantees, and a picture of the desktop application on an invented workstation. The reference of each command moves to a guide beneath `docs/guides`.
 - **The stores' pane names the group of mise Polyglot**: the group of a store that serves each language read Many languages before.
+- **A measurement reads directories on several threads**: an inspection, a reclaim plan, and a scheduled run read each directory's metadata on up to eight threads, and count the entries in one order as before. A report holds the same figures. On one workstation with 2.6 million files, the development inspection took 20 seconds before and takes 4.3 seconds now. A claim of a checkout or of build state now reads the directory's listing, so it asks the filesystem for no marker file.
 
 ### Removed
 
@@ -25,6 +27,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A size that rounds to a whole unit reads in that unit**: a count one byte below one gibibyte read `1024.0 MiB`. The command and the desktop application now write `1.0 GiB`, and the same holds at each unit.
 - **The tests of the store adapters no longer fail by chance**: a test wrote a stub program and ran it at once. The system refused the stub while another test's new process held the file open. A shell now writes each stub.
 
 ## [0.1.4] - 2026-11-21

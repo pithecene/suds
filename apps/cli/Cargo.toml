@@ -9,6 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+suds-build.workspace = true
 suds-core.workspace = true
 clap.workspace = true
 serde.workspace = true

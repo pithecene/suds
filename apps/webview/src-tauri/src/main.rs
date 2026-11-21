@@ -1,4 +1,4 @@
-//! The Suds desktop application.
+//! The Suds web-view application.
 //!
 //! The webview presents the inspection and the move plans. The commands in
 //! this file are the webview's only access to the workstation. Only

@@ -13,7 +13,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A native window shows the workstation's development storage**.
 
-  The program `suds-window` measures the settings' roots and shows the
+  The program `suds-desktop` measures the settings' roots and shows the
   pressure against the ceiling. It groups the checkouts of one repository
   into a project. A storage map draws each project and each checkout as a
   rectangle with the area of its size on disk, and an outline lists the
@@ -49,6 +49,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this release, so a unit from an earlier release no longer keeps its
   faults unseen. The command now writes for the scheduler of this system
   unless `--scheduler` names one.
+
+### Changed
+
+- **The native application takes the name `suds-desktop`**: its crate moves to `apps/desktop`, and its tasks are `task desktop`, `task desktop:install`, and `task desktop:check`. The web-view application becomes `suds-webview` in `apps/webview`, with the tasks `task webview` and `task webview:check`.
 
 ### Fixed
 

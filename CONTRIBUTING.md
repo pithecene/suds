@@ -15,7 +15,7 @@ mise install
 The README's Development section lists each task and what it runs.
 
 Each pull request passes `task check` on macOS and on Linux in CI, and
-`task desktop:check` on macOS.
+`task webview:check` on macOS.
 
 ## Tests
 

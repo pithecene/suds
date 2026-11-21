@@ -1,6 +1,6 @@
-# Window
+# Desktop Application
 
-This guide tells a contributor how the Suds window works, how to run and
+This guide tells a contributor how the Suds desktop application works, how to run and
 check it, and how to give it a new view. Decision
 [0003](../decisions/0003-native-interface.md) states why the window is
 native and why its toolkit is Slint.
@@ -14,14 +14,14 @@ beneath it.
 | :--- | :--- | :--- |
 | `suds-core` | `crates/suds-core` | The measurements, the plans, the registry, and the journal |
 | `suds-view` | `crates/suds-view` | Each view as plain values, without an interface toolkit |
-| `suds-window` | `apps/window` | The Slint interface and its filling code |
+| `suds-desktop` | `apps/desktop` | The Slint interface and its filling code |
 
 The crate `suds-view` exists so that a view has one definition. A test reads a view
 without a display, and the window of another system draws the same values.
 A figure that the window shows belongs in `suds-view`. Only its text and
-its color belong in `apps/window`.
+its color belong in `apps/desktop`.
 
-Inside `apps/window`, these files divide the work.
+Inside `apps/desktop`, these files divide the work.
 
 - `ui/window.slint` declares every element, its layout, and its
   accessible role and label. It holds no logic beyond a selection or a key.
@@ -34,12 +34,12 @@ Inside `apps/window`, these files divide the work.
 
 ## Run
 
-The command `task window` builds the release binary and opens the window. The window
+The command `task desktop` builds the release binary and opens the window. The window
 measures the roots that `settings.json` names, as `suds maintain` measures
 them. A workstation without a root shows the settings file's path and no
 figure.
 
-The command `task window:install` installs the window for one user: the
+The command `task desktop:install` installs the window for one user: the
 binary, the desktop entry `suds.desktop`, and the icon. The entry and the
 icon go beneath `XDG_DATA_HOME`, or beneath `~/.local/share` without one,
 and the entry names the binary by its full path. A desktop names the window
@@ -158,7 +158,7 @@ so an undo still needs `suds undo`.
 
 ## Check
 
-The command `task window:check` builds the window, runs the tests of `suds-window` and
+The command `task desktop:check` builds the window, runs the tests of `suds-desktop` and
 `suds-view`, and lints both. CI runs the same task on Linux.
 
 A contributor without a free display can still see the window. An X server
@@ -166,7 +166,7 @@ that draws to memory holds it, and ImageMagick saves the picture.
 
 ```sh
 Xvfb :96 -screen 0 1280x820x24 &
-env -u WAYLAND_DISPLAY DISPLAY=:96 target/release/suds-window &
+env -u WAYLAND_DISPLAY DISPLAY=:96 target/release/suds-desktop &
 sleep 30
 DISPLAY=:96 import -window root window.png
 ```
@@ -221,6 +221,6 @@ command line.
 - The map has no key of its own. A person reaches each of its entries
   through the outline.
 - A release publishes no archive of the window.
-- The desktop application of decision 0001 still holds the inspection of a
+- The web-view application of decision 0001 still holds the inspection of a
   root and the moves of Downloads entries. It leaves once the window holds
   both.

@@ -6152,12 +6152,10 @@ dependencies = [
 name = "suds-desktop"
 version = "0.1.3"
 dependencies = [
- "serde",
- "serde_json",
+ "slint",
+ "slint-build",
  "suds-core",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
+ "suds-view",
  "tempfile",
 ]
 
@@ -6171,13 +6169,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "suds-window"
+name = "suds-webview"
 version = "0.1.3"
 dependencies = [
- "slint",
- "slint-build",
+ "serde",
+ "serde_json",
  "suds-core",
- "suds-view",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
  "tempfile",
 ]
 

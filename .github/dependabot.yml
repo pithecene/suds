@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: npm
-    directory: /apps/desktop
+    directory: /apps/webview
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

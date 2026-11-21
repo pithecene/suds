@@ -1,6 +1,6 @@
 [package]
-name = "suds-desktop"
-description = "The Suds desktop application"
+name = "suds-webview"
+description = "The Suds web-view application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "suds-desktop"
+name = "suds-webview"
 path = "src/main.rs"
 
 [build-dependencies]

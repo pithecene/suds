@@ -38,39 +38,39 @@ tasks:
     desc: Run the debug build of suds inspect with the arguments after --
     cmd: cargo run --locked --quiet -p suds -- inspect {{.CLI_ARGS}}
 
-  window:
-    desc: Run the native window on this workstation's development storage
-    cmd: cargo run --locked --release -p suds-window
-
-  window:install:
-    desc: Install the native window, its desktop entry, and its icon for this user
-    cmds:
-      - cargo build --locked --release -p suds-window
-      - sh apps/window/install.sh target/release/suds-window
-
-  window:check:
-    desc: Build, test, and lint the native window and its view model
-    cmds:
-      - cargo build --locked -p suds-window
-      - cargo test --locked -p suds-window -p suds-view
-      - cargo clippy --locked -p suds-window -p suds-view --all-targets -- -D warnings
+  desktop:
+    desc: Run the desktop application on this workstation's development storage
+    cmd: cargo run --locked --release -p suds-desktop
 
   desktop:install:
-    desc: Install the desktop frontend's pinned packages
-    dir: apps/desktop
-    cmd: pnpm install --frozen-lockfile
-
-  desktop:
-    desc: Run the desktop application in development mode
-    dir: apps/desktop
-    deps: ['desktop:install']
-    cmd: pnpm tauri dev
+    desc: Install the desktop application, its desktop entry, and its icon for this user
+    cmds:
+      - cargo build --locked --release -p suds-desktop
+      - sh apps/desktop/install.sh target/release/suds-desktop
 
   desktop:check:
-    desc: Build the desktop frontend, then test and lint the desktop crate
-    deps: ['desktop:install']
+    desc: Build, test, and lint the desktop application and its view model
+    cmds:
+      - cargo build --locked -p suds-desktop
+      - cargo test --locked -p suds-desktop -p suds-view
+      - cargo clippy --locked -p suds-desktop -p suds-view --all-targets -- -D warnings
+
+  webview:install:
+    desc: Install the web frontend's pinned packages
+    dir: apps/webview
+    cmd: pnpm install --frozen-lockfile
+
+  webview:
+    desc: Run the web-view application in development mode
+    dir: apps/webview
+    deps: ['webview:install']
+    cmd: pnpm tauri dev
+
+  webview:check:
+    desc: Build the web frontend, then test and lint the web-view crate
+    deps: ['webview:install']
     cmds:
       # The desktop crate embeds the frontend's build output, so the build comes first.
-      - pnpm --dir apps/desktop build
-      - cargo test --locked -p suds-desktop
-      - cargo clippy --locked -p suds-desktop --all-targets -- -D warnings
+      - pnpm --dir apps/webview build
+      - cargo test --locked -p suds-webview
+      - cargo clippy --locked -p suds-webview --all-targets -- -D warnings

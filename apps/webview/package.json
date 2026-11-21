@@ -1,5 +1,5 @@
 {
-  "name": "@suds/desktop",
+  "name": "@suds/webview",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.15.0",

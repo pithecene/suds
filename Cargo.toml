@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/suds-core", "crates/suds-view", "apps/cli", "apps/desktop/src-tauri", "apps/window"]
+members = ["crates/suds-core", "crates/suds-view", "apps/cli", "apps/webview/src-tauri", "apps/desktop"]
 # The desktop crate needs the frontend's build output and, on Linux, the
 # WebKitGTK libraries. The window needs a display's libraries. A plain cargo
 # command therefore builds the core, the view model, and the CLI.

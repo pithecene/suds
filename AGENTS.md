@@ -76,8 +76,8 @@ rules hold for every release:
 - Write no `unsafe` code, because the crate forbids it.
 - Pin each dependency to an exact version, and state the reason for each
   new dependency in its pull request.
-- Run `task check` before each commit, and `task desktop:check` before a
-  commit that changes the desktop application.
+- Run `task check` before each commit, and `task webview:check` before a
+  commit that changes the web-view application.
 
 ## Commits
 

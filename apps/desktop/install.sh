@@ -3,7 +3,7 @@
 set -eu
 
 here=$(dirname "$0")
-binary="$HOME/.local/bin/suds-window"
+binary="$HOME/.local/bin/suds-desktop"
 # A desktop reads the user's data directory, and the home's default serves only without one.
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
 

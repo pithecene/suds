@@ -1,6 +1,6 @@
 [package]
-name = "suds-window"
-description = "The Suds window: one workstation's development storage in a native window"
+name = "suds-desktop"
+description = "The Suds desktop application: one workstation's development storage in a native window"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "suds-window"
+name = "suds-desktop"
 path = "src/main.rs"
 
 [dependencies]

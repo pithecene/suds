@@ -14,5 +14,5 @@ mise.local.toml
 # The desktop frontend's dependencies and build output, and the schemas that
 # the Tauri build step generates
 node_modules/
-/apps/desktop/dist/
-/apps/desktop/src-tauri/gen/
+/apps/webview/dist/
+/apps/webview/src-tauri/gen/

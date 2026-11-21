@@ -2,7 +2,7 @@
 Type=Application
 Name=Suds
 Comment=Bounded development storage for one workstation
-Exec=suds-window
+Exec=suds-desktop
 Icon=suds
 Terminal=false
 Categories=Development;System;

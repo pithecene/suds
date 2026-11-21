@@ -21,10 +21,10 @@ mise use -g github:pithecene/suds
 This release measures storage and makes one change. It moves a
 directory's direct children into another directory on the same
 filesystem, and only through a plan that a person reviews. The `suds inspect`
-command and the desktop application read filesystem metadata beneath a set
+command and the web-view application read filesystem metadata beneath a set
 of user-owned roots. For each root, they report its storage use, its entry
 counts, and its largest direct children. The command writes a terminal
-table or one JSON document, and the desktop application shows the same
+table or one JSON document, and the web-view application shows the same
 measurements in a window.
 
 The `suds inspect --profile development` command finds each Git checkout
@@ -88,9 +88,9 @@ On Linux, the storage profile requires each root as an argument, as in
 `suds inspect` without `--root` exits with status 2. The development
 profile needs no root on either system.
 
-## Window
+## Desktop Application
 
-The window `suds-window` shows one workstation's development storage. It
+The window `suds-desktop` shows one workstation's development storage. It
 measures the roots that the settings name, as `suds maintain` measures
 them, and a measurement writes nothing.
 
@@ -120,15 +120,15 @@ The button History lists each run that the journal records, most recent
 first, with its outcome and the bytes that it freed. A selected run lists
 its steps, and a step that did not succeed states its reason.
 
-Run it with `task window`. Control and F moves to the filter, Control and R
+Run it with `task desktop`. Control and F moves to the filter, Control and R
 measures again, and the arrow keys move through the list. The window draws
 with [Slint](https://slint.dev/), without a web view, and runs on Linux
-(decision 0003). It replaces the desktop application below once it holds
+(decision 0003). It replaces the web-view application below once it holds
 that application's views.
 
-## Desktop Application
+## Web-View Application
 
-The desktop application runs on macOS. Its window lists the default roots
+The web-view application runs on macOS. Its window lists the default roots
 and each folder that the user adds through the native folder picker. The
 application inspects them on a background thread and shows each root's result as soon
 as that root's scan ends, and the user can cancel a scan in progress. A
@@ -152,7 +152,7 @@ inspection, cancel an inspection, build a move plan, apply a plan, list the
 journal, and undo a run. It receives no filesystem, shell, or network
 permission. The web view names each location, plan, and run by an opaque
 identifier, and each selected entry by its position in an inspection's
-result, rather than by a path. The file `apps/desktop/src-tauri/capabilities/main.json`
+result, rather than by a path. The file `apps/webview/src-tauri/capabilities/main.json`
 grants these commands.
 
 ## Installation for Contributors
@@ -165,12 +165,12 @@ version manager installs the pinned Rust toolchain, Node.js, pnpm,
 mise install
 task build
 ./target/release/suds inspect
-task desktop            # the desktop application, on macOS
+task webview            # the web-view application, on macOS
 ```
 
 The repository is a Cargo workspace. The `crates/suds-core` crate holds the
-inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/desktop` holds
-the desktop application. Neither interface invokes the other.
+inspection, the planner, the executor, and the journal, `apps/cli` holds the `suds` command, and `apps/webview` holds
+the web-view application. Neither interface invokes the other.
 
 ## Usage
 
@@ -600,7 +600,7 @@ destination on another filesystem. It also refuses to replace an existing
 output file. Where the measurement of a selected directory cannot read an
 entry, the plan and its preview name that entry with the reason.
 
-The `apply` command accepts only a plan that `suds plan` or the desktop
+The `apply` command accepts only a plan that `suds plan` or the web-view
 application built and recorded in the journal, unchanged, and each plan
 runs once. Immediately before each move, Suds verifies the entry's
 recorded identity, the identity and canonical path of both directories,
@@ -693,7 +693,7 @@ what it found at each path.
   permissions.
 - The report can reveal private file and directory names. Treat it as local
   machine data.
-- The desktop application's web view loads only the application's own
+- The web-view application's web view loads only the application's own
   files and may call the eight application commands and nothing else. It
   never holds a path that it could pass back to name a file.
 
@@ -707,11 +707,11 @@ what it found at each path.
 | `task format` | Format the Rust sources and YAML files (alias `task fmt`) |
 | `task check` | Build, test, and lint |
 | `task inspect -- ARGS` | Run the debug build of `suds inspect` with `ARGS` |
-| `task desktop` | Run the desktop application in development mode |
-| `task desktop:check` | Build the desktop frontend, then test and lint the desktop crate |
+| `task webview` | Run the web-view application in development mode |
+| `task webview:check` | Build the web frontend, then test and lint the web-view crate |
 
 The `task check` command needs no network service, container, or elevated
-privilege once `mise install` has run. The `task desktop:check` command
+privilege once `mise install` has run. The `task webview:check` command
 also installs the frontend's pinned packages, and it runs on macOS. [CONTRIBUTING.md](CONTRIBUTING.md)
 describes the conventions of the repository.
 

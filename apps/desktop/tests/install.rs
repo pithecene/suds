@@ -29,7 +29,7 @@ fn the_entry_names_the_installed_binary_by_its_full_path() {
     fs::create_dir_all(&home).unwrap();
     install(&home, None);
 
-    assert!(home.join(".local/bin/suds-window").is_file());
+    assert!(home.join(".local/bin/suds-desktop").is_file());
     let data = home.join(".local/share");
     assert!(data.join("icons/hicolor/scalable/apps/suds.svg").is_file());
     let entry = fs::read_to_string(data.join("applications/suds.desktop")).unwrap();
@@ -37,7 +37,7 @@ fn the_entry_names_the_installed_binary_by_its_full_path() {
         .lines()
         .find(|line| line.starts_with("Exec="))
         .unwrap();
-    let path = home.join(".local/bin/suds-window");
+    let path = home.join(".local/bin/suds-desktop");
     let escaped = path.to_string_lossy().replace('$', "\\$");
     assert_eq!(exec, format!("Exec=\"{escaped}\""));
     assert!(entry.contains("\nIcon=suds\n"), "{entry}");

@@ -39,13 +39,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'Cargo.lock', 'apps/webview/pnpm-lock.yaml') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
 
       - name: ✅ Check
         run: task check
 
-      # The web-view application targets macOS first, and its Linux build needs WebKitGTK.
       # The desktop application links the system's fontconfig, whose development files a runner may lack.
       - name: 🧱 Install the Desktop Application's Libraries
         if: runner.os == 'Linux'
@@ -54,10 +53,6 @@ jobs:
       - name: 🪟 Check the Desktop Application
         if: runner.os == 'Linux'
         run: task desktop:check
-
-      - name: 🌐 Check the Web-View Application
-        if: runner.os == 'macOS'
-        run: task webview:check
 
       # The release binary inspects a fixture that the job generates, never the runner's home directory.
       - name: 🔍 Inspect a Fixture

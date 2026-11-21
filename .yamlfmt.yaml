@@ -1,7 +1,4 @@
 gitignore_excludes: true
-# The pnpm package manager writes its lockfile in its own layout.
-exclude:
-  - apps/webview/pnpm-lock.yaml
 formatter:
   type: basic
   indent: 2

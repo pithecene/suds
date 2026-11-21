@@ -3,7 +3,7 @@
 ## Prerequisites
 
 The [mise](https://mise.jdx.dev/) version manager installs the pinned
-versions of Rust, rustfmt, Clippy, Node.js, pnpm,
+versions of Rust, rustfmt, Clippy,
 [Task](https://taskfile.dev/), and yamlfmt. A contributor runs this command from the repository's root:
 
 ```sh
@@ -15,7 +15,7 @@ mise install
 The README's Development section lists each task and what it runs.
 
 Each pull request passes `task check` on macOS and on Linux in CI, and
-`task webview:check` on macOS.
+`task desktop:check` on Linux.
 
 ## Tests
 

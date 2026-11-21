@@ -136,3 +136,20 @@ fn the_last_scheduled_stores_run_states_each_trim_that_failed() {
     trim(&environment, "run-3", Authority::StandingApproval, false);
     assert!(upkeep(&environment, now).sound());
 }
+
+#[test]
+fn an_unreadable_journal_is_no_sound_maintenance() {
+    let (_temp, environment) = home();
+    schedule(&environment);
+    let now = read_pressure(&environment);
+    assert!(upkeep(&environment, now).sound());
+
+    // A line that is no record fails the reading.
+    let journal = Directories::of(&environment).unwrap().journal();
+    fs::create_dir_all(&journal).unwrap();
+    fs::write(journal.join("journal.jsonl"), "no record\n").unwrap();
+    let unread = upkeep(&environment, now);
+    assert!(unread.journal_error.is_some());
+    assert!(!unread.sound());
+    assert_eq!(unread.failed_trims, []);
+}

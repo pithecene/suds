@@ -39,12 +39,16 @@ pub struct Upkeep {
     pub overdue: bool,
     /// The stores that the last scheduled stores run could not trim.
     pub failed_trims: Vec<FailedTrim>,
+    /// The reason that Suds could not read the journal. The failed trims
+    /// are then unknown, and the maintenance is not sound.
+    pub journal_error: Option<String>,
 }
 
 impl Upkeep {
     /// Whether the maintenance runs as this release schedules it.
     pub fn sound(&self) -> bool {
-        self.schedule == Standing::Current && !self.overdue && self.failed_trims.is_empty()
+        let run = !self.overdue && self.failed_trims.is_empty();
+        self.schedule == Standing::Current && run && self.journal_error.is_none()
     }
 }
 
@@ -73,7 +77,12 @@ pub fn upkeep(environment: &Environment, now: i64) -> Upkeep {
     let written = reading.and_then(|path| path.metadata().ok()?.modified().ok());
     let written = written.and_then(|time| time.duration_since(UNIX_EPOCH).ok());
     let written = written.and_then(|since| i64::try_from(since.as_secs()).ok());
-    let records = directories.and_then(|directories| journal::read(&directories.journal()).ok());
+    // A workstation without a journal has an empty one, and another failure stays a failure.
+    let records = match directories {
+        Some(directories) => journal::read(&directories.journal()),
+        None => Ok(Vec::new()),
+    };
+    let journal_error = records.as_ref().err().map(ToString::to_string);
     let history = History::of(&records.unwrap_or_default());
     Upkeep {
         overdue: schedule != Standing::Absent
@@ -81,5 +90,6 @@ pub fn upkeep(environment: &Environment, now: i64) -> Upkeep {
         schedule,
         last_run: written.map(timestamp::format_utc),
         failed_trims: failed_trims(&history),
+        journal_error,
     }
 }

@@ -1,11 +1,13 @@
 //! The text and the figures of each item in the window, from the view model.
 
 use slint::{Color, SharedString};
+use std::sync::OnceLock;
 use suds_core::pressure::Level;
 use suds_core::schedule::Standing;
+
 use suds_view::{
-    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, Upkeep, bytes,
-    day,
+    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, Upkeep, Zone,
+    bytes,
 };
 
 use crate::{BuildItem, ClassItem, FactItem, FrameItem, RowItem, StoreItem, TileItem};
@@ -26,12 +28,26 @@ pub fn level(level: Level) -> (&'static str, i32) {
     }
 }
 
-/// A reading's time of day. The reading states its time in RFC 3339, at UTC.
+/// The zone of each time that the window shows: the system's zone, and UTC under test.
+fn zone() -> &'static Zone {
+    static ZONE: OnceLock<Zone> = OnceLock::new();
+    ZONE.get_or_init(|| {
+        if cfg!(test) {
+            Zone::utc()
+        } else {
+            Zone::system()
+        }
+    })
+}
+
+/// The date of a time on the person's clock.
+pub fn day(time: &str) -> String {
+    zone().day(time)
+}
+
+/// A reading's time of day on the person's clock.
 pub fn observed(at: &str) -> String {
-    match at.get(11..16) {
-        Some(time) => format!("{time} UTC"),
-        None => at.to_owned(),
-    }
+    zone().minute(at)
 }
 
 /// The line beneath the pressure's meter.
@@ -262,7 +278,7 @@ pub fn facts(checkout: &Checkout, home: Option<&str>) -> Vec<FactItem> {
         ),
         fact("Source", bytes(checkout.own_bytes)),
         fact("Build state", build(checkout.build_bytes)),
-        fact("Last change", day(&checkout.newest_modified).to_owned()),
+        fact("Last change", day(&checkout.newest_modified)),
         fact("Status", standing(checkout)),
     ];
     if let Some(repository) = &checkout.repository {
@@ -285,7 +301,7 @@ pub fn project_facts(project: &Project) -> Vec<FactItem> {
         fact("In use", format!("{} of them", project.held)),
         fact("Source", bytes(project.own_bytes)),
         fact("Build state", build(project.build_bytes)),
-        fact("Last change", day(&project.newest_modified).to_owned()),
+        fact("Last change", day(&project.newest_modified)),
     ]
 }
 
@@ -406,7 +422,7 @@ mod tests {
 
     #[test]
     fn a_reading_states_its_time_of_day() {
-        assert_eq!(super::observed("2026-11-20T23:04:46Z"), "23:04 UTC");
+        assert_eq!(super::observed("2026-11-20T23:04:46Z"), "23:04");
         assert_eq!(super::observed("unknown"), "unknown");
     }
 

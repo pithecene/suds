@@ -54,6 +54,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The native application takes the name `suds-desktop`**: its crate moves to `apps/desktop`, and its tasks are `task desktop`, `task desktop:install`, and `task desktop:check`. The web-view application becomes `suds-webview` in `apps/webview`, with the tasks `task webview` and `task webview:check`.
 
+- **The desktop application states each time in the system's time zone**: the reading's time, a run's start, and each date read as the person's clock reads them, where they read in UTC before.
+
 ### Fixed
 
 - **A scheduled run finds the program of each store**.

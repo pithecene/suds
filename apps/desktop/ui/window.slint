@@ -228,7 +228,7 @@ export component Window inherits Window {
     callback plan-apply();
     callback plan-close();
     // The history: read the journal, select a run, move through the runs by key, and leave.
-    // The stores' pane: what a group's stores share, 0 for the ecosystem and 1 for the class.
+    // The stores' pane: what a group's stores share, 0 for the ecosystem, 1 for the tool, and 2 for the class.
     in-out property <int> store-grouping;
     callback store-group(grouping: int);
     callback store-toggle(label: string);
@@ -1301,7 +1301,7 @@ export component Window inherits Window {
                                 spacing: 4px;
                                 height: 20px;
                                 Heading { text: "SHARED STORES"; horizontal-stretch: 1; vertical-alignment: center; }
-                                for name[position] in ["Ecosystem", "Class"]: Rectangle {
+                                for name[position] in ["Ecosystem", "Tool", "Class"]: Rectangle {
                                     width: segment.preferred-width + 14px;
                                     border-radius: 5px;
                                     background: root.store-grouping == position ? Tones.track : over-segment.has-hover ? Tones.hover : transparent;

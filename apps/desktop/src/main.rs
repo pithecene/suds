@@ -839,7 +839,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     window.on_store_group(on!(|window, state, grouping| {
         state.grouping = match grouping {
-            1 => Grouping::Class,
+            1 => Grouping::Tool,
+            2 => Grouping::Class,
             _ => Grouping::Ecosystem,
         };
         // A label of one grouping names no group of the other.

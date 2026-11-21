@@ -714,7 +714,8 @@ mod tests {
     fn a_store_over_its_budget_says_so() {
         let over = Store {
             id: "go.module-cache".into(),
-            ecosystem: "go",
+            ecosystem: "Go",
+            tool: "go",
             class: "Shared stores",
             path: "/stores/go".into(),
             bytes: 11 << 30,
@@ -736,12 +737,12 @@ mod tests {
         let shut = store_rows(&groups, &BTreeSet::new());
         assert_eq!(shut.len(), 1);
         assert!(shut[0].group && shut[0].over && !shut[0].open);
-        assert_eq!(shut[0].id, "go");
+        assert_eq!(shut[0].id, "Go");
         assert_eq!(shut[0].size, "12.0 GiB");
         assert_eq!(shut[0].budget, "2 stores · 1 over budget");
-        let open = store_rows(&groups, &BTreeSet::from(["go".to_owned()]));
+        let open = store_rows(&groups, &BTreeSet::from(["Go".to_owned()]));
         let ids: Vec<&str> = open.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(ids, ["go", "go.module-cache", "go.build-cache"]);
+        assert_eq!(ids, ["Go", "go.module-cache", "go.build-cache"]);
         assert!(open[0].open);
     }
 }

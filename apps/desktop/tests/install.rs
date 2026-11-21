@@ -54,3 +54,59 @@ fn the_entry_and_the_icon_follow_the_data_directory() {
     assert!(data.join("icons/hicolor/scalable/apps/suds.svg").is_file());
     assert!(!home.join(".local/share").exists());
 }
+
+/// Lays out a release archive beneath `root`: the binary, and the script with its assets.
+fn archive(root: &Path, binary: bool) -> std::path::PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let desktop = root.join("share/suds/desktop");
+    fs::create_dir_all(desktop.join("assets")).unwrap();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::copy(source.join("install.sh"), desktop.join("install.sh")).unwrap();
+    for asset in ["suds.desktop", "suds.svg"] {
+        let held = Path::new("assets").join(asset);
+        fs::copy(source.join(&held), desktop.join(&held)).unwrap();
+    }
+    if binary {
+        fs::write(root.join("bin/suds-desktop"), "#!/bin/sh\n").unwrap();
+    }
+    desktop.join("install.sh")
+}
+
+#[test]
+fn the_script_of_a_release_archive_installs_the_archive_s_binary() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let script = archive(&temp.path().join("release"), true);
+    let status = Command::new("sh")
+        .arg(script)
+        .env("HOME", &home)
+        .env_remove("XDG_DATA_HOME")
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(home.join(".local/bin/suds-desktop").is_file());
+    assert!(
+        home.join(".local/share/applications/suds.desktop")
+            .is_file()
+    );
+}
+
+#[test]
+fn the_script_installs_nothing_without_a_binary() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let script = archive(&temp.path().join("release"), false);
+    let output = Command::new("sh")
+        .arg(script)
+        .env("HOME", &home)
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no binary at"));
+    assert!(!home.join(".local").exists());
+}

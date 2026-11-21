@@ -31,8 +31,9 @@ one command installs the newest release:
 mise use -g github:pithecene/suds
 ```
 
-The desktop application builds from source on Linux, as
-[the desktop guide](docs/guides/desktop.md) describes.
+An archive for Linux holds the desktop application too.
+[The desktop guide](docs/guides/desktop.md) describes how its script adds
+the application to the desktop's menu.
 
 ---
 

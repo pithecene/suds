@@ -103,8 +103,10 @@ the map lists each project with its sums, and an open project lists its
 checkouts. A filter keeps the checkouts whose path holds its text, and the
 projects order by size, name, last change, or build state. A pane shows the
 selected project or checkout: its size, its build directories, and its
-use by a tool. Each shared store stands against its budget, and a store
-over its budget shows in red.
+use by a tool. A second pane groups the shared stores by
+ecosystem, by tool, or by storage class, and a click opens a group. An
+ecosystem is a language: Cargo and sccache both serve Rust. Each store
+stands against its budget, and a store over its budget shows in red.
 
 The button Free space plans a reclaim as `suds reclaim` plans one and
 lists each removal with its size and its evidence. A person clears the mark

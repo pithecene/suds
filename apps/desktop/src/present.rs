@@ -1,13 +1,14 @@
 //! The text and the figures of each item in the window, from the view model.
 
 use slint::{Color, SharedString};
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use suds_core::pressure::Level;
 use suds_core::schedule::Standing;
 
 use suds_view::{
-    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreStanding, Tile, Upkeep, Zone,
-    bytes,
+    Checkout, Class, Frame, PressureCard, Project, Rect, Store, StoreGroup, StoreStanding, Tile,
+    Upkeep, Zone, bytes,
 };
 
 use crate::{BuildItem, ClassItem, FactItem, FrameItem, RowItem, StoreItem, TileItem};
@@ -397,7 +398,7 @@ pub fn builds(checkout: &Checkout) -> Vec<BuildItem> {
         .collect()
 }
 
-pub fn store(store: &Store) -> StoreItem {
+fn store(store: &Store) -> StoreItem {
     let budget = match (store.standing, store.budget_bytes) {
         (StoreStanding::Absent, _) => "absent".to_owned(),
         (StoreStanding::Unreadable, _) => "unreadable".to_owned(),
@@ -416,17 +417,59 @@ pub fn store(store: &Store) -> StoreItem {
             store.standing,
             StoreStanding::Absent | StoreStanding::Unreadable
         ),
+        group: false,
+        open: false,
     }
+}
+
+/// The row of a group of stores. Its `id` is the group's label, and its `budget` counts the
+/// group's stores.
+fn store_group(group: &StoreGroup, open: bool) -> StoreItem {
+    let mut caption = count(group.stores.len(), "store", "stores");
+    if group.absent() {
+        caption.push_str(" · absent");
+    } else if group.over > 0 {
+        caption.push_str(&format!(" · {} over budget", group.over));
+    }
+    StoreItem {
+        id: group.label.as_str().into(),
+        path: "".into(),
+        size: bytes(group.bytes).into(),
+        budget: caption.into(),
+        share: group.share,
+        over: group.over > 0,
+        absent: group.absent(),
+        group: true,
+        open,
+    }
+}
+
+/// The rows of the stores' pane: each group, and beneath an open group its stores.
+pub fn store_rows(groups: &[StoreGroup], open: &BTreeSet<String>) -> Vec<StoreItem> {
+    let mut rows = Vec::new();
+    for group in groups {
+        let shown = open.contains(&group.label);
+        rows.push(store_group(group, shown));
+        if shown {
+            rows.extend(group.stores.iter().map(store));
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use suds_core::pressure::Level;
+
     use suds_view::{
-        BuildState, Checkout, Hold, PressureCard, Sort, Store, StoreStanding, map, projects,
+        BuildState, Checkout, Grouping, Hold, PressureCard, Sort, Store, StoreStanding, map,
+        projects, store_groups,
     };
 
-    use super::{builds, checkout_row, facts, notice, pressure_facts, project_row, short, store};
+    use super::{
+        builds, checkout_row, facts, notice, pressure_facts, project_row, short, store, store_rows,
+    };
 
     #[test]
     fn a_reading_states_its_time_of_day() {
@@ -669,15 +712,37 @@ mod tests {
 
     #[test]
     fn a_store_over_its_budget_says_so() {
-        let item = store(&Store {
+        let over = Store {
             id: "go.module-cache".into(),
+            ecosystem: "Go",
+            tool: "go",
+            class: "Shared stores",
             path: "/stores/go".into(),
             bytes: 11 << 30,
             budget_bytes: Some(10 << 30),
             standing: StoreStanding::Over,
             share: 1.0,
-        });
-        assert!(item.over);
+        };
+        let item = store(&over);
+        assert!(item.over && !item.group);
         assert_eq!(item.budget, "over its budget of 10.0 GiB");
+
+        let within = Store {
+            id: "go.build-cache".into(),
+            bytes: 1 << 30,
+            standing: StoreStanding::Within,
+            ..over.clone()
+        };
+        let groups = store_groups(&[over, within], Grouping::Ecosystem);
+        let shut = store_rows(&groups, &BTreeSet::new());
+        assert_eq!(shut.len(), 1);
+        assert!(shut[0].group && shut[0].over && !shut[0].open);
+        assert_eq!(shut[0].id, "Go");
+        assert_eq!(shut[0].size, "12.0 GiB");
+        assert_eq!(shut[0].budget, "2 stores · 1 over budget");
+        let open = store_rows(&groups, &BTreeSet::from(["Go".to_owned()]));
+        let ids: Vec<&str> = open.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["Go", "go.module-cache", "go.build-cache"]);
+        assert!(open[0].open);
     }
 }

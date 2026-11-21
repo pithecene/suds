@@ -18,8 +18,8 @@ use suds_core::development::Environment;
 use suds_core::reclaim::execute::ReclaimReport;
 use suds_core::reclaim::plan::ReclaimPlan;
 use suds_view::{
-    Checkout, History, Observation, Project, Proposal, Sort, Upkeep, Workstation, map, observe,
-    projects, propose, upkeep,
+    Checkout, Grouping, History, Observation, Project, Proposal, Sort, Upkeep, Workstation, map,
+    observe, projects, propose, store_groups, upkeep,
 };
 
 slint::include_modules!();
@@ -105,6 +105,10 @@ struct State {
     run: Option<usize>,
     /// Whether a reading of the journal is in progress. A second request starts none.
     reading: bool,
+    /// What the stores of one group share.
+    grouping: Grouping,
+    /// The labels of the groups whose stores the pane shows.
+    shown: BTreeSet<String>,
 }
 
 impl State {
@@ -409,11 +413,20 @@ fn show(window: &Window, state: &mut State, reading: Result<Observation, String>
             .map(|(position, class)| present::class(position, class))
             .collect(),
     ));
-    window.set_stores(model(view.stores.iter().map(present::store).collect()));
     // The selection names its entry by path, so it follows the entry into the new reading.
     state.view = Some(view);
     window.set_measured(true);
+    show_stores(window, state);
     show_projects(window, state, &window.get_query(), window.get_sort());
+}
+
+/// Draws the stores in their groups, with the stores of each open group.
+fn show_stores(window: &Window, state: &State) {
+    let Some(view) = &state.view else {
+        return;
+    };
+    let groups = store_groups(&view.stores, state.grouping);
+    window.set_stores(model(present::store_rows(&groups, &state.shown)));
 }
 
 /// Measures the workstation on a thread of its own and draws the reading on the interface's thread.
@@ -824,6 +837,23 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    window.on_store_group(on!(|window, state, grouping| {
+        state.grouping = match grouping {
+            1 => Grouping::Tool,
+            2 => Grouping::Class,
+            _ => Grouping::Ecosystem,
+        };
+        // A label of one grouping names no group of the other.
+        state.shown.clear();
+        show_stores(&window, state);
+    }));
+    window.on_store_toggle(on!(|window, state, label| {
+        let label = label.to_string();
+        if !state.shown.remove(&label) {
+            state.shown.insert(label);
+        }
+        show_stores(&window, state);
+    }));
     window.on_history(on!(|window, state| history_open(&window, state)));
     window.on_history_pick(on!(|window, state, run| {
         state.run = chosen(state.run, run);

@@ -60,6 +60,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The desktop application lists its notices behind a chip**: a chip beside the pressure's level counts the notices of a reading and lists them on a click. The notices stood in a card above the storage before, and each line moved the storage down.
 
+- **The desktop application groups the shared stores**: the stores' pane shows one row for each ecosystem, for each tool, or for each class of storage. An ecosystem is a language, such as Rust for Cargo and sccache. A row states the group's size and the count of its stores over budget, and a click lists the group's stores.
+
 ### Fixed
 
 - **The desktop application's spinner draws a smooth ring**: the toolkit's spinner drew its arc in steps at the window's size, so the window now draws a ring of its own with round ends.

@@ -2,7 +2,7 @@
 // storage: the pressure, the classes, each checkout, and each store. Its
 // second view shows a reclaim plan, which a person approves or leaves.
 import { AboutSlint, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
-import { Check, IconButton, Push, Tones } from "controls.slint";
+import { Check, GroupHead, IconButton, Push, Tones } from "controls.slint";
 
 export struct ClassItem { label: string, detail: string, share: float, tint: color }
 // One row of the outline: a project, or one of its checkouts beneath it.
@@ -18,7 +18,7 @@ export struct KeptItem { label: string, detail: string }
 export struct OutcomeItem { path: string, detail: string, removed: bool }
 export struct StepItem { name: string, path: string, detail: string, done: bool }
 export struct RunItem { id: int, name: string, caption: string, size: string, state: string, rank: int }
-export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool }
+export struct StoreItem { id: string, path: string, size: string, budget: string, share: float, over: bool, absent: bool, group: bool, open: bool }
 
 // A ring that turns while work runs. The toolkit's spinner draws its arc with square ends and
 // in steps at this size, so the window draws its own with round ends on a faint track.
@@ -228,6 +228,10 @@ export component Window inherits Window {
     callback plan-apply();
     callback plan-close();
     // The history: read the journal, select a run, move through the runs by key, and leave.
+    // The stores' pane: what a group's stores share, 0 for the ecosystem, 1 for the tool, and 2 for the class.
+    in-out property <int> store-grouping;
+    callback store-group(grouping: int);
+    callback store-toggle(label: string);
     callback history();
     callback history-pick(id: int);
     callback history-step(step: int);
@@ -1293,7 +1297,45 @@ export component Window inherits Window {
                             spacing: 8px;
                             HorizontalLayout {
                                 padding-left: 16px;
-                                Heading { text: "SHARED STORES"; }
+                                padding-right: 16px;
+                                spacing: 4px;
+                                height: 20px;
+                                Heading { text: "SHARED STORES"; horizontal-stretch: 1; vertical-alignment: center; }
+                                for name[position] in ["Ecosystem", "Tool", "Class"]: Rectangle {
+                                    width: segment.preferred-width + 14px;
+                                    border-radius: 5px;
+                                    background: root.store-grouping == position ? Tones.track : over-segment.has-hover ? Tones.hover : transparent;
+                                    border-width: segment-scope.has-focus ? 2px : 0px;
+                                    border-color: Palette.accent-background;
+                                    accessible-role: button;
+                                    accessible-label: "Group the stores by " + name;
+                                    accessible-action-default => { self.choose(); }
+                                    forward-focus: segment-scope;
+                                    function choose() {
+                                        root.store-grouping = position;
+                                        root.store-group(position);
+                                    }
+                                    segment-scope := FocusScope {
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Return || event.text == " ") {
+                                                parent.choose();
+                                                return accept;
+                                            }
+                                            return reject;
+                                        }
+                                    }
+                                    segment := Text {
+                                        text: name;
+                                        font-size: 11px;
+                                        font-weight: root.store-grouping == position ? 600 : 400;
+                                        color: root.store-grouping == position ? Palette.foreground : Tones.muted;
+                                        accessible-role: none;
+                                    }
+                                    over-segment := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => { parent.choose(); }
+                                    }
+                                }
                             }
                             ScrollView {
                                 VerticalLayout {
@@ -1304,14 +1346,44 @@ export component Window inherits Window {
                                     alignment: start;
                                     for store in root.stores: VerticalLayout {
                                         spacing: 4px;
+                                        // A store stands inset beneath its group.
+                                        padding-left: store.group ? 0px : 14px;
                                         accessible-role: list-item;
                                         accessible-label: store.id + ", " + store.size + ", " + store.budget;
-                                        HorizontalLayout {
-                                            Text { text: store.id; font-size: 12px; horizontal-stretch: 1; overflow: elide; }
-                                            Text { text: store.size; font-size: 12px; color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground; }
+                                        accessible-expandable: store.group;
+                                        accessible-expanded: store.open;
+                                        accessible-action-default => {
+                                            if (store.group) {
+                                                root.store-toggle(store.id);
+                                            }
+                                        }
+                                        if store.group: GroupHead {
+                                            name: store.id;
+                                            caption: store.budget;
+                                            size: store.size;
+                                            open: store.open;
+                                            size-color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground;
+                                            toggled => { root.store-toggle(store.id); }
+                                        }
+                                        if !store.group: HorizontalLayout {
+                                            height: 16px;
+                                            spacing: 6px;
+                                            Text {
+                                                text: store.id;
+                                                font-size: 12px;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: store.size;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                color: store.over ? Tones.hard : store.absent ? Tones.muted : Palette.foreground;
+                                            }
                                         }
                                         Meter { share: store.share; fill: store.over ? Tones.hard : Tones.normal; }
-                                        Caption { text: store.budget; }
+                                        if !store.group: Caption { text: store.budget; }
                                     }
                                 }
                             }

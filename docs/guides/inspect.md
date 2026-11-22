@@ -181,8 +181,11 @@ replacement affects only the report.
   file, and the kernel names each extent that a file shares. The scan asks
   for the extents of each file of 16 KiB or more, so a smaller clone counts
   in full. On one workstation, that floor kept 89 percent of the
-  correction, and the inspection took 5.6 seconds where it took 4.4
-  seconds before. A file that the scan cannot open counts in full. The
+  correction, and the inspection took 4.8 seconds where it took 3.5
+  seconds before. A file that the scan cannot open counts in full, and
+  the report records the error. A compressed extent counts in each file,
+  because the kernel states its length before compression. Two subvolumes
+  of btrfs that share a block each count it. The
   first file's checkout holds the bytes in a report, so the removal of
   that checkout alone frees less than its figure.
 - **Symbolic links** count as entries, and the scan never follows them. A

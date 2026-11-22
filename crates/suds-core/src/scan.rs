@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::ahead::{Ahead, Body, Claims, Entry, Head, Layout, START_AT, Slot};
-use crate::clones::{self, Extent};
+use crate::clones::{self, Counted, Extent};
 use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
@@ -312,8 +312,9 @@ impl SharedScan {
 /// One entry's metadata, its kind, and whether a mount point stands there.
 pub(crate) struct Probed {
     meta: fs::Metadata,
-    /// Each extent that a regular file shares with another file.
-    shared: Vec<Extent>,
+    /// Each extent that a regular file shares with another file, or the
+    /// reason that the scan could not read the file's extents.
+    shared: io::Result<Vec<Extent>>,
     pub(crate) kind: EntryKind,
     pub(crate) mount: bool,
 }
@@ -325,9 +326,9 @@ struct Walker {
     /// Each hard-linked regular file whose storage the scan has counted under
     /// the root.
     linked: HashSet<(u64, u64)>,
-    /// Each shared extent whose storage the scan has counted under the
+    /// The shared extents whose storage the scan has counted under the
     /// root.
-    cloned: HashSet<Extent>,
+    cloned: Counted,
     error_count: u64,
     errors: Vec<ScanError>,
     mount_count: u64,
@@ -347,7 +348,7 @@ impl Walker {
             device,
             check_file_mounts: false,
             linked: HashSet::new(),
-            cloned: HashSet::new(),
+            cloned: Counted::default(),
             error_count: 0,
             errors: Vec::new(),
             mount_count: 0,
@@ -534,10 +535,16 @@ impl Walker {
         // the traversal reaches under the root contributes its bytes.
         let mut counted_before = 0_u64;
         if counts_storage {
-            for extent in shared {
-                if !self.cloned.insert(*extent) {
-                    counted_before = counted_before.saturating_add(extent.1);
+            match shared {
+                Ok(shared) => {
+                    for extent in shared {
+                        let before = self.cloned.claim(meta.dev(), *extent);
+                        counted_before = counted_before.saturating_add(before);
+                    }
                 }
+                // The file's blocks count in full, and the result states
+                // that the scan could not read which of them it shares.
+                Err(err) => self.record_error(path, err),
             }
         }
         tally.count(*kind, meta, counts_storage, counted_before);
@@ -600,7 +607,7 @@ pub(crate) fn probe_at(
     let shared = if kind == EntryKind::File && !mount {
         clones::shared(path, &meta)
     } else {
-        Vec::new()
+        Ok(Vec::new())
     };
     Ok(Probed {
         meta,
@@ -796,5 +803,29 @@ mod tests {
         // A scan of the clone alone counts the clone's blocks in full.
         let alone = measure_entry(&dir.path().join("b.rlib"), device).measure;
         assert_eq!(alone.allocated_bytes, one);
+    }
+
+    #[test]
+    fn a_file_that_the_scan_cannot_open_counts_in_full_with_an_error() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        use crate::model::ErrorKind;
+
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("a.rlib");
+        fs::write(&file, vec![7_u8; 64 * 1024]).unwrap();
+        fs::set_permissions(&file, Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_ok() {
+            // An administrator opens every file, so no open fails here.
+            return;
+        }
+        let device = fs::metadata(dir.path()).unwrap().dev();
+        let measured = measure_entry(&file, device);
+        assert_eq!(measured.measure.files, 1);
+        assert_eq!(measured.measure.logical_bytes, 64 * 1024);
+        assert_eq!(measured.error_count, 1);
+        assert_eq!(measured.errors[0].kind, ErrorKind::PermissionDenied);
+        assert_eq!(measured.errors[0].path, file);
     }
 }

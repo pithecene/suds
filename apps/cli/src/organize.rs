@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use suds_core::organize::execute::{self, RunReport};
-use suds_core::organize::journal::{self, Journal, JournalState, RunStatus, RunSummary};
+use suds_core::organize::journal::{self, Journal, JournalState, RunKind, RunStatus, RunSummary};
 use suds_core::organize::plan::{MovePlan, MoveRequest, PRECONDITIONS, plan_move};
 use suds_core::roots;
 
@@ -301,10 +301,11 @@ fn write_summaries(out: &mut impl Write, summaries: &[RunSummary]) -> io::Result
             writeln!(out, "               {}", escape(&trim.command))?;
         }
         for unit in &summary.units {
-            let outcome = if unit.reason.is_some() {
-                "failed"
-            } else {
-                "done"
+            let outcome = match (summary.kind, unit.reason.is_some()) {
+                (RunKind::Seed, false) => "cloned",
+                (RunKind::Seed, true) => "not cloned",
+                (_, true) => "failed",
+                (_, false) => "done",
             };
             writeln!(out, "  {outcome:<11}  {}", escape(&unit.step))?;
             if let Some(reason) = &unit.reason {

@@ -23,6 +23,7 @@ pub mod registry;
 pub mod roots;
 pub mod scan;
 pub mod schedule;
+pub mod seed;
 pub mod state;
 pub mod stores;
 pub mod timestamp;

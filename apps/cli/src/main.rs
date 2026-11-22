@@ -9,6 +9,7 @@ mod clients;
 mod organize;
 mod output;
 mod reclaim;
+mod seed;
 mod stores;
 mod table;
 
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
         Command::Journal(args) => organize::journal_command(&args),
         Command::Undo(args) => organize::undo_command(&args),
         Command::Reclaim(args) => reclaim::reclaim_command(&args),
+        Command::Seed(args) => seed::seed_command(&args),
         Command::Stores(args) => stores::stores_command(&args),
         Command::Register(args) => clients::register_command(&args),
         Command::Release(args) => clients::release_command(&args),

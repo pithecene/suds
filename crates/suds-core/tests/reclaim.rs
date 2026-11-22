@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use suds_core::development::{Environment, inspect};
@@ -16,40 +15,11 @@ use suds_core::reclaim::plan::{
 use suds_core::registry::{self, Reading, Standings};
 use tempfile::TempDir;
 
+mod support;
+use support::git;
+
 /// The plan's idle time in these tests.
 const IDLE: u64 = 3600;
-
-fn git(directory: &Path, arguments: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args([
-            "-c",
-            "user.name=Suds",
-            "-c",
-            "user.email=suds@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "tag.gpgsign=false",
-            "-c",
-            "init.defaultBranch=main",
-            // Git's own maintenance removes files in the background after
-            // a commit, which a scan in progress would report as vanished.
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-        ])
-        .args(arguments)
-        .output()
-        .expect("run git");
-    assert!(
-        status.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-}
 
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -1267,15 +1267,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fiemap"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5df22ec34db45457baae5bc0f70f622adbf7aa2408e102fc94409ac47586e7bd"
-dependencies = [
- "bitflags 2.13.2",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4392,7 +4383,6 @@ version = "0.1.6"
 name = "suds-core"
 version = "0.1.6"
 dependencies = [
- "fiemap",
  "rustix 1.1.6",
  "serde",
  "serde_json",

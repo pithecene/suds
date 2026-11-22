@@ -73,7 +73,9 @@ rules hold for every release:
 ## Source Code Conventions
 
 - Write comments that explain the reason for code, not its mechanics.
-- Write no `unsafe` code, because the crate forbids it.
+- Write no `unsafe` code. The workspace denies it, and one function of
+  `clones.rs` holds the single exception: rustix offers the kernel's map
+  of a file's extents through an unsafe call alone.
 - Pin each dependency to an exact version, and state the reason for each
   new dependency in its pull request.
 - Run `task check` before each commit, and `task desktop:check` before a

@@ -64,7 +64,6 @@ const FLOOR: u64 = 16 * 1024;
 pub(crate) fn shared(path: &Path, meta: &Metadata) -> io::Result<Vec<Extent>> {
     use std::os::unix::fs::MetadataExt;
 
-    use fiemap::Fiemap;
     use rustix::fs::{Mode, OFlags, open};
     use rustix::io::Errno;
 
@@ -76,35 +75,144 @@ pub(crate) fn shared(path: &Path, meta: &Metadata) -> io::Result<Vec<Extent>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let file = open(path, flags, Mode::empty())?;
     let mut extents = Vec::new();
-    for extent in Fiemap::new(file) {
-        match extent {
-            Ok(extent) => {
-                if counts(extent.fe_flags) {
-                    extents.push((extent.fe_physical, extent.fe_length));
-                }
-            }
+    let mut request = map::Request::default();
+    loop {
+        match map::read(&file, &mut request) {
+            Ok(()) => {}
             // The filesystem offers no map, so no file of it counts less.
-            Err(err)
-                if [Errno::OPNOTSUPP, Errno::NOTTY, Errno::INVAL]
-                    .iter()
-                    .any(|none| err.raw_os_error() == Some(none.raw_os_error())) =>
-            {
-                return Ok(Vec::new());
-            }
-            Err(err) => return Err(err),
+            Err(Errno::OPNOTSUPP | Errno::NOTTY | Errno::INVAL) => return Ok(Vec::new()),
+            Err(errno) => return Err(errno.into()),
         }
+        let mapped = request.mapped();
+        let Some(last) = mapped.last() else {
+            return Ok(extents);
+        };
+        extents.extend(
+            mapped
+                .iter()
+                .filter(|extent| map::counts(extent.flags))
+                .map(|extent| (extent.physical, extent.length)),
+        );
+        if last.flags & map::LAST != 0 {
+            return Ok(extents);
+        }
+        request.start = last.logical.saturating_add(last.length);
     }
-    Ok(extents)
 }
 
-/// Whether an extent with `flags` counts as shared. An encoded extent
-/// states its length before compression, which exceeds the blocks that it
-/// occupies, so the scan leaves it in each file.
+/// The kernel's map of a file's extents, which Linux names FIEMAP.
 #[cfg(target_os = "linux")]
-fn counts(flags: fiemap::FiemapExtentFlags) -> bool {
-    use fiemap::FiemapExtentFlags as Flags;
+mod map {
+    use std::os::fd::OwnedFd;
 
-    flags.contains(Flags::SHARED) && !flags.intersects(Flags::ENCODED | Flags::UNKNOWN)
+    use rustix::io::Errno;
+    use rustix::ioctl::{Updater, ioctl};
+
+    /// The request's number, which the kernel's headers name
+    /// `FS_IOC_FIEMAP`.
+    const OPCODE: rustix::ioctl::Opcode = 0xC020_660B;
+
+    /// How many extents one request reads.
+    const ROOM: usize = 64;
+
+    /// The file's last extent.
+    pub const LAST: u32 = 0x1;
+    /// The extent's place on the disk is unknown.
+    const UNKNOWN: u32 = 0x2;
+    /// The filesystem compressed or encrypted the extent.
+    const ENCODED: u32 = 0x8;
+    /// Another file holds the extent too.
+    const SHARED: u32 = 0x2000;
+
+    /// One extent, in the kernel's layout of `struct fiemap_extent`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct Mapped {
+        pub logical: u64,
+        pub physical: u64,
+        pub length: u64,
+        reserved_wide: [u64; 2],
+        pub flags: u32,
+        reserved: [u32; 3],
+    }
+
+    /// One request, in the kernel's layout of `struct fiemap` with room
+    /// for its extents behind the header.
+    #[repr(C)]
+    pub struct Request {
+        /// The byte of the file at which the map begins.
+        pub start: u64,
+        length: u64,
+        flags: u32,
+        mapped: u32,
+        room: u32,
+        reserved: u32,
+        extents: [Mapped; ROOM],
+    }
+
+    impl Default for Request {
+        fn default() -> Self {
+            Request {
+                start: 0,
+                length: u64::MAX,
+                // Without the flag of a sync, the request writes no data.
+                flags: 0,
+                mapped: 0,
+                room: ROOM as u32,
+                reserved: 0,
+                extents: [Mapped::default(); ROOM],
+            }
+        }
+    }
+
+    impl Request {
+        /// The extents that the last reading filled.
+        pub fn mapped(&self) -> &[Mapped] {
+            &self.extents[..(self.mapped as usize).min(ROOM)]
+        }
+    }
+
+    /// Reads the extents of `file` from the request's start.
+    #[expect(
+        unsafe_code,
+        reason = "rustix offers the kernel's extent map through its unsafe ioctl alone"
+    )]
+    pub fn read(file: &OwnedFd, request: &mut Request) -> Result<(), Errno> {
+        request.mapped = 0;
+        // SAFETY: the opcode is FIEMAP's. The kernel reads the header of
+        // `struct fiemap` and writes at most `room` extents behind it, and
+        // `Request` holds that header and that many extents in the
+        // kernel's layout.
+        unsafe { ioctl(file, Updater::<OPCODE, Request>::new(request)) }
+    }
+
+    /// Whether an extent with `flags` counts as shared. An encoded extent
+    /// states its length before compression, which exceeds the blocks that
+    /// it occupies, so the scan leaves it in each file.
+    pub fn counts(flags: u32) -> bool {
+        flags & SHARED != 0 && flags & (ENCODED | UNKNOWN) == 0
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{ENCODED, LAST, Mapped, Request, SHARED, UNKNOWN, counts};
+
+        #[test]
+        fn leaves_an_encoded_extent_in_each_file() {
+            assert!(counts(SHARED));
+            assert!(counts(SHARED | LAST));
+            assert!(!counts(LAST));
+            assert!(!counts(SHARED | ENCODED));
+            assert!(!counts(SHARED | UNKNOWN));
+        }
+
+        #[test]
+        fn a_request_holds_the_kernels_layout() {
+            assert_eq!(size_of::<Mapped>(), 56);
+            assert_eq!(size_of::<Request>(), 32 + 64 * 56);
+            assert!(Request::default().mapped().is_empty());
+        }
+    }
 }
 
 /// No other system names a shared extent to a scan.
@@ -134,19 +242,5 @@ mod tests {
         assert_eq!(counted.claim(1, (2100, 10)), 0);
         // Another filesystem numbers its own bytes.
         assert_eq!(counted.claim(2, (1000, 300)), 0);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn leaves_an_encoded_extent_in_each_file() {
-        use fiemap::FiemapExtentFlags as Flags;
-
-        use super::counts;
-
-        assert!(counts(Flags::SHARED));
-        assert!(counts(Flags::SHARED | Flags::LAST));
-        assert!(!counts(Flags::LAST));
-        assert!(!counts(Flags::SHARED | Flags::ENCODED));
-        assert!(!counts(Flags::SHARED | Flags::UNKNOWN | Flags::DELALLOC));
     }
 }

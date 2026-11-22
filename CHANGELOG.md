@@ -13,6 +13,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The arena's audit reads a quota group of btrfs**: `suds arena` and each pressure reading now report a ceiling as enforced where a quota group limits the root's subvolume to the ceiling or less. The audit read no quota group before, so it reported such a root as not enforced. The report of `suds arena --format json` gains the fields `quota_limit_bytes` and `quota_error`.
 
+### Fixed
+
+- **The plan states the removal rule of pnpm's trim**: the plan said that the trim removes each package that no project references. pnpm reads a reference from a hard link, so on a filesystem that clones files the trim removes every package. The plan and the guide now state the rule of pnpm.
+
 ## [0.1.6] - 2026-11-21
 
 ### Added

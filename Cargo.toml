@@ -28,4 +28,4 @@ slint-build = "=1.19.0"
 i-slint-backend-testing = "=1.19.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"

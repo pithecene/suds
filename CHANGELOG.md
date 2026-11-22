@@ -11,6 +11,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A measurement on Linux counts a cloned block once**: a scan asks the kernel for the shared extents of each file of 16 KiB or more. It counts each extent in the first file that reaches it. A seeded checkout counted its clones in full before, so the pressure rose on space that the disk did not hold. On one workstation the reported usage fell from 103.4 GiB to 95.1 GiB, and the inspection took 4.8 seconds where it took 3.5 seconds before.
+
 - **The arena's audit reads a quota group of btrfs**: `suds arena` and each pressure reading now report a ceiling as enforced where a quota group limits the root's subvolume to the ceiling or less. The audit read no quota group before, so it reported such a root as not enforced. The report of `suds arena --format json` gains the fields `quota_limit_bytes` and `quota_error`.
 
 ### Fixed

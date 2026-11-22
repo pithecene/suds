@@ -23,10 +23,13 @@ rules hold for every release:
 - Mutate nothing outside an explicit plan. Each operation states its
   preconditions and its evidence, and Suds writes a journal entry for each
   operation.
-- Apply a plan only after a person inspects it. The one exception is a plan
+- Apply a plan only after a person inspects it. One exception is a plan
   that removes derived state inside the development arena, which the
   owner's standing approval admits
-  ([0002](docs/decisions/0002-development-storage-allocation.md)).
+  ([0002](docs/decisions/0002-development-storage-allocation.md)). The
+  other is a plan that clones derived state to a path that holds nothing,
+  which a client may apply
+  ([0006](docs/decisions/0006-seeded-build-state.md)).
 - Treat state as derived only on proof from its ecosystem's own layout.
   An uncommitted change, an unpushed commit, and a main checkout never
   count as derived state.

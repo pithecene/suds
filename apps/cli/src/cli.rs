@@ -42,6 +42,11 @@ pub enum Command {
     /// permanent.
     Reclaim(ReclaimArgs),
 
+    /// Plan the seed of a checkout's build state from another checkout of
+    /// its repository, and clone it with `--apply`. A clone shares its
+    /// blocks with its source until one of the two changes.
+    Seed(SeedArgs),
+
     /// Plan each shared store's trim to its budget, and run the trims with
     /// `--apply`. Each trim is a command of the store's own program.
     Stores(StoresArgs),
@@ -99,6 +104,34 @@ pub struct HoldArgs {
     /// remote holds, though perhaps by another commit, as after a squash.
     #[arg(long, value_name = "COMMIT")]
     pub landed: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SeedArgs {
+    /// The checkout that receives the build state.
+    #[arg(value_name = "CHECKOUT")]
+    pub checkout: PathBuf,
+
+    /// The checkout whose build state Suds clones. Without the option, Suds
+    /// takes the checkout of the repository whose build state changed last.
+    #[arg(long, value_name = "CHECKOUT")]
+    pub from: Option<PathBuf>,
+
+    /// The client that asks, such as `bosun`, for the journal.
+    #[arg(long, value_name = "NAME")]
+    pub client: Option<String>,
+
+    /// Clone what the plan names. Without the option, Suds prints the plan
+    /// and changes nothing.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// The output format.
+    #[arg(long, value_enum, default_value_t = Format::Table)]
+    pub format: Format,
+
+    #[command(flatten)]
+    pub journal: JournalOption,
 }
 
 #[derive(Debug, Args)]

@@ -1,0 +1,565 @@
+//! Seeds a checkout's build state from another checkout of its repository.
+//!
+//! A new linked checkout holds no build state, so its first build compiles
+//! each dependency again. This module clones the Cargo build state of a
+//! built checkout into a checkout that holds none. A clone shares its
+//! blocks with its source until one of the two changes. A seed changes no
+//! existing file and copies no block: where the filesystem clones no file,
+//! it writes nothing.
+
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+
+use rustix::fs::OFlags;
+use serde::{Deserialize, Serialize};
+
+use crate::development::{self, Ecosystem};
+use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
+use crate::organize::native::NativePath;
+use crate::organize::plan::new_id;
+use crate::reclaim::git::Git;
+
+/// The schema tag of a seed plan.
+pub const SEED_PLAN_SCHEMA: &str = "suds.seed-plan/v1";
+
+/// The schema tag of a seed run's result.
+pub const SEED_RUN_SCHEMA: &str = "suds.seed-run/v1";
+
+/// The unit of `st_blocks` on Linux and on macOS.
+const BLOCK_UNIT: u64 = 512;
+
+/// One directory of build state that the plan clones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedClone {
+    pub from: NativePath,
+    pub to: NativePath,
+    pub ecosystem: Ecosystem,
+    /// The allocated bytes of the source, which both directories share
+    /// after the clone.
+    pub shared_bytes: u64,
+}
+
+/// A checkout or a directory that the plan takes nothing from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Passed {
+    pub path: NativePath,
+    pub reason: String,
+}
+
+/// What a seed would clone into one checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedPlan {
+    pub schema: String,
+    pub id: String,
+    /// The checkout that receives the build state.
+    pub destination: NativePath,
+    /// The checkout whose build state the plan clones, or none when no
+    /// checkout of the repository offers any.
+    pub source: Option<NativePath>,
+    pub clones: Vec<SeedClone>,
+    pub passed: Vec<Passed>,
+}
+
+impl SeedPlan {
+    pub fn shared_bytes(&self) -> u64 {
+        self.clones
+            .iter()
+            .fold(0, |sum, clone| sum.saturating_add(clone.shared_bytes))
+    }
+}
+
+/// The longest lock file that a plan compares.
+const LOCK_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The build state of one checkout that could seed another.
+struct Offer {
+    checkout: PathBuf,
+    clones: Vec<SeedClone>,
+    /// The count of directories whose lock file equals the destination's,
+    /// so that the destination's build asks for the same dependencies.
+    same_locks: usize,
+    bytes: u64,
+    newest: Option<String>,
+}
+
+/// Whether the two directories hold a `Cargo.lock` of the same bytes. The
+/// lock file names each dependency's version, and with it each artifact
+/// that the destination's build can take from the clone.
+fn same_lock(a: &Path, b: &Path) -> bool {
+    let read = |dir: &Path| {
+        let path = dir.join("Cargo.lock");
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() || meta.len() > LOCK_LIMIT {
+            return None;
+        }
+        fs::read(&path).ok()
+    };
+    match (read(a), read(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Plans the seed of the checkout at `destination`. With `from`, the plan
+/// takes build state from that checkout alone. Without it, the plan takes
+/// the checkout of the same repository whose build state changed last.
+pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<SeedPlan, String> {
+    if !development::is_checkout(destination) {
+        return Err(format!(
+            "{} holds no checkout, so Suds seeds nothing there",
+            destination.display()
+        ));
+    }
+    let checkouts = git.worktrees(destination)?;
+    let candidates: Vec<PathBuf> = match from {
+        Some(from) => {
+            if !checkouts.iter().any(|checkout| checkout == from) {
+                return Err(format!(
+                    "{} is no checkout of the repository of {}",
+                    from.display(),
+                    destination.display()
+                ));
+            }
+            vec![from.to_path_buf()]
+        }
+        None => checkouts,
+    };
+    let mut passed = Vec::new();
+    let mut offers = Vec::new();
+    for checkout in candidates {
+        if checkout == destination {
+            continue;
+        }
+        let offer = offer_of(&checkout, destination, &mut passed);
+        if !offer.clones.is_empty() {
+            offers.push(offer);
+        }
+    }
+    // A build takes an artifact only for the same version of a dependency,
+    // so a checkout with the destination's lock file comes first. A larger
+    // source holds more and costs nothing, because a clone occupies no space.
+    offers.sort_by(|a, b| {
+        b.same_locks
+            .cmp(&a.same_locks)
+            .then(b.bytes.cmp(&a.bytes))
+            .then(b.newest.cmp(&a.newest))
+            .then(a.checkout.cmp(&b.checkout))
+    });
+    let mut offers = offers.into_iter();
+    let chosen = offers.next();
+    for other in offers {
+        passed.push(Passed {
+            path: NativePath::new(other.checkout),
+            reason: "the plan takes the build state of another checkout".to_owned(),
+        });
+    }
+    let (source, clones) = match chosen {
+        Some(offer) => (Some(NativePath::new(offer.checkout)), offer.clones),
+        None => (None, Vec::new()),
+    };
+    Ok(SeedPlan {
+        schema: SEED_PLAN_SCHEMA.to_owned(),
+        id: new_id("seed"),
+        destination: NativePath::new(destination.to_path_buf()),
+        source,
+        clones,
+        passed,
+    })
+}
+
+/// The build state of `checkout` that the destination can take, with the
+/// reason for each directory that it cannot.
+fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Offer {
+    let mut offer = Offer {
+        checkout: checkout.to_path_buf(),
+        clones: Vec::new(),
+        same_locks: 0,
+        bytes: 0,
+        newest: None,
+    };
+    for state in development::build_states(checkout) {
+        let pass = |reason: String, passed: &mut Vec<Passed>| {
+            passed.push(Passed {
+                path: NativePath::new(state.path.clone()),
+                reason,
+            });
+        };
+        if state.ecosystem != Ecosystem::Cargo {
+            pass(
+                format!(
+                    "Suds seeds the build state of Cargo alone, and this is the build state of {}",
+                    state.ecosystem.label()
+                ),
+                passed,
+            );
+            continue;
+        }
+        let Ok(relative) = state.path.strip_prefix(checkout) else {
+            continue;
+        };
+        let to = destination.join(relative);
+        match refusal(&state.path, &to) {
+            Some(reason) => pass(reason, passed),
+            None => {
+                if let (Some(source), Some(target)) = (state.path.parent(), to.parent())
+                    && same_lock(source, target)
+                {
+                    offer.same_locks += 1;
+                }
+                offer.bytes = offer.bytes.saturating_add(state.measure.allocated_bytes);
+                offer.newest = offer.newest.max(state.measure.newest_modified.clone());
+                offer.clones.push(SeedClone {
+                    from: NativePath::new(state.path.clone()),
+                    to: NativePath::new(to),
+                    ecosystem: state.ecosystem,
+                    shared_bytes: state.measure.allocated_bytes,
+                });
+            }
+        }
+    }
+    offer
+}
+
+/// The reason that Suds clones nothing from `from` to `to`, or none when
+/// each condition of a clone holds.
+fn refusal(from: &Path, to: &Path) -> Option<String> {
+    match fs::symlink_metadata(to) {
+        Ok(_) => {
+            return Some(format!(
+                "{} exists, and a seed changes no existing entry",
+                to.display()
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Some(format!("could not examine {}: {err}", to.display())),
+    }
+    let parent = to.parent()?;
+    // Cargo writes its build state beside the manifest, so the manifest
+    // proves that the destination's build would use the directory.
+    let manifest = parent.join("Cargo.toml");
+    if !fs::symlink_metadata(&manifest).is_ok_and(|meta| meta.is_file()) {
+        return Some(format!(
+            "{} holds no Cargo.toml, so no build there would use the directory",
+            parent.display()
+        ));
+    }
+    let devices = fs::symlink_metadata(from)
+        .and_then(|source| fs::symlink_metadata(parent).map(|target| (source.dev(), target.dev())));
+    match devices {
+        Ok((source, target)) if source != target => {
+            return Some(
+                "the two checkouts lie on different filesystems, and no clone crosses one"
+                    .to_owned(),
+            );
+        }
+        Ok(_) => {}
+        Err(err) => return Some(format!("could not examine {}: {err}", from.display())),
+    }
+    Quiet::of(from).err()
+}
+
+/// The locks that keep Cargo from writing a build state during a clone.
+/// Cargo locks a file of each profile's directory for a whole build. A
+/// shared lock on each file proves that no build runs, and it holds a new
+/// build back until the clone ends.
+struct Quiet {
+    _locks: Vec<File>,
+}
+
+impl Quiet {
+    fn of(build_state: &Path) -> Result<Quiet, String> {
+        const LOCK: &str = ".cargo-lock";
+        let mut paths = vec![build_state.join(LOCK)];
+        let entries = fs::read_dir(build_state)
+            .map_err(|err| format!("could not list {}: {err}", build_state.display()))?;
+        for entry in entries.flatten() {
+            paths.push(entry.path().join(LOCK));
+            // A build for another target keeps its profiles one level deeper.
+            if let Ok(inner) = fs::read_dir(entry.path()) {
+                paths.extend(inner.flatten().map(|entry| entry.path().join(LOCK)));
+            }
+        }
+        let mut locks = Vec::new();
+        for path in paths {
+            let opened = OpenOptions::new()
+                .read(true)
+                .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+                .open(&path);
+            let Ok(file) = opened else {
+                continue;
+            };
+            if file.try_lock_shared().is_err() {
+                return Err(format!(
+                    "a build holds the lock {}, so the directory may change during a clone",
+                    path.display()
+                ));
+            }
+            locks.push(file);
+        }
+        Ok(Quiet { _locks: locks })
+    }
+}
+
+/// The result of one seed run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SeedReport {
+    pub schema: String,
+    pub run: String,
+    pub plan: String,
+    pub status: RunStatus,
+    /// The allocated bytes that the cloned directories share with their
+    /// sources.
+    pub shared_bytes: u64,
+    pub clones: Vec<Cloned>,
+}
+
+/// The outcome of one directory of the plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Cloned {
+    pub to: NativePath,
+    pub cloned: bool,
+    pub files: u64,
+    pub shared_bytes: u64,
+    /// The reason that the run cloned nothing to this path.
+    pub refusal: Option<String>,
+}
+
+/// Records `plan` and clones each directory that it names. The run checks
+/// each directory's conditions again, and one refusal leaves the others to
+/// proceed. A journal failure stops the run.
+pub fn apply(
+    journal: &mut Journal,
+    plan: &SeedPlan,
+    client: Option<&str>,
+) -> Result<SeedReport, JournalError> {
+    let run = new_id("run");
+    journal.append(Event::SeedStarted {
+        run: run.clone(),
+        plan: plan.clone(),
+        client: client.map(str::to_owned),
+    })?;
+    let mut clones = Vec::new();
+    let mut shared_bytes = 0_u64;
+    for clone in &plan.clones {
+        let (from, to) = (clone.from.as_path(), clone.to.as_path());
+        let outcome = match refusal(from, to) {
+            Some(reason) => Err(reason),
+            None => clone_build_state(from, to, &run),
+        };
+        match outcome {
+            Ok(counts) => {
+                journal.append(Event::SeedCloned {
+                    run: run.clone(),
+                    path: clone.to.clone(),
+                    files: counts.files,
+                    shared_bytes: counts.bytes,
+                })?;
+                shared_bytes = shared_bytes.saturating_add(counts.bytes);
+                clones.push(Cloned {
+                    to: clone.to.clone(),
+                    cloned: true,
+                    files: counts.files,
+                    shared_bytes: counts.bytes,
+                    refusal: None,
+                });
+            }
+            Err(reason) => {
+                journal.append(Event::SeedRefused {
+                    run: run.clone(),
+                    path: clone.to.clone(),
+                    reason: reason.clone(),
+                })?;
+                clones.push(Cloned {
+                    to: clone.to.clone(),
+                    cloned: false,
+                    files: 0,
+                    shared_bytes: 0,
+                    refusal: Some(reason),
+                });
+            }
+        }
+    }
+    let done = clones.iter().filter(|clone| clone.cloned).count();
+    let status = RunStatus::from_counts(done, clones.len());
+    journal.append(Event::SeedCompleted {
+        run: run.clone(),
+        status,
+    })?;
+    Ok(SeedReport {
+        schema: SEED_RUN_SCHEMA.to_owned(),
+        run,
+        plan: plan.id.clone(),
+        status,
+        shared_bytes,
+        clones,
+    })
+}
+
+#[derive(Default)]
+struct Counts {
+    files: u64,
+    bytes: u64,
+}
+
+/// Clones the build state at `from` to `to`. The run builds the clone
+/// under another name and renames it once it is whole, so a build in the
+/// destination never meets a part of one. A failure removes what the run
+/// built, and it leaves `to` absent.
+fn clone_build_state(from: &Path, to: &Path, run: &str) -> Result<Counts, String> {
+    // The source is build state by the layout of its own checkout, as at
+    // the plan's time.
+    if development::build_state_at(from) != Some(Ecosystem::Cargo) {
+        return Err(format!(
+            "{} is no longer the build state of Cargo",
+            from.display()
+        ));
+    }
+    let quiet = Quiet::of(from)?;
+    let parent = to.parent().ok_or("the destination has no parent")?;
+    let staged = parent.join(format!(".suds-seed-{run}"));
+    let cloned = clone_tree(from, &staged).and_then(|counts| {
+        fs::rename(&staged, to)
+            .map(|()| counts)
+            .map_err(|err| format!("could not name the clone {}: {err}", to.display()))
+    });
+    drop(quiet);
+    if cloned.is_err() {
+        // The directory holds only what this run wrote.
+        let _ = fs::remove_dir_all(&staged);
+    }
+    cloned
+}
+
+/// Clones each directory, each regular file, and each symbolic link beneath
+/// `from` to `to`, which must not exist. It follows no link and crosses no
+/// mount point.
+fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
+    let root = fs::symlink_metadata(from)
+        .map_err(|err| format!("could not examine {}: {err}", from.display()))?;
+    let mut counts = Counts::default();
+    // Cargo gives an artifact a second name through a hard link. The clone
+    // keeps the two names on one file, and it counts the file once.
+    let mut linked: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, target)) = pending.pop() {
+        fs::create_dir(&target)
+            .map_err(|err| format!("could not create {}: {err}", target.display()))?;
+        let entries = fs::read_dir(&source)
+            .map_err(|err| format!("could not list {}: {err}", source.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("could not list {}: {err}", source.display()))?;
+            let (source, target) = (entry.path(), target.join(entry.file_name()));
+            let meta = fs::symlink_metadata(&source)
+                .map_err(|err| format!("could not examine {}: {err}", source.display()))?;
+            if meta.dev() != root.dev() {
+                return Err(format!(
+                    "{} lies on another filesystem, and no clone crosses one",
+                    source.display()
+                ));
+            }
+            let kind = meta.file_type();
+            if kind.is_dir() {
+                pending.push((source, target));
+            } else if kind.is_file() {
+                if meta.nlink() > 1 {
+                    if let Some(first) = linked.get(&(meta.dev(), meta.ino())) {
+                        fs::hard_link(first, &target)
+                            .map_err(|err| format!("could not link {}: {err}", target.display()))?;
+                        continue;
+                    }
+                    linked.insert((meta.dev(), meta.ino()), target.clone());
+                }
+                clone_file(&source, &target, &meta)?;
+                counts.files = counts.files.saturating_add(1);
+                counts.bytes = counts
+                    .bytes
+                    .saturating_add(meta.blocks().saturating_mul(BLOCK_UNIT));
+            } else if kind.is_symlink() {
+                let link = fs::read_link(&source)
+                    .map_err(|err| format!("could not read {}: {err}", source.display()))?;
+                std::os::unix::fs::symlink(&link, &target)
+                    .map_err(|err| format!("could not create {}: {err}", target.display()))?;
+            }
+            // A socket or a pipe holds no build output, so the clone leaves
+            // it out.
+        }
+    }
+    Ok(counts)
+}
+
+/// The times of the source, which Cargo compares with each source file's
+/// time to decide what it compiles again. A clone with a new time would
+/// read as newer than a source file that changed since the seed's build.
+fn times_of(meta: &fs::Metadata) -> rustix::fs::Timestamps {
+    let time = |seconds: i64, nanoseconds: i64| rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: nanoseconds as _,
+    };
+    rustix::fs::Timestamps {
+        last_access: time(meta.atime(), meta.atime_nsec()),
+        last_modification: time(meta.mtime(), meta.mtime_nsec()),
+    }
+}
+
+/// The text of a failed clone. A filesystem that clones no file answers
+/// with one of a few errors, and the text names that cause.
+fn unclonable(source: &Path, err: &io::Error) -> String {
+    use rustix::io::Errno;
+    let unsupported = [
+        Errno::OPNOTSUPP,
+        Errno::NOTTY,
+        Errno::XDEV,
+        Errno::INVAL,
+        Errno::NOSYS,
+    ]
+    .iter()
+    .any(|errno| err.raw_os_error() == Some(errno.raw_os_error()));
+    if unsupported {
+        format!(
+            "the filesystem of {} clones no file, and a seed copies none: {err}",
+            source.display()
+        )
+    } else {
+        format!("could not clone {}: {err}", source.display())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, target: &Path, meta: &fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+        .open(source)
+        .map_err(|err| format!("could not open {}: {err}", source.display()))?;
+    let created = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(meta.permissions().mode())
+        .open(target)
+        .map_err(|err| format!("could not create {}: {err}", target.display()))?;
+    rustix::fs::ioctl_ficlone(&created, &opened)
+        .map_err(|errno| unclonable(source, &errno.into()))?;
+    rustix::fs::futimens(&created, &times_of(meta))
+        .map_err(|errno| format!("could not set the times of {}: {errno}", target.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn clone_file(source: &Path, target: &Path, meta: &fs::Metadata) -> Result<(), String> {
+    use rustix::fs::{AtFlags, CWD, CloneFlags};
+
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+        .open(source)
+        .map_err(|err| format!("could not open {}: {err}", source.display()))?;
+    rustix::fs::fclonefileat(&opened, CWD, target, CloneFlags::empty())
+        .map_err(|errno| unclonable(source, &errno.into()))?;
+    rustix::fs::utimensat(CWD, target, &times_of(meta), AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|errno| format!("could not set the times of {}: {errno}", target.display()))
+}

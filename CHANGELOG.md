@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The `seed` command gives a new checkout another checkout's build state**: `suds seed CHECKOUT --apply` clones Cargo's build state from a checkout of the same repository. A clone shares its blocks with its source. On one workstation, a seed of 5.4 GiB took 0.6 seconds and 11 MiB, and the first build compiled 5 packages where it compiled 378 before. A seed changes no existing entry, and it writes nothing on a filesystem that clones no file.
+
 ## [0.1.5] - 2026-11-21
 
 ### Added

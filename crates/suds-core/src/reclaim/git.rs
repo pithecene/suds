@@ -82,6 +82,17 @@ impl Git {
         Ok(output.stdout)
     }
 
+    /// Each checkout of the repository of `checkout`, the main one first,
+    /// as Git lists them.
+    pub fn worktrees(&self, checkout: &Path) -> Result<Vec<PathBuf>, String> {
+        let listed = self.run_bytes(checkout, &["worktree", "list", "--porcelain", "-z"], None)?;
+        Ok(listed
+            .split(|byte| *byte == 0)
+            .filter_map(|field| field.strip_prefix(b"worktree "))
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+            .collect())
+    }
+
     /// Whether the checkout holds no changed, staged, or untracked file.
     pub fn is_clean(&self, checkout: &Path) -> Result<bool, String> {
         let status = self.run(

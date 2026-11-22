@@ -25,6 +25,7 @@ use crate::organize::native::NativePath;
 use crate::organize::plan::{MovePlan, Refusal, RefusalCode};
 use crate::reclaim::execute::Authority;
 use crate::reclaim::plan::ReclaimPlan;
+use crate::seed::SeedPlan;
 use crate::state::Directories;
 use crate::timestamp;
 
@@ -205,6 +206,29 @@ pub enum Event {
         reason: String,
     },
     UnitsCompleted {
+        run: String,
+        status: RunStatus,
+    },
+    /// Suds is about to clone build state into a checkout, for the client
+    /// that asked, or for the person who ran the command.
+    SeedStarted {
+        run: String,
+        plan: SeedPlan,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+    },
+    SeedCloned {
+        run: String,
+        path: NativePath,
+        files: u64,
+        shared_bytes: u64,
+    },
+    SeedRefused {
+        run: String,
+        path: NativePath,
+        reason: String,
+    },
+    SeedCompleted {
         run: String,
         status: RunStatus,
     },
@@ -615,6 +639,9 @@ pub struct JournalState {
     pub stores: Vec<StoresState>,
     /// The runs that placed a scheduler's units, in the same order.
     pub units: Vec<UnitsState>,
+    /// The runs that seeded a checkout's build state, in the same order. A
+    /// step names a directory that the run cloned.
+    pub seeds: Vec<UnitsState>,
 }
 
 /// One run that placed a scheduler's units.
@@ -626,6 +653,19 @@ pub struct UnitsState {
     pub started_at: String,
     pub steps: Vec<UnitStepSummary>,
     pub completed: Option<RunStatus>,
+}
+
+impl UnitsState {
+    /// A run that the record started, with no step yet.
+    fn started(run: &str, record: &Record) -> Self {
+        UnitsState {
+            run: run.to_owned(),
+            sequence: record.sequence,
+            started_at: record.at.clone(),
+            steps: Vec::new(),
+            completed: None,
+        }
+    }
 }
 
 /// One stores run's state.
@@ -866,13 +906,7 @@ impl JournalState {
                     state.completed = Some(*status);
                 }
             }
-            Event::UnitsStarted { run, .. } => self.units.push(UnitsState {
-                run: run.clone(),
-                sequence: record.sequence,
-                started_at: record.at.clone(),
-                steps: Vec::new(),
-                completed: None,
-            }),
+            Event::UnitsStarted { run, .. } => self.units.push(UnitsState::started(run, record)),
             Event::UnitPlaced { run, path } => self.unit_step(run, path.display(), None),
             Event::UnitCommandRan { run, command } => self.unit_step(run, command.clone(), None),
             Event::UnitStepFailed { run, step, reason } => {
@@ -883,6 +917,22 @@ impl JournalState {
                     state.completed = Some(*status);
                 }
             }
+            Event::SeedStarted { run, .. } => self.seeds.push(UnitsState::started(run, record)),
+            Event::SeedCloned { run, path, .. } => self.seed_step(run, path.display(), None),
+            Event::SeedRefused { run, path, reason } => {
+                self.seed_step(run, path.display(), Some(reason.clone()));
+            }
+            Event::SeedCompleted { run, status } => {
+                if let Some(state) = self.seeds.iter_mut().find(|state| state.run == *run) {
+                    state.completed = Some(*status);
+                }
+            }
+        }
+    }
+
+    fn seed_step(&mut self, run: &str, step: String, reason: Option<String>) {
+        if let Some(state) = self.seeds.iter_mut().find(|state| state.run == run) {
+            state.steps.push(UnitStepSummary { step, reason });
         }
     }
 
@@ -948,6 +998,11 @@ impl JournalState {
                 self.units
                     .iter()
                     .map(|run| (run.sequence, units_summary(run))),
+            )
+            .chain(
+                self.seeds
+                    .iter()
+                    .map(|run| (run.sequence, seed_summary(run))),
             )
             .chain(self.move_summaries())
             .collect();
@@ -1050,7 +1105,8 @@ pub struct RunSummary {
     pub removals: Vec<RemovalSummary>,
     /// For a stores run, each store that the run trimmed.
     pub trims: Vec<StoreTrimSummary>,
-    /// For a run that placed a scheduler's units, each of its steps.
+    /// For a run that placed a scheduler's units, each of its steps. For a
+    /// run that seeded a checkout, each directory that it reached.
     pub units: Vec<UnitStepSummary>,
 }
 
@@ -1114,8 +1170,15 @@ fn units_summary(run: &UnitsState) -> RunSummary {
     }
 }
 
-/// What a run did: it moved entries, removed derived state, trimmed stores, or placed a
-/// scheduler's units.
+fn seed_summary(run: &UnitsState) -> RunSummary {
+    RunSummary {
+        units: run.steps.clone(),
+        ..plain_summary(RunKind::Seed, &run.run, &run.started_at, run.completed)
+    }
+}
+
+/// What a run did: it moved entries, removed derived state, trimmed stores, placed a
+/// scheduler's units, or seeded a checkout's build state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
@@ -1123,6 +1186,7 @@ pub enum RunKind {
     Reclaim,
     Stores,
     Schedule,
+    Seed,
 }
 
 /// One removal of a reclaim run.

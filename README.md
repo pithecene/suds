@@ -74,6 +74,10 @@ nothing without `--apply`. The journal records each run, and
   that its ecosystem's layout proves and that no process uses. It also
   removes a linked worktree that Git finds clean and that a remote holds →
   [reclamation guide](docs/guides/reclaim.md)
+- **Seeds a new checkout's build state**: the `suds seed` command clones
+  the Cargo build state of a built checkout into a new one. A clone shares
+  its blocks with its source, so it occupies almost no space →
+  [seeding guide](docs/guides/seed.md)
 - **Holds stores to budgets**: the `suds stores` command trims the stores of
   Go, pnpm, ccache, mise, and Docker through each store's own program →
   [store budgets guide](docs/guides/stores.md)
@@ -97,9 +101,9 @@ nothing without `--apply`. The journal records each run, and
 
 ## Guarantees
 
-- **No change without a plan**: Suds moves an entry or removes a directory
-  only through a recorded plan, and it copies and overwrites nothing. It
-  deletes only what a recorded reclaim plan names.
+- **No change without a plan**: Suds moves an entry, removes a directory,
+  or clones build state only through a recorded plan, and it copies and
+  overwrites nothing. It deletes only what a recorded reclaim plan names.
 - **A journal of each run**: the journal records each step of each run, and
   the `suds undo` command returns each entry that a run moved.
 - **Each store's own program**: Suds removes no entry of a store itself.
@@ -107,7 +111,8 @@ nothing without `--apply`. The journal records each run, and
 - **Metadata alone**: Suds reads metadata and directory listings, and it
   reads no extended attribute. The development profile opens the `.git`
   file of each linked checkout, and no other inspection opens a regular
-  file.
+  file. The `seed` command compares the `Cargo.lock` of two checkouts and
+  clones the files of build state.
 - **No network and no privilege**: Suds sends no telemetry, makes no
   network request, and never requests elevated privileges.
 - **No system path**: the default profile holds no system-owned path. For
@@ -127,6 +132,7 @@ states the rules that bind each operation that changes a file.
 | :--- | :--- |
 | The `suds inspect` command, its profiles, and its JSON document | [Inspection guide](docs/guides/inspect.md) |
 | Removing build output and landed worktrees | [Reclamation guide](docs/guides/reclaim.md) |
+| Seeding a new checkout's build state | [Seeding guide](docs/guides/seed.md) |
 | Budgets of the shared stores | [Store budgets guide](docs/guides/stores.md) |
 | The registry of clients, the pressure, and the schedule | [Clients and schedule guide](docs/guides/maintenance.md) |
 | The ceiling and its enforcement | [Arena guide](docs/guides/arena.md) |

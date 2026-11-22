@@ -496,6 +496,35 @@ fn claim(
     Some(Claim::Build(ecosystem))
 }
 
+/// Whether the layout of `dir` proves a checkout, main or linked.
+pub(crate) fn is_checkout(dir: &Path) -> bool {
+    matches!(claim_at(dir, false), Some(Claim::Checkout(..)))
+}
+
+/// Each directory of build state beneath `checkout`, measured in a scan of
+/// its own. A checkout beneath it keeps its own build state.
+pub(crate) fn build_states(checkout: &Path) -> Vec<BuildState> {
+    let mut scan = SharedScan::default();
+    let claims = Arc::new(|entry: &Entry<'_>| claim_of(entry, true).is_some());
+    let Some(bounded) = scan.measure(checkout, claims) else {
+        return Vec::new();
+    };
+    let mut states = Vec::new();
+    for dir in bounded.set_aside {
+        if let Some(Claim::Build(ecosystem)) = claim_at(&dir, true) {
+            let build = measure_build(&mut scan, &dir, ecosystem);
+            states.push(BuildState {
+                path: dir,
+                ecosystem,
+                measure: build.measure,
+                survey: build.survey,
+                repositories: build.fetched,
+            });
+        }
+    }
+    states
+}
+
 /// The ecosystem whose layout proves that `dir` is build state beneath a
 /// checkout.
 pub(crate) fn build_state_at(dir: &Path) -> Option<Ecosystem> {

@@ -17,6 +17,7 @@ fn kind(kind: RunKind) -> (&'static str, [&'static str; 3]) {
         RunKind::Reclaim => ("Reclaim", ["directory", "directories", "removed"]),
         RunKind::Stores => ("Store trim", ["store", "stores", "trimmed"]),
         RunKind::Schedule => ("Schedule", ["step", "steps", "done"]),
+        RunKind::Seed => ("Seed", ["directory", "directories", "cloned"]),
     }
 }
 
@@ -117,6 +118,8 @@ fn step(kind: RunKind, step: &Step, home: Option<&str>) -> StepItem {
         (RunKind::Stores, false) => format!("not trimmed · {note}"),
         (RunKind::Schedule, true) => "done".to_owned(),
         (RunKind::Schedule, false) => format!("failed · {note}"),
+        (RunKind::Seed, true) => "cloned".to_owned(),
+        (RunKind::Seed, false) => format!("not cloned · {note}"),
     };
     let path = short(&step.subject, home);
     StepItem {

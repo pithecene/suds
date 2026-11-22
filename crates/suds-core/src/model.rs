@@ -110,7 +110,8 @@ pub struct Measure {
     /// The sum of regular-file sizes, counting each hard-linked file once.
     pub logical_bytes: u64,
     /// The blocks that every entry occupies, counting each hard-linked file
-    /// once. The figure is an estimate (see the inspection guide).
+    /// once, and on Linux each cloned block once. The figure is an estimate
+    /// (see the inspection guide).
     pub allocated_bytes: u64,
     pub files: u64,
     pub directories: u64,

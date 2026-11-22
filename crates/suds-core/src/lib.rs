@@ -11,6 +11,7 @@ compile_error!("Suds supports macOS and Linux only.");
 
 mod ahead;
 pub mod arena;
+mod clones;
 pub mod development;
 pub mod inspection;
 pub mod maintain;

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::ahead::{Ahead, Body, Claims, Entry, Head, Layout, START_AT, Slot};
+use crate::clones::{self, Counted, Extent};
 use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
 use crate::platform::RootSpec;
@@ -311,6 +312,9 @@ impl SharedScan {
 /// One entry's metadata, its kind, and whether a mount point stands there.
 pub(crate) struct Probed {
     meta: fs::Metadata,
+    /// Each extent that a regular file shares with another file, or the
+    /// reason that the scan could not read the file's extents.
+    shared: io::Result<Vec<Extent>>,
     pub(crate) kind: EntryKind,
     pub(crate) mount: bool,
 }
@@ -322,6 +326,9 @@ struct Walker {
     /// Each hard-linked regular file whose storage the scan has counted under
     /// the root.
     linked: HashSet<(u64, u64)>,
+    /// The shared extents whose storage the scan has counted under the
+    /// root.
+    cloned: Counted,
     error_count: u64,
     errors: Vec<ScanError>,
     mount_count: u64,
@@ -341,6 +348,7 @@ impl Walker {
             device,
             check_file_mounts: false,
             linked: HashSet::new(),
+            cloned: Counted::default(),
             error_count: 0,
             errors: Vec::new(),
             mount_count: 0,
@@ -500,7 +508,12 @@ impl Walker {
     /// Measures one probed entry without descending into it. A mount point
     /// counts as skipped, so no boundary sets one aside.
     fn count(&mut self, path: &Path, probed: &Probed, tally: &mut Tally) -> Option<EntryRevision> {
-        let Probed { meta, kind, mount } = probed;
+        let Probed {
+            meta,
+            shared,
+            kind,
+            mount,
+        } = probed;
         if *mount {
             self.mount_count = self.mount_count.saturating_add(1);
             if self.mounts.len() < SAMPLE_LIMIT {
@@ -518,7 +531,23 @@ impl Walker {
             self.first_foreign_directory
                 .get_or_insert_with(|| path.to_path_buf());
         }
-        tally.count(*kind, meta, counts_storage);
+        // A cloned extent stores its data once, so only the first file that
+        // the traversal reaches under the root contributes its bytes.
+        let mut counted_before = 0_u64;
+        if counts_storage {
+            match shared {
+                Ok(shared) => {
+                    for extent in shared {
+                        let before = self.cloned.claim(meta.dev(), *extent);
+                        counted_before = counted_before.saturating_add(before);
+                    }
+                }
+                // The file's blocks count in full, and the result states
+                // that the scan could not read which of them it shares.
+                Err(err) => self.record_error(path, err),
+            }
+        }
+        tally.count(*kind, meta, counts_storage, counted_before);
         Some(EntryRevision::from_metadata(meta))
     }
 
@@ -575,7 +604,17 @@ pub(crate) fn probe_at(
     if !chosen && !mount && (kind == EntryKind::Directory || check_file_mounts) {
         mount = is_mount_root(path)?;
     }
-    Ok(Probed { meta, kind, mount })
+    let shared = if kind == EntryKind::File && !mount {
+        clones::shared(path, &meta)
+    } else {
+        Ok(Vec::new())
+    };
+    Ok(Probed {
+        meta,
+        shared,
+        kind,
+        mount,
+    })
 }
 
 /// Checks the root of a removal, which a bounded measurement may enter even
@@ -644,7 +683,15 @@ struct Tally {
 }
 
 impl Tally {
-    fn count(&mut self, kind: EntryKind, meta: &Metadata, counts_storage: bool) {
+    /// Counts one entry. With `counts_storage`, its bytes join the sums, less
+    /// the `counted_before` bytes of its blocks that another file counted.
+    fn count(
+        &mut self,
+        kind: EntryKind,
+        meta: &Metadata,
+        counts_storage: bool,
+        counted_before: u64,
+    ) {
         let counter = match kind {
             EntryKind::Directory => &mut self.directories,
             EntryKind::File => &mut self.files,
@@ -656,7 +703,10 @@ impl Tally {
             if kind == EntryKind::File {
                 self.logical = self.logical.saturating_add(meta.len());
             }
-            let allocated = meta.blocks().saturating_mul(BLOCK_UNIT);
+            let allocated = meta
+                .blocks()
+                .saturating_mul(BLOCK_UNIT)
+                .saturating_sub(counted_before);
             self.allocated = self.allocated.saturating_add(allocated);
         }
         let modified = meta.mtime();
@@ -702,7 +752,7 @@ mod tests {
     use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags, statx};
     use tempfile::TempDir;
 
-    use super::is_mount_root;
+    use super::{is_mount_root, measure_entry};
 
     /// The test reads existing mounts rather than creating a bind mount, so it
     /// leaves the host's mount table unchanged and needs no privilege.
@@ -722,5 +772,60 @@ mod tests {
             return;
         }
         assert!(is_mount_root(root).unwrap());
+    }
+
+    #[test]
+    fn a_cloned_block_counts_once_in_one_scan() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("a.rlib");
+        let bytes: Vec<u8> = (0..512 * 1024_u32).map(|n| (n % 251) as u8).collect();
+        fs::write(&source, &bytes).unwrap();
+        let opened = File::open(&source).unwrap();
+        opened.sync_all().unwrap();
+        let created = File::create(dir.path().join("b.rlib")).unwrap();
+        if rustix::fs::ioctl_ficlone(&created, &opened).is_err() {
+            // This filesystem clones no file, so no block has two holders.
+            return;
+        }
+        created.sync_all().unwrap();
+        let one = fs::metadata(&source).unwrap().blocks() * 512;
+        let device = fs::metadata(dir.path()).unwrap().dev();
+        let both = measure_entry(dir.path(), device).measure;
+        assert_eq!(both.files, 2);
+        assert_eq!(both.logical_bytes, 2 * bytes.len() as u64);
+        // The directory's own blocks join the sum, and they stay far below
+        // the second file's.
+        assert!(both.allocated_bytes >= one, "{both:?}");
+        assert!(both.allocated_bytes < one + one / 2, "{both:?}");
+        // A scan of the clone alone counts the clone's blocks in full.
+        let alone = measure_entry(&dir.path().join("b.rlib"), device).measure;
+        assert_eq!(alone.allocated_bytes, one);
+    }
+
+    #[test]
+    fn a_file_that_the_scan_cannot_open_counts_in_full_with_an_error() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        use crate::model::ErrorKind;
+
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("a.rlib");
+        fs::write(&file, vec![7_u8; 64 * 1024]).unwrap();
+        fs::set_permissions(&file, Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_ok() {
+            // An administrator opens every file, so no open fails here.
+            return;
+        }
+        let device = fs::metadata(dir.path()).unwrap().dev();
+        let measured = measure_entry(&file, device);
+        assert_eq!(measured.measure.files, 1);
+        assert_eq!(measured.measure.logical_bytes, 64 * 1024);
+        assert_eq!(measured.error_count, 1);
+        assert_eq!(measured.errors[0].kind, ErrorKind::PermissionDenied);
+        assert_eq!(measured.errors[0].path, file);
     }
 }

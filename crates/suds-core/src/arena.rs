@@ -86,6 +86,8 @@ pub struct Arena {
     /// The limit that a quota group of btrfs places on the root's
     /// subvolume, or none.
     pub quota_limit_bytes: Option<u64>,
+    /// Why Suds could not read the root's quota group, where it could not.
+    pub quota_error: Option<String>,
     pub ceiling_bytes: u64,
     pub ceiling_source: CeilingSource,
     /// Whether a filesystem enforces the ceiling on the root and on every
@@ -172,7 +174,10 @@ pub fn audit(
         }
     };
     let filesystem = filesystem_of(root);
-    let limit = quota::of(root).map(|quota| quota.limit_bytes);
+    let (limit, quota_error) = match quota::of(root) {
+        Ok(quota) => (quota.map(|quota| quota.limit_bytes), None),
+        Err(reason) => (None, Some(reason)),
+    };
     let bound = bound_of(capacity, limit);
     let bounded = is_enforced(root_device, system_device, bound, ceiling);
     let enforced = bounded && uncovered.is_empty();
@@ -206,10 +211,10 @@ pub fn audit(
             limit / GIB
         )
     } else {
-        let quota = if filesystem == Filesystem::Btrfs {
-            "no quota group limits it"
-        } else {
-            "Suds can read no quota beneath it"
+        let quota = match (&quota_error, filesystem) {
+            (Some(reason), _) => format!("Suds could not read its quota group: {reason}"),
+            (None, Filesystem::Btrfs) => "no quota group limits it".to_owned(),
+            (None, _) => "Suds can read no quota beneath it".to_owned(),
         };
         format!(
             "the filesystem of {} holds {} GiB, more than the ceiling, and {quota}",
@@ -224,6 +229,7 @@ pub fn audit(
         capacity_bytes: capacity,
         available_bytes: available,
         quota_limit_bytes: limit,
+        quota_error,
         ceiling_bytes: ceiling,
         ceiling_source: source,
         enforced,
@@ -361,7 +367,12 @@ mod tests {
         // A quota group's limit bounds a subvolume of a larger filesystem.
         let limited = bound_of(1900 * GIB, Some(900 * GIB));
         assert!(is_enforced(2, 1, limited, 950 * GIB));
-        assert!(!is_enforced(2, 1, bound_of(1900 * GIB, Some(960 * GIB)), 950 * GIB));
+        assert!(!is_enforced(
+            2,
+            1,
+            bound_of(1900 * GIB, Some(960 * GIB)),
+            950 * GIB
+        ));
     }
 
     #[test]

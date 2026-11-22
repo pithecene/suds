@@ -15,25 +15,31 @@ pub struct Quota {
 }
 
 /// The limit on the subvolume that holds `path`, or none where no quota
-/// group limits it or the kernel names no subvolume.
+/// group limits it. An error states why Suds could not read the limit of a
+/// btrfs filesystem, so a failed reading never passes for no limit.
 #[cfg(target_os = "linux")]
-pub fn of(path: &Path) -> Option<Quota> {
-    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let device = linux::device(&mounts, path)?;
+pub fn of(path: &Path) -> Result<Option<Quota>, String> {
+    let table = Path::new("/proc/self/mountinfo");
+    let mounts = std::fs::read_to_string(table)
+        .map_err(|err| format!("could not read {}: {err}", table.display()))?;
+    let Some(device) = linux::device(&mounts, path) else {
+        return Ok(None);
+    };
     let subvolume = linux::subvolume(path)?;
     linux::read(Path::new("/sys/fs/btrfs"), &device, subvolume)
 }
 
 /// No other system holds a quota group.
 #[cfg(not(target_os = "linux"))]
-pub fn of(_path: &Path) -> Option<Quota> {
-    None
+pub fn of(_path: &Path) -> Result<Option<Quota>, String> {
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
     use std::ffi::OsString;
     use std::fs;
+    use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
 
     use rustix::fs::{AtFlags, CWD, StatxFlags, statx};
@@ -47,15 +53,21 @@ mod linux {
     const LIMIT_REFERENCED: u64 = 1;
 
     /// The subvolume that holds `path`, by its identifier.
-    pub fn subvolume(path: &Path) -> Option<u64> {
+    pub fn subvolume(path: &Path) -> Result<u64, String> {
         let stat = statx(
             CWD,
             path,
             AtFlags::SYMLINK_NOFOLLOW,
             StatxFlags::from_bits_retain(STATX_SUBVOL),
         )
-        .ok()?;
-        (stat.stx_mask & STATX_SUBVOL != 0).then_some(stat.stx_subvol)
+        .map_err(|err| format!("could not read the metadata of {}: {err}", path.display()))?;
+        if stat.stx_mask & STATX_SUBVOL == 0 {
+            return Err(format!(
+                "this kernel names no subvolume of {}, which Linux 6.10 or later does",
+                path.display()
+            ));
+        }
+        Ok(stat.stx_subvol)
     }
 
     /// The device of the btrfs mount that holds `path`, by the name that
@@ -108,24 +120,63 @@ mod linux {
     }
 
     /// Reads the quota group of `subvolume` on the filesystem that lists
-    /// `device`, beneath the kernel's directory `published`.
-    pub fn read(published: &Path, device: &OsString, subvolume: u64) -> Option<Quota> {
-        let filesystem = fs::read_dir(published)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|filesystem| filesystem.join("devices").join(device).exists())?;
-        let group = filesystem.join("qgroups").join(format!("0_{subvolume}"));
-        let number = |name: &str| -> Option<u64> {
-            fs::read_to_string(group.join(name)).ok()?.trim().parse().ok()
-        };
-        if number("limit_flags")? & LIMIT_REFERENCED == 0 {
-            return None;
+    /// `device`, beneath the kernel's directory `published`. A filesystem
+    /// without quota groups publishes no group, which is no limit.
+    pub fn read(
+        published: &Path,
+        device: &OsString,
+        subvolume: u64,
+    ) -> Result<Option<Quota>, String> {
+        let failed =
+            |path: &Path, err: std::io::Error| format!("could not read {}: {err}", path.display());
+        let mut filesystem = None;
+        for entry in fs::read_dir(published).map_err(|err| failed(published, err))? {
+            let entry = entry.map_err(|err| failed(published, err))?;
+            let listed = entry.path().join("devices").join(device);
+            match fs::symlink_metadata(&listed) {
+                Ok(_) => filesystem = Some(entry.path()),
+                Err(err) if absent(&err) => {}
+                Err(err) => return Err(failed(&listed, err)),
+            }
         }
-        Some(Quota {
-            limit_bytes: number("max_referenced")?,
-            referenced_bytes: number("referenced")?,
-        })
+        let Some(filesystem) = filesystem else {
+            return Err(format!(
+                "no filesystem beneath {} lists the device {}",
+                published.display(),
+                device.display()
+            ));
+        };
+        let group = filesystem.join("qgroups").join(format!("0_{subvolume}"));
+        let number = |name: &str| -> Result<Option<u64>, String> {
+            let file = group.join(name);
+            match fs::read_to_string(&file) {
+                Ok(text) => text
+                    .trim()
+                    .parse()
+                    .map(Some)
+                    .map_err(|err| format!("{} holds no number: {err}", file.display())),
+                Err(err) if absent(&err) => Ok(None),
+                Err(err) => Err(failed(&file, err)),
+            }
+        };
+        let Some(flags) = number("limit_flags")? else {
+            return Ok(None);
+        };
+        if flags & LIMIT_REFERENCED == 0 {
+            return Ok(None);
+        }
+        let stated = |name: &str| {
+            number(name)?.ok_or_else(|| format!("{} is absent", group.join(name).display()))
+        };
+        Ok(Some(Quota {
+            limit_bytes: stated("max_referenced")?,
+            referenced_bytes: stated("referenced")?,
+        }))
+    }
+
+    /// Whether an error states that a path holds no entry.
+    fn absent(err: &std::io::Error) -> bool {
+        matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
     }
 
     #[cfg(test)]
@@ -174,15 +225,43 @@ mod linux {
             let device = OsString::from("sdb1");
             assert_eq!(
                 read(dir.path(), &device, 256),
-                Some(Quota {
+                Ok(Some(Quota {
                     limit_bytes: 1_073_741_824,
                     referenced_bytes: 4096,
-                })
+                }))
             );
-            assert_eq!(read(dir.path(), &device, 257), None);
-            assert_eq!(read(dir.path(), &device, 258), None);
-            assert_eq!(read(dir.path(), &device, 999), None);
-            assert_eq!(read(dir.path(), &OsString::from("sdz9"), 256), None);
+            assert_eq!(read(dir.path(), &device, 257), Ok(None));
+            assert_eq!(read(dir.path(), &device, 258), Ok(None));
+            // A subvolume without a group has no limit.
+            assert_eq!(read(dir.path(), &device, 999), Ok(None));
+        }
+
+        #[test]
+        fn a_reading_that_fails_is_an_error_and_no_absent_limit() {
+            let dir = TempDir::new().unwrap();
+            let filesystem = dir.path().join("0723c641");
+            fs::create_dir_all(filesystem.join("devices/sdb1")).unwrap();
+            let group = filesystem.join("qgroups/0_256");
+            fs::create_dir_all(&group).unwrap();
+            let device = OsString::from("sdb1");
+
+            fs::write(group.join("limit_flags"), "many\n").unwrap();
+            let damaged = read(dir.path(), &device, 256).unwrap_err();
+            assert!(damaged.contains("holds no number"), "{damaged}");
+
+            // A group that states a limit and holds no figure proves none.
+            fs::write(group.join("limit_flags"), "1\n").unwrap();
+            let partial = read(dir.path(), &device, 256).unwrap_err();
+            assert!(partial.contains("max_referenced is absent"), "{partial}");
+
+            // A directory stands in a figure's place, so the reading fails.
+            fs::write(group.join("max_referenced"), "1\n").unwrap();
+            fs::create_dir(group.join("referenced")).unwrap();
+            assert!(read(dir.path(), &device, 256).is_err());
+
+            let unlisted = read(dir.path(), &OsString::from("sdz9"), 256).unwrap_err();
+            assert!(unlisted.contains("lists the device sdz9"), "{unlisted}");
+            assert!(read(&dir.path().join("missing"), &device, 256).is_err());
         }
     }
 }

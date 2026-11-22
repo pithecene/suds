@@ -20,7 +20,8 @@ same filesystem, and the report lists each one that lies outside it. Suds
 audits no root through a symbolic link. Development storage then cannot fill the system's
 volume, whatever fills the arena. Suds reads what any user can read. The kernel
 publishes each quota group of btrfs beneath `/sys/fs/btrfs`, so Suds reads
-that limit, and Linux 6.10 or later names the root's subvolume. Suds cannot
+that limit, and Linux 6.10 or later names the root's subvolume. Where Suds
+cannot read a quota group, the report states the reason. Suds cannot
 see a project quota of XFS, and it reports such a root as not enforced.
 
 Where nothing enforces the ceiling, the command prints the commands that

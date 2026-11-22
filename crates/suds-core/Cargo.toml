@@ -18,6 +18,11 @@ serde_json.workspace = true
 # device.
 rustix.workspace = true
 
+# The kernel's map of a file's extents marks each one that another file
+# shares, and no call of rustix reads that map.
+[target.'cfg(target_os = "linux")'.dependencies]
+fiemap.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

@@ -176,6 +176,15 @@ replacement affects only the report.
 - **Hard-linked files** contribute their bytes once for each root, through
   the first link that the scan reaches, and each link still counts as a
   file.
+- **Cloned blocks** contribute their bytes once for each scan on Linux,
+  through the first file that the scan reaches. Btrfs and XFS clone a
+  file, and the kernel names each extent that a file shares. The scan asks
+  for the extents of each file of 16 KiB or more, so a smaller clone counts
+  in full. On one workstation, that floor kept 89 percent of the
+  correction, and the inspection took 5.6 seconds where it took 4.4
+  seconds before. A file that the scan cannot open counts in full. The
+  first file's checkout holds the bytes in a report, so the removal of
+  that checkout alone frees less than its figure.
 - **Symbolic links** count as entries, and the scan never follows them. A
   root that is itself a symbolic link, such as `/tmp` on macOS, counts as
   one link, and the scan reads nothing beyond it. A default root whose path

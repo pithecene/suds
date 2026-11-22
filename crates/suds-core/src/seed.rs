@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::OFlags;
@@ -180,7 +180,20 @@ fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Of
         bytes: 0,
         newest: None,
     };
-    for state in development::build_states(checkout) {
+    let (states, unread, first) = development::build_states(checkout);
+    if let Some(first) = first {
+        // An entry that the scan could not read may hold build state, so
+        // the plan names what it could not establish.
+        passed.push(Passed {
+            path: NativePath::new(checkout.to_path_buf()),
+            reason: format!(
+                "Suds could not read {unread} entries beneath it, the first {}: {}",
+                first.path.display(),
+                first.message
+            ),
+        });
+    }
+    for state in states {
         let pass = |reason: String, passed: &mut Vec<Passed>| {
             passed.push(Passed {
                 path: NativePath::new(state.path.clone()),
@@ -201,7 +214,11 @@ fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Of
             continue;
         };
         let to = destination.join(relative);
-        match refusal(&state.path, &to) {
+        if let Some(reason) = unclear(&state.survey) {
+            pass(reason, passed);
+            continue;
+        }
+        match refusal(&state.path, &to, destination) {
             Some(reason) => pass(reason, passed),
             None => {
                 if let (Some(source), Some(target)) = (state.path.parent(), to.parent())
@@ -223,9 +240,67 @@ fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Of
     offer
 }
 
-/// The reason that Suds clones nothing from `from` to `to`, or none when
-/// each condition of a clone holds.
-fn refusal(from: &Path, to: &Path) -> Option<String> {
+/// The reason that a directory of build state is no derived state as a
+/// whole, so that Suds clones none of it. A checkout beneath it holds work
+/// that a build cannot regenerate.
+fn unclear(survey: &development::Survey) -> Option<String> {
+    if survey.checkouts_beneath > 0 {
+        return Some(format!(
+            "it holds {} checkouts, and a seed clones derived state alone",
+            survey.checkouts_beneath
+        ));
+    }
+    if survey.skipped_mount_count > 0 {
+        return Some("a mount point lies beneath it, and no clone crosses one".to_owned());
+    }
+    if survey.error_count > 0 {
+        return Some(format!(
+            "Suds could not read {} entries beneath it",
+            survey.error_count
+        ));
+    }
+    None
+}
+
+/// The reason that a part of the path from `checkout` to `to` is no plain
+/// directory. A symbolic link there would lead the clone outside the
+/// checkout.
+fn linked(checkout: &Path, to: &Path) -> Option<String> {
+    let Ok(relative) = to.strip_prefix(checkout) else {
+        return Some(format!(
+            "{} lies outside the checkout {}",
+            to.display(),
+            checkout.display()
+        ));
+    };
+    let mut at = checkout.to_path_buf();
+    let mut parts = relative.components().peekable();
+    while let Some(part) = parts.next() {
+        // The last part is the clone's own name, which must hold nothing.
+        if parts.peek().is_none() {
+            break;
+        }
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Some(format!(
+                    "{} is no directory, and a seed follows no link",
+                    at.display()
+                ));
+            }
+            Err(err) => return Some(format!("could not examine {}: {err}", at.display())),
+        }
+    }
+    None
+}
+
+/// The reason that Suds clones nothing from `from` to `to` beneath the
+/// checkout `checkout`, or none when each condition of a clone holds.
+fn refusal(from: &Path, to: &Path, checkout: &Path) -> Option<String> {
+    if let Some(reason) = linked(checkout, to) {
+        return Some(reason);
+    }
     match fs::symlink_metadata(to) {
         Ok(_) => {
             return Some(format!(
@@ -345,7 +420,7 @@ pub fn apply(
     let mut shared_bytes = 0_u64;
     for clone in &plan.clones {
         let (from, to) = (clone.from.as_path(), clone.to.as_path());
-        let outcome = match refusal(from, to) {
+        let outcome = match refusal(from, to, plan.destination.as_path()) {
             Some(reason) => Err(reason),
             None => clone_build_state(from, to, &run),
         };
@@ -418,6 +493,12 @@ fn clone_build_state(from: &Path, to: &Path, run: &str) -> Result<Counts, String
         ));
     }
     let quiet = Quiet::of(from)?;
+    // The run surveys the source again, because a checkout or a mount point
+    // may have entered it since the plan.
+    let (_, survey, _) = development::survey_build_state(from, Ecosystem::Cargo);
+    if let Some(reason) = unclear(&survey) {
+        return Err(format!("{}: {reason}", from.display()));
+    }
     let parent = to.parent().ok_or("the destination has no parent")?;
     let staged = parent.join(format!(".suds-seed-{run}"));
     let cloned = clone_tree(from, &staged).and_then(|counts| {
@@ -443,10 +524,20 @@ fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
     // Cargo gives an artifact a second name through a hard link. The clone
     // keeps the two names on one file, and it counts the file once.
     let mut linked: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    // The run creates each directory for this user alone and gives it the
+    // source's permissions once its entries exist, so a clone never opens
+    // what its source closes to another user.
+    let mut made: Vec<(PathBuf, fs::Permissions)> = Vec::new();
     let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
     while let Some((source, target)) = pending.pop() {
-        fs::create_dir(&target)
+        let permissions = fs::symlink_metadata(&source)
+            .map_err(|err| format!("could not examine {}: {err}", source.display()))?
+            .permissions();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&target)
             .map_err(|err| format!("could not create {}: {err}", target.display()))?;
+        made.push((target.clone(), permissions));
         let entries = fs::read_dir(&source)
             .map_err(|err| format!("could not list {}: {err}", source.display()))?;
         for entry in entries {
@@ -487,6 +578,16 @@ fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
             // A socket or a pipe holds no build output, so the clone leaves
             // it out.
         }
+    }
+    // A directory comes after each directory beneath it, so a source that
+    // forbids its own listing closes last.
+    for (target, permissions) in made.into_iter().rev() {
+        fs::set_permissions(&target, permissions).map_err(|err| {
+            format!(
+                "could not set the permissions of {}: {err}",
+                target.display()
+            )
+        })?;
     }
     Ok(counts)
 }

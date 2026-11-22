@@ -42,6 +42,10 @@ checks each one again:
 - The destination's path holds nothing. A seed changes no existing entry.
 - The destination's directory holds a `Cargo.toml`, so a build there would
   use the clone.
+- Each directory between the destination's checkout and that path is a
+  plain directory. A seed follows no symbolic link.
+- The source holds no checkout and no mount point, and Suds could read
+  each entry of it. A checkout holds work that no build regenerates.
 - Both checkouts lie on one filesystem.
 - No build holds the source. Cargo locks a file of each profile's
   directory for a whole build, and Suds takes that lock in shared form
@@ -54,7 +58,7 @@ reason.
 
 The run clones under another name beside the destination and renames the
 result once it is whole, so a build never meets a part of a clone. It
-keeps each file's time and each hard link, and it crosses no mount point.
+keeps each file's time, each hard link, and each directory's permissions.
 
 A seed never copies. On a filesystem that clones no file, such as ext4,
 the run writes nothing and states the reason. Btrfs and XFS clone on

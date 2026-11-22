@@ -501,13 +501,19 @@ pub(crate) fn is_checkout(dir: &Path) -> bool {
     matches!(claim_at(dir, false), Some(Claim::Checkout(..)))
 }
 
-/// Each directory of build state beneath `checkout`, measured in a scan of
-/// its own. A checkout beneath it keeps its own build state.
-pub(crate) fn build_states(checkout: &Path) -> Vec<BuildState> {
+/// Each directory of build state beneath `checkout`, which a scan of its
+/// own measures. The result also counts the entries that the scan could not
+/// read and holds the first one. A checkout beneath it keeps its own build
+/// state.
+pub(crate) fn build_states(checkout: &Path) -> (Vec<BuildState>, u64, Option<ScanError>) {
     let mut scan = SharedScan::default();
     let claims = Arc::new(|entry: &Entry<'_>| claim_of(entry, true).is_some());
     let Some(bounded) = scan.measure(checkout, claims) else {
-        return Vec::new();
+        return (
+            Vec::new(),
+            scan.error_count(),
+            scan.errors().first().cloned(),
+        );
     };
     let mut states = Vec::new();
     for dir in bounded.set_aside {
@@ -522,7 +528,7 @@ pub(crate) fn build_states(checkout: &Path) -> Vec<BuildState> {
             });
         }
     }
-    states
+    (states, scan.error_count(), scan.errors().first().cloned())
 }
 
 /// The ecosystem whose layout proves that `dir` is build state beneath a

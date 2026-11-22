@@ -276,3 +276,102 @@ fn a_run_passes_a_directory_whose_condition_changed_after_the_plan() {
     let kept = fixture.checkout("fresh").join("target/debug/deps/app-1a2b");
     assert_eq!(fs::read_to_string(kept).unwrap(), "its own");
 }
+
+#[test]
+fn a_plan_follows_no_link_on_the_way_to_the_destination() {
+    let fixture = Fixture::new();
+    // Each checkout holds a package in `pkg`, and the built one's package
+    // holds build state.
+    for name in ["built", "fresh"] {
+        write(
+            &fixture.checkout(name).join("pkg/Cargo.toml"),
+            "[package]\n",
+        );
+    }
+    let built = fixture.checkout("built").join("pkg");
+    write(&built.join("target/CACHEDIR.TAG"), "Signature: cargo");
+    write(&built.join("target/debug/app"), "binary");
+    // The destination's `pkg` becomes a link to a directory outside it.
+    let outside = fixture.root.join("outside");
+    write(&outside.join("Cargo.toml"), "[package]\n");
+    let link = fixture.checkout("fresh").join("pkg");
+    fs::remove_dir_all(&link).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let plan = fixture.plan(None);
+
+    assert!(plan.clones.is_empty(), "{:?}", plan.clones);
+    assert!(
+        plan.passed
+            .iter()
+            .any(|passed| passed.reason.contains("follows no link")),
+        "{:?}",
+        plan.passed
+    );
+    assert!(!outside.join("target").exists());
+}
+
+#[test]
+fn a_plan_passes_a_build_state_that_holds_a_checkout() {
+    let fixture = Fixture::new();
+    build(&fixture.checkout("built"), "binary");
+    let nested = fixture.checkout("built").join("target/vendor/dep");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+
+    let plan = fixture.plan(None);
+
+    assert!(plan.clones.is_empty(), "{:?}", plan.clones);
+    assert!(
+        plan.passed
+            .iter()
+            .any(|passed| passed.reason.contains("holds 1 checkouts")),
+        "{:?}",
+        plan.passed
+    );
+}
+
+#[test]
+fn a_plan_names_what_it_could_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    build(&fixture.checkout("built"), "binary");
+    let closed = fixture.checkout("built").join("closed");
+    fs::create_dir_all(&closed).unwrap();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    // The administrator reads every directory, so the test proves nothing there.
+    let unreadable = fs::read_dir(&closed).is_err();
+
+    let plan = fixture.plan(None);
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if unreadable {
+        assert!(
+            plan.passed
+                .iter()
+                .any(|passed| passed.reason.contains("could not read 1 entries")),
+            "{:?}",
+            plan.passed
+        );
+    }
+}
+
+#[test]
+fn a_clone_keeps_the_permissions_of_each_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    build(&fixture.checkout("built"), "binary");
+    let source = fixture.checkout("built").join("target");
+    fs::set_permissions(source.join("debug"), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let report = fixture.apply(&fixture.plan(None));
+
+    if report.clones[0].cloned {
+        let target = fixture.checkout("fresh").join("target");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&target.join("debug")), 0o700);
+        assert_eq!(mode(&target), mode(&source));
+    }
+}

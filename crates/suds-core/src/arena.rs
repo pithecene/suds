@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::pressure;
+use crate::{pressure, quota};
 
 /// The schema tag of every arena report.
 pub const ARENA_SCHEMA: &str = "suds.arena/v1";
@@ -83,6 +83,11 @@ pub struct Arena {
     /// The size of the filesystem that holds the root, in bytes.
     pub capacity_bytes: u64,
     pub available_bytes: u64,
+    /// The limit that a quota group of btrfs places on the root's
+    /// subvolume, or none.
+    pub quota_limit_bytes: Option<u64>,
+    /// Why Suds could not read the root's quota group, where it could not.
+    pub quota_error: Option<String>,
     pub ceiling_bytes: u64,
     pub ceiling_source: CeilingSource,
     /// Whether a filesystem enforces the ceiling on the root and on every
@@ -108,11 +113,17 @@ pub struct Step {
 }
 
 /// Whether a filesystem enforces `ceiling` on a root: the root lies on a
-/// filesystem of its own that is no larger than the ceiling. The check
-/// reads what any user can read, so a quota group of btrfs and a project
-/// quota of XFS stay invisible, and such a root reads as not enforced.
-pub fn is_enforced(root_device: u64, system_device: u64, capacity: u64, ceiling: u64) -> bool {
-    root_device != system_device && capacity <= ceiling
+/// filesystem of its own whose `bound` is no more than the ceiling. The
+/// check reads what any user can read, so a project quota of XFS stays
+/// invisible, and such a root reads as not enforced.
+pub fn is_enforced(root_device: u64, system_device: u64, bound: u64, ceiling: u64) -> bool {
+    root_device != system_device && bound <= ceiling
+}
+
+/// The most that a root's filesystem lets it hold: the filesystem's size,
+/// or the limit of the root's quota group where that is lower.
+fn bound_of(capacity: u64, limit: Option<u64>) -> u64 {
+    limit.map_or(capacity, |limit| limit.min(capacity))
 }
 
 /// Audits the arena at `root`. The settings name the ceiling, and the
@@ -163,13 +174,24 @@ pub fn audit(
         }
     };
     let filesystem = filesystem_of(root);
-    let bounded = is_enforced(root_device, system_device, capacity, ceiling);
+    let (limit, quota_error) = match quota::of(root) {
+        Ok(quota) => (quota.map(|quota| quota.limit_bytes), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let bound = bound_of(capacity, limit);
+    let bounded = is_enforced(root_device, system_device, bound, ceiling);
     let enforced = bounded && uncovered.is_empty();
     let finding = if bounded && !enforced {
         format!(
             "{} lies on a filesystem within the ceiling, and {} other locations lie outside that filesystem",
             root.display(),
             uncovered.len()
+        )
+    } else if let (true, Some(limit)) = (enforced, limit.filter(|limit| *limit <= capacity)) {
+        format!(
+            "a quota group limits the subvolume of {} to {} GiB, within the ceiling",
+            root.display(),
+            limit / GIB
         )
     } else if enforced {
         format!(
@@ -182,9 +204,20 @@ pub fn audit(
             "{} shares the system's filesystem, so development storage can fill the system's volume",
             root.display()
         )
-    } else {
+    } else if let Some(limit) = limit {
         format!(
-            "the filesystem of {} holds {} GiB, more than the ceiling, and Suds can read no quota beneath it",
+            "a quota group limits the subvolume of {} to {} GiB, more than the ceiling",
+            root.display(),
+            limit / GIB
+        )
+    } else {
+        let quota = match (&quota_error, filesystem) {
+            (Some(reason), _) => format!("Suds could not read its quota group: {reason}"),
+            (None, Filesystem::Btrfs) => "no quota group limits it".to_owned(),
+            (None, _) => "Suds can read no quota beneath it".to_owned(),
+        };
+        format!(
+            "the filesystem of {} holds {} GiB, more than the ceiling, and {quota}",
             root.display(),
             capacity / GIB
         )
@@ -195,6 +228,8 @@ pub fn audit(
         filesystem,
         capacity_bytes: capacity,
         available_bytes: available,
+        quota_limit_bytes: limit,
+        quota_error,
         ceiling_bytes: ceiling,
         ceiling_source: source,
         enforced,
@@ -318,15 +353,26 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{CeilingSource, Filesystem, GIB, audit, is_enforced, provisioning, shell_quote};
+    use super::{
+        CeilingSource, Filesystem, GIB, audit, bound_of, is_enforced, provisioning, shell_quote,
+    };
 
     #[test]
     fn a_filesystem_of_its_own_within_the_ceiling_enforces_it() {
         assert!(is_enforced(2, 1, 200 * GIB, 200 * GIB));
         // The system's own filesystem enforces nothing, whatever its size.
         assert!(!is_enforced(1, 1, 200 * GIB, 500 * GIB));
-        // A larger filesystem may hold a quota that Suds cannot read.
-        assert!(!is_enforced(2, 1, 1900 * GIB, 950 * GIB));
+        // A larger filesystem without a limit bounds nothing.
+        assert!(!is_enforced(2, 1, bound_of(1900 * GIB, None), 950 * GIB));
+        // A quota group's limit bounds a subvolume of a larger filesystem.
+        let limited = bound_of(1900 * GIB, Some(900 * GIB));
+        assert!(is_enforced(2, 1, limited, 950 * GIB));
+        assert!(!is_enforced(
+            2,
+            1,
+            bound_of(1900 * GIB, Some(960 * GIB)),
+            950 * GIB
+        ));
     }
 
     #[test]

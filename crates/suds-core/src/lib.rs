@@ -18,6 +18,7 @@ pub mod model;
 pub mod organize;
 pub mod platform;
 pub mod pressure;
+pub mod quota;
 pub mod reclaim;
 pub mod registry;
 pub mod roots;

@@ -9,6 +9,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-21
+
 ### Added
 
 - **The `seed` command gives a new checkout another checkout's build state**: `suds seed CHECKOUT --apply` clones Cargo's build state from a checkout of the same repository. A clone shares its blocks with its source. On one workstation, a seed of 5.4 GiB took 0.6 seconds and 11 MiB, and the first build compiled 5 packages where it compiled 378 before. A seed changes no existing entry, and it writes nothing on a filesystem that clones no file.
@@ -165,7 +167,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.
 
-[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/pithecene/suds/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/pithecene/suds/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pithecene/suds/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pithecene/suds/compare/v0.1.2...v0.1.3

@@ -18,7 +18,7 @@ would run, and changes nothing.
 | :--- | :--- | :--- | :--- |
 | `go.build-cache` | 10 GiB | `go clean -cache` | Every cached build output |
 | `go.module-cache` | 10 GiB | `go clean -modcache` | Every downloaded module |
-| `pnpm.store` | 10 GiB | `pnpm store prune --store-dir DIR` | Each package that no project references |
+| `pnpm.store` | 10 GiB | `pnpm store prune --store-dir DIR` | Each package file that no project holds by a hard link |
 | `ccache.cache` | 10 GiB | `ccache --trim-dir DIR --trim-max-size SIZE` | The least recently used results beyond the budget |
 | `mise.installs` | 20 GiB | `mise prune --yes` | Each tool version that no tracked configuration names |
 | `docker.images` | 20 GiB | `docker image prune --all --force` | Each image that no container uses |
@@ -37,6 +37,17 @@ A program's trim decides what leaves. Go offers no partial trim, so a cache
 beyond its budget leaves whole, and the next build fills it again. The
 trims of pnpm, mise, and Docker's images remove what nothing references,
 so a store can stay beyond its budget after its trim.
+
+The trim of pnpm reads a reference from a file's count of hard links. On a filesystem
+that clones files, such as btrfs or APFS, pnpm clones each package into a
+project, so no file of the store holds a second link. The trim then removes
+every package of the store, and the next installation downloads each one
+again. Each project keeps its own clones. On one workstation with btrfs, a
+trim took the store from 12.9 GiB to 1.4 GiB.
+
+Each version of pnpm trims its own layout alone, such as `v10` or `v11`
+beneath the store. A layout of another version of pnpm stays until that
+version trims it.
 
 Suds reports these stores and trims none of them:
 

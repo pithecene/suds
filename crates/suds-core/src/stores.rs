@@ -347,7 +347,7 @@ fn trim_of(id: &str, path: Option<&Path>, budget: u64, inputs: &Inputs<'_>) -> O
                 word("--store-dir"),
                 native(path?),
             ],
-            "each package that no project references",
+            "each package file that no project holds by a hard link",
         ),
         // The program reads a size without a unit in gibibytes, so the
         // adapter states the budget in kibibytes.

@@ -932,12 +932,14 @@ fn a_repository_that_no_layout_proves_fetched_stays_a_checkout() {
 #[test]
 fn a_fetched_repository_with_work_keeps_its_linked_checkout() {
     let fixture = Fixture::new();
-    let (_, fetched) = cmake_build(&fixture, &fixture.linked);
     let plan = fixture.plan(&nobody(), true);
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
 
-    // Git would remove the ignored build directory with the checkout, so
-    // work in the dependency keeps the checkout at the removal too.
+    // A repository inside an ignored build directory keeps the checkout. Work
+    // in that repository also keeps it when an earlier plan runs.
+    let (_, fetched) = cmake_build(&fixture, &fixture.linked);
+    let held = fixture.plan(&nobody(), true);
+    assert_eq!(find(&held, &fixture.linked).kept, Some(Kept::HoldsCheckout));
     write(&fetched.join("notes.txt"), "untracked");
     let kept = fixture.plan(&nobody(), true);
     assert_eq!(find(&kept, &fixture.linked).kept, Some(Kept::HoldsCheckout));
@@ -1032,8 +1034,8 @@ fn removes_a_released_checkout_and_its_build_state_in_one_run() {
 fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
-    write(&fixture.repo.join(".git/info/exclude"), ".cache/\n");
-    let modules = fixture.linked.join(".cache/go-mod");
+    write(&fixture.repo.join(".git/info/exclude"), "go-mod/\n");
+    let modules = fixture.linked.join("go-mod");
     write(&modules.join("cache/download/example.com/@v/list"), "v1");
     // Go lets no one write a module's directory.
     let module = modules.join("example.com@v1");
@@ -1075,20 +1077,20 @@ fn refuses_an_ignored_file_that_appeared_after_planning() {
         .unwrap();
     assert!(!removal.removed);
     assert_eq!(removal.refusal.as_deref(), Some(reason.as_str()));
-    assert_eq!(fs::read_to_string(added).unwrap(), "workflow history");
+    assert_eq!(fs::read_to_string(&added).unwrap(), "workflow history");
     assert!(!fixture.linked.join("target").exists());
     assert!(read(&fixture.journal).unwrap().iter().any(|record| {
         matches!(&record.event, Event::RemovalRefused { run, reason: recorded, .. }
             if run == &report.run && recorded == &reason)
     }));
 
+    // A person's plan keeps the record as well, and the plan states it.
     let plan = fixture.plan(&nobody(), false);
-    let approved = fixture.apply(&plan);
-    assert!(!fixture.linked.exists());
-    assert!(read(&fixture.journal).unwrap().iter().any(|record| {
-        matches!(&record.event, Event::Removed { run, evidence, .. }
-            if run == &approved.run && evidence.contains(&proof))
-    }));
+    let candidate = find(&plan, &fixture.linked);
+    assert_eq!(candidate.kept, Some(Kept::UnaccountedContent));
+    assert!(candidate.evidence.contains(&reason));
+    fixture.apply(&plan);
+    assert_eq!(fs::read_to_string(added).unwrap(), "workflow history");
 }
 
 #[test]
@@ -1184,4 +1186,35 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         )
         .is_err()
     );
+}
+
+/// A file that Git ignores can be the only copy of what a person or a program
+/// wrote, such as a secret or a record of work. The plan states what keeps the
+/// checkout, and a file that appears after the plan keeps it too.
+#[test]
+fn a_persons_run_keeps_a_linked_checkout_with_an_ignored_file() {
+    for ignored in [".env", "records/run.json"] {
+        for before_plan in [true, false] {
+            let fixture = Fixture::new();
+            let exclude = fixture.repo.join(".git/info/exclude");
+            fs::write(&exclude, ".env\nrecords/\n").unwrap();
+            let file = fixture.linked.join(ignored);
+            if before_plan {
+                write(&file, "only copy");
+            }
+            let plan = fixture.plan(&nobody(), true);
+            let expected = before_plan.then_some(Kept::UnaccountedContent);
+            assert_eq!(find(&plan, &fixture.linked).kept, expected, "{ignored}");
+            if !before_plan {
+                write(&file, "only copy");
+                let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+                for path in file.ancestors().take_while(|path| *path != fixture.linked) {
+                    fs::File::open(path).unwrap().set_modified(old).unwrap();
+                }
+            }
+            fixture.apply(&plan);
+            assert_eq!(fs::read_to_string(&file).unwrap(), "only copy");
+            assert!(fixture.linked.join("src/lib.rs").exists());
+        }
+    }
 }

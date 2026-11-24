@@ -363,7 +363,10 @@ fn judge_linked(
         .iter()
         .flat_map(|build| build.repositories.iter().cloned())
         .collect();
-    judge.checkout(&checkout.path, newest, &Survey::default(), &repositories)
+    let (kept, mut evidence) =
+        judge.checkout(&checkout.path, newest, &Survey::default(), &repositories);
+    let kept = kept.or_else(|| judge.unaccounted(&checkout.path, &mut evidence).err());
+    (kept, evidence)
 }
 
 /// The facts that every judgment shares. The planner and the executor judge
@@ -526,6 +529,28 @@ impl Judge<'_> {
         (standing.event == registry::Event::Released)
             .then_some(standing.landed.as_deref())
             .flatten()
+    }
+
+    /// Accounts for every entry of a linked checkout, because Git removes the
+    /// ignored ones with it. A file that Git ignores can be the only copy of
+    /// what a person or a program wrote. The result names the caches of Go,
+    /// whose directories need a write permission before their removal.
+    pub(super) fn unaccounted(
+        &self,
+        checkout: &Path,
+        evidence: &mut Vec<String>,
+    ) -> Result<Vec<PathBuf>, Kept> {
+        let contents = self
+            .git
+            .head(checkout)
+            .map_err(|reason| (Kept::Unverified, reason))
+            .and_then(|head| accounted::survey(self.git, checkout, &head))
+            .map_err(|(kept, reason)| {
+                evidence.push(reason);
+                kept
+            })?;
+        evidence.push("the head's tree and proven build state account for the checkout".to_owned());
+        Ok(contents.go_caches)
     }
 
     fn unsaved_work(&self, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {

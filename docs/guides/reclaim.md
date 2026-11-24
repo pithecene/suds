@@ -56,6 +56,13 @@ changed, staged, or untracked file there. No process may work in the
 checkout, no entry may have changed within the idle time, and no client may
 hold an unreleased registration.
 
+Git removes a checkout together with the files that it ignores. Each run
+therefore accounts for every entry, whoever approves it. The head's tree
+accounts for tracked files, and the build-state rules account for ignored build
+output. Any other entry keeps the checkout, such as an ignored `.env` or a
+tool's own records, and the plan names the first one. A repository that a build
+fetched keeps the checkout until its build state leaves.
+
 A remote-tracking branch can show that a remote holds the checkout's
 head. A person who runs `suds reclaim --apply` can also use a release with
 `--landed COMMIT` as evidence while the head still matches `COMMIT`.

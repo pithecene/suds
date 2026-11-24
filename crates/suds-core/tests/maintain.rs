@@ -176,6 +176,10 @@ impl Fixture {
             report.reclaim.unwrap().authority,
             Authority::StandingApproval
         );
+        self.journaled_plan()
+    }
+
+    fn journaled_plan(&self) -> ReclaimPlan {
         read(&self.directories.journal())
             .unwrap()
             .into_iter()
@@ -539,4 +543,115 @@ fn an_unattended_run_removes_exactly_what_its_rules_name() {
     // A second run finds nothing more to remove.
     maintain(&settings, &fixture.context(&Git::default())).unwrap();
     assert_eq!(paths(&root), after);
+}
+
+/// A build that rewrites one file of a checkout's build state until a file
+/// appears. It fails as soon as the build state loses an entry.
+struct RunningBuild {
+    child: std::process::Child,
+    stop: PathBuf,
+}
+
+impl RunningBuild {
+    fn start(target: &Path, directory: &Path, stop: PathBuf) -> Self {
+        // A write to a file that exists leaves its directory's time alone, so
+        // the file's own time carries the recent write.
+        let script = "i=0; while [ ! -e \"$2\" ]; do i=$((i+1)); \
+                      [ -e \"$1/app\" ] && [ -e \"$1/CACHEDIR.TAG\" ] || exit 8; \
+                      echo $i > \"$1/app\" || exit 7; \
+                      [ $i -eq 3 ] && : > \"$2.began\"; sleep 0.02; done";
+        let child = Command::new("sh")
+            .args(["-c", script, "build"])
+            .arg(target)
+            .arg(&stop)
+            .current_dir(directory)
+            .spawn()
+            .unwrap();
+        let began = std::time::Instant::now();
+        while !stop.with_extension("began").exists() {
+            assert!(began.elapsed() < Duration::from_secs(20), "no build began");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        RunningBuild { child, stop }
+    }
+
+    fn finish(mut self) -> Option<i32> {
+        fs::write(&self.stop, "").unwrap();
+        self.child.wait().unwrap().code()
+    }
+}
+
+impl Drop for RunningBuild {
+    /// A failed test leaves no build behind.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Sets every entry beneath `tree` to a time `hours` before now.
+fn age(tree: &Path, hours: u64) {
+    let time = SystemTime::now() - Duration::from_secs(hours * 3600);
+    for path in paths(tree).iter().rev() {
+        fs::File::open(path).unwrap().set_modified(time).unwrap();
+    }
+    fs::File::open(tree).unwrap().set_modified(time).unwrap();
+}
+
+/// Each protection alone spares a running build. Under the far time no write
+/// is recent, so only the process's working directory keeps the first build.
+/// The second build works elsewhere, so only its recent writes keep it.
+#[test]
+fn an_unattended_run_spares_a_running_build() {
+    for inside in [true, false] {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(fixture._dir.path()).unwrap();
+        let building = fixture.linked("building");
+        let idle = fixture.linked("idle");
+        for checkout in [&building, &idle, &fixture.repo] {
+            age(&checkout.join("target"), 5);
+        }
+        let target = building.join("target");
+        let directory = if inside {
+            building.as_path()
+        } else {
+            root.as_path()
+        };
+        let build = RunningBuild::start(&target, directory, root.join("stop"));
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let now = if inside {
+            LATER
+        } else {
+            i64::try_from(now.as_secs()).unwrap()
+        };
+        let git = Git::default();
+        let context = Context {
+            now,
+            ..fixture.context(&git)
+        };
+        maintain(&fixture.settings(true), &context).unwrap();
+        // A build that stops right after a removal would not notice it.
+        let survived = ["CACHEDIR.TAG", "app"].map(|name| target.join(name).exists());
+        let code = build.finish();
+        assert_eq!(survived, [true; 2], "inside: {inside}");
+        assert_eq!(code, Some(0), "inside: {inside}");
+        // The plan states the rule, so no later refusal stands in for it.
+        let kept = if inside {
+            Kept::InUse
+        } else {
+            Kept::RecentlyModified
+        };
+        let plan = fixture.journaled_plan();
+        let candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.path.as_path() == target)
+            .unwrap();
+        assert_eq!(candidate.kept, Some(kept), "{candidate:?}");
+        // The same run removes the build state that nothing uses.
+        assert!(!idle.join("target").exists(), "inside: {inside}");
+        assert!(!fixture.repo.join("target").exists(), "inside: {inside}");
+    }
 }

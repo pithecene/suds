@@ -632,7 +632,10 @@ fn an_unattended_run_spares_a_running_build() {
             ..fixture.context(&git)
         };
         maintain(&fixture.settings(true), &context).unwrap();
+        // A build that stops right after a removal would not notice it.
+        let survived = ["CACHEDIR.TAG", "app"].map(|name| target.join(name).exists());
         let code = build.finish();
+        assert_eq!(survived, [true; 2], "inside: {inside}");
         assert_eq!(code, Some(0), "inside: {inside}");
         // The plan states the rule, so no later refusal stands in for it.
         let kept = if inside {

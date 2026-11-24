@@ -13,6 +13,7 @@ mod ahead;
 pub mod arena;
 mod clones;
 pub mod development;
+pub mod go_cache;
 pub mod inspection;
 pub mod maintain;
 pub mod model;

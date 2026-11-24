@@ -1,10 +1,11 @@
 //! Tests of an unattended maintenance run against a temporary repository.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use suds_core::development::Environment;
 use suds_core::maintain::{Context, maintain, read_pressure};
@@ -424,4 +425,118 @@ fn refuses_settings_without_a_root() {
     let git = Git::default();
     let settings = Settings::default();
     assert!(maintain(&settings, &fixture.context(&git)).is_err());
+}
+
+/// Each path beneath `root` apart from a repository's own data, where Git
+/// records what a removal changes.
+fn paths(root: &Path) -> BTreeSet<PathBuf> {
+    let mut found = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.push(path.clone());
+            }
+            found.insert(path);
+        }
+    }
+    found
+}
+
+/// An unattended run over a workstation in small. The test compares every
+/// path before and after the run, so a removal that no rule names fails it.
+#[test]
+fn an_unattended_run_removes_exactly_what_its_rules_name() {
+    let mut fixture = Fixture::new();
+    let root = fs::canonicalize(fixture._dir.path()).unwrap();
+    let cache = root.join("go-build");
+    for n in 0..256 {
+        fs::create_dir_all(cache.join(format!("{n:02x}"))).unwrap();
+    }
+    fs::write(cache.join("README"), "cache").unwrap();
+    fs::write(cache.join("trim.txt"), "0").unwrap();
+    fs::create_dir(cache.join("fuzz")).unwrap();
+    fs::write(cache.join("fuzz/corpus"), "kept").unwrap();
+    let entry = |first: &str| {
+        let path = cache
+            .join(first)
+            .join(format!("{first}{}-d", "b".repeat(62)));
+        fs::write(&path, vec![1u8; 65536]).unwrap();
+        path
+    };
+    let stale = entry("0a");
+    let recent = entry("0b");
+    let used = SystemTime::UNIX_EPOCH + Duration::from_secs(LATER as u64 - 60);
+    fs::File::open(&recent).unwrap().set_modified(used).unwrap();
+    fixture
+        .environment
+        .variables
+        .insert("GOCACHE".to_owned(), cache.clone().into());
+
+    let landed = fixture.landed_checkout();
+    // Work that only this workstation holds, and a checkout that a client holds.
+    let unpushed = fixture.linked("unpushed");
+    // Each linked checkout commits the same content, and an equal commit
+    // has the pushed commit's identity, so this one needs its own.
+    fs::write(unpushed.join("only.txt"), "only here").unwrap();
+    git(&unpushed, &["add", "only.txt"]);
+    git(&unpushed, &["commit", "-m", "only here"]);
+    fixture.release_landed(&unpushed);
+    let changed = fixture.linked("changed");
+    fs::write(changed.join("change.txt"), "edited").unwrap();
+    fixture.release_landed(&changed);
+    let held = fixture.linked("held");
+    registry::append(
+        &fixture.directories.registry(),
+        &held,
+        "bosun",
+        Some("wf-2"),
+        RegistryEvent::Registered,
+        0,
+    )
+    .unwrap();
+
+    let mut settings = fixture.settings(true);
+    settings.budgets.insert("go.build-cache".to_owned(), 0);
+    let before = paths(&root);
+    let report = maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    let after = paths(&root);
+
+    let trims = report.stores.unwrap().trims;
+    assert_eq!(trims.len(), 1, "{trims:?}");
+    assert_eq!(trims[0].failure, None);
+    let beneath = |tree: &Path| {
+        before
+            .iter()
+            .filter(|path| path.starts_with(tree))
+            .cloned()
+            .collect()
+    };
+    let mut expected: BTreeSet<PathBuf> = beneath(&landed);
+    for target in [&fixture.repo, &unpushed, &changed] {
+        let gone: BTreeSet<PathBuf> = beneath(&target.join("target"));
+        expected.extend(gone);
+    }
+    expected.insert(stale);
+    let removed: BTreeSet<PathBuf> = before.difference(&after).cloned().collect();
+    assert_eq!(removed, expected);
+    let state = &fixture.directories.state;
+    let added: Vec<_> = after
+        .difference(&before)
+        .filter(|path| !path.starts_with(state))
+        .collect();
+    assert!(added.is_empty(), "{added:?}");
+    assert!(held.join("target/app").exists() && recent.exists());
+    assert_eq!(
+        fs::read_to_string(changed.join("change.txt")).unwrap(),
+        "edited"
+    );
+
+    // A second run finds nothing more to remove.
+    maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    assert_eq!(paths(&root), after);
 }

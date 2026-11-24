@@ -157,7 +157,7 @@ impl Eviction {
                 continue;
             }
             // Go may remove an entry during the read.
-            let Some(stat) = entry_stat(directory, name) else {
+            let Some(stat) = entry_stat(directory, name)? else {
                 continue;
             };
             // A directory of another filesystem, mounted here, is no part of
@@ -213,7 +213,7 @@ fn evict(root: &OwnedFd, candidate: &Candidate) -> Result<Outcome, String> {
     let Some(directory) = open_subdirectory(root, candidate.subdirectory)? else {
         return Ok(Outcome::Kept);
     };
-    let Some(stat) = entry_stat(&directory, &candidate.name) else {
+    let Some(stat) = entry_stat(&directory, &candidate.name)? else {
         let absent = rustix::fs::statat(&directory, &candidate.name, AtFlags::SYMLINK_NOFOLLOW)
             .is_err_and(|err| err == rustix::io::Errno::NOENT);
         return Ok(if absent { Outcome::Gone } else { Outcome::Kept });
@@ -242,11 +242,17 @@ fn used(stat: &Stat) -> (i64, i64) {
 /// The status of a regular file that this user owns, or none. An entry of
 /// another kind, such as the directory of a cached executable, stays. So
 /// does a file with a second link, whose removal frees nothing.
-fn entry_stat(directory: &OwnedFd, name: &CStr) -> Option<Stat> {
-    let stat = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+fn entry_stat(directory: &OwnedFd, name: &CStr) -> Result<Option<Stat>, String> {
+    let stat = match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(err) => {
+            return Err(format!("could not read {}: {err}", name.to_string_lossy()));
+        }
+    };
     let regular = FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile;
     let own = stat.st_uid == rustix::process::geteuid().as_raw();
-    (regular && own && stat.st_nlink == 1).then_some(stat)
+    Ok((regular && own && stat.st_nlink == 1).then_some(stat))
 }
 
 /// Whether `name` is the name that Go gives an entry of this directory: the
@@ -324,6 +330,25 @@ mod tests {
         assert!(!path.exists());
         // Go may remove the entry first, which frees its space as well.
         assert_eq!(evict(&root, &candidate), Ok(Outcome::Gone));
+    }
+
+    #[test]
+    fn states_a_failure_to_read_an_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        // The superuser reads every directory.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let (root, candidate, path) = collected(dir.path());
+        let parent = path.parent().unwrap();
+        // A directory that a process may list and not search names entries
+        // whose status the process cannot read.
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o400)).unwrap();
+        let outcome = evict(&root, &candidate);
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(path.exists());
     }
 
     #[test]

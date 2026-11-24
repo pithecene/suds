@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use suds_core::development::{self, Environment};
-use suds_core::organize::journal::Journal;
+use suds_core::organize::journal::{Event, Journal};
 use suds_core::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
@@ -25,11 +25,15 @@ pub fn reclaim_command(args: &ReclaimArgs) -> ExitCode {
 }
 
 fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
+    if let Some(id) = &args.apply {
+        return apply(args, id);
+    }
+    // A change during the inspection counts as later than the plan.
+    let now = now_seconds();
     let workspaces = workspaces_of(&args.roots)?;
     // An environment without a home directory names no store, so the
     // inspection measures the checkouts alone.
     let scan = development::inspect(&workspaces, &Environment::default());
-    let git = Git::default();
     let policy = Policy {
         idle_seconds: args.idle_minutes.saturating_mul(60),
         checkouts: if args.checkouts {
@@ -43,19 +47,31 @@ fn run(args: &ReclaimArgs) -> Result<ExitCode, String> {
         liveness: &Liveness::observe(),
         registry: &standings(),
     };
-    let plan = plan_reclaim(&scan, &observed, &git, policy, now_seconds());
-
-    if !args.apply {
-        return planned(emit(args.format, &plan, write_plan));
+    let plan = plan_reclaim(&scan, &observed, &Git::default(), policy, now);
+    if args.save {
+        let directory = journal_directory(&args.journal)?;
+        let mut journal = Journal::open(&directory).map_err(|err| err.to_string())?;
+        journal
+            .append(Event::ReclaimPlanned { plan: plan.clone() })
+            .map_err(|err| err.to_string())?;
     }
+    planned(emit(args.format, &plan, |out, plan| {
+        write_plan(out, plan, args.save)
+    }))
+}
 
+/// Applies the plan that the journal records as `id`. The person read that
+/// plan, so the run builds no other.
+fn apply(args: &ReclaimArgs, id: &str) -> Result<ExitCode, String> {
     let directory = journal_directory(&args.journal)?;
     let mut journal = Journal::open(&directory).map_err(|err| err.to_string())?;
+    let plan = execute::recorded(&journal, id)
+        .ok_or_else(|| format!("the journal records no reclaim plan {id}"))?;
     let conditions = Conditions {
         authority: Authority::Person,
         observe: &mut Liveness::observe,
         registry: &mut standings,
-        git: &git,
+        git: &Git::default(),
         now: now_seconds(),
     };
     let report = execute::apply(&mut journal, &plan, conditions).map_err(|err| err.to_string())?;
@@ -74,7 +90,7 @@ fn standings() -> Reading {
     }
 }
 
-fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {
+fn write_plan(out: &mut impl Write, plan: &ReclaimPlan, saved: bool) -> io::Result<()> {
     let mut rows = vec![
         ["DECISION", "KIND", "ALLOCATED", "PATH", "REASON"]
             .map(str::to_owned)
@@ -101,9 +117,14 @@ fn write_plan(out: &mut impl Write, plan: &ReclaimPlan) -> io::Result<()> {
     writeln!(out)?;
     writeln!(
         out,
-        "The plan removes {removable} directories and frees about {}. Suds changed nothing. Run the command with --apply to remove them.",
+        "The plan removes {removable} directories and frees about {}. Suds removed nothing.",
         format_bytes(plan.removable_bytes())
-    )
+    )?;
+    if saved {
+        writeln!(out, "Apply the plan with: suds reclaim --apply {}", plan.id)
+    } else {
+        writeln!(out, "Save a plan with --save to apply it.")
+    }
 }
 
 /// Why the plan decided as it did: the last fact of its evidence, behind

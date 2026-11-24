@@ -4,7 +4,8 @@ This guide describes the `suds reclaim` command, which removes build state that 
 
 ```sh
 suds reclaim --root ~/workspace                 # the plan, with nothing changed
-suds reclaim --root ~/workspace --apply         # remove what the plan names
+suds reclaim --root ~/workspace --save          # record the plan and print its identifier
+suds reclaim --apply PLAN                       # remove what that plan names
 suds reclaim --root ~/workspace --checkouts     # consider linked checkouts too
 suds reclaim --root ~/workspace --idle-minutes 240
 ```
@@ -67,20 +68,17 @@ A remote-tracking branch can show that a remote holds the checkout's
 head. A person who runs `suds reclaim --apply` can also use a release with
 `--landed COMMIT` as evidence while the head still matches `COMMIT`.
 
-A scheduled run with standing approval requires a release with
-`--landed COMMIT`. At planning and before removal, Suds checks that the
-head matches the release and that a local remote-tracking reference
-contains it. Suds accounts for every entry in the checkout. The landed
-tree accounts for tracked files and their directories. The build-state
-rules above account for ignored build output. Any other file or directory
-keeps the checkout, as does a checkout beneath it, a mount point, or an
-entry Suds could not read. The plan or journal names the first path that
-keeps the checkout.
+A scheduled run names no checkout, whatever the standing approval. A checkout
+leaves only through a plan that a person read.
 
 Suds has Git remove the linked checkout without force. The branch and its
 commits stay in the repository. Suds never names a main checkout.
 
-With `--apply`, Suds records the plan in the journal and judges each
+With `--apply`, Suds reads the saved plan from its journal and builds no
+other plan. A candidate stays when any entry in it changed after the plan,
+however long the candidate then stood idle. Suds compares the time of each
+status change, which no program sets. A checkout whose head moved stays, and
+so does build output that another repository came to own. Suds records the plan in the journal and judges each
 candidate again immediately before its removal. The directory must be the
 entry that the plan measured, with no symbolic link in its path. Suds then
 observes the processes, measures the directory, and asks Git anew, and it

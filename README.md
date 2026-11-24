@@ -43,11 +43,11 @@ the application to the desktop's menu.
 # Measure each checkout beneath a workspace, with its build output and the shared stores.
 suds inspect --profile development --root ~/workspace
 
-# Plan the removal of build output that no process uses. The plan removes nothing.
-suds reclaim --root ~/workspace
+# Save a plan for the removal of build output that no process uses. The plan removes nothing.
+suds reclaim --root ~/workspace --save
 
-# Remove what the plan names.
-suds reclaim --root ~/workspace --apply
+# Remove what that plan names.
+suds reclaim --apply PLAN
 
 # Plan each shared store's trim to its budget, then run the trims.
 suds stores

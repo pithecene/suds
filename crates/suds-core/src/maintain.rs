@@ -105,7 +105,8 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     let standings = registry::reading(&registry_path);
     let policy = Policy {
         idle_seconds,
-        checkouts: CheckoutScope::Landed,
+        // A checkout leaves only through a plan that a person approved.
+        checkouts: CheckoutScope::DerivedOnly,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
     };
     let observed = Observed {

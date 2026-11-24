@@ -36,21 +36,17 @@ person watches.
    requests a reclamation.
 3. Authority for a removal follows the class of the state and never its
    author. The owner's standing approval covers derived state inside the
-   arena and released linked checkouts there with proof for every entry.
+   arena, and it covers no checkout.
    Unique state, which includes an uncommitted change, an
    unpushed commit, and every file outside the arena, needs a person's
    approval of each plan.
 4. A main checkout belongs to the owner. Suds never proposes its removal,
    and it treats the build output inside it as derived state.
 5. Suds removes nothing because of its age. A shared store leaves by its
-   budget. A scheduled run can remove a clean, idle linked checkout when
-   no client still holds it and a client's release with `--landed COMMIT`
-   matches its head. At planning and before removal, Suds verifies that a
-   local remote-tracking reference contains that commit. Suds also checks
-   that Git tracks the files at that commit or that Git ignores them and
-   the build-state rules prove that a build regenerates them. Any other
-   entry keeps the checkout, as does a checkout beneath it, a mount point,
-   or an entry Suds could not read.
+   budget. A linked checkout leaves only through a saved plan that a person
+   approved, and the run applies that plan and no other. The run keeps a
+   candidate that changed after the plan. Suds accounts for every entry of
+   the checkout at the plan and again before the removal.
 6. The ceiling and each budget are settings. The default ceiling is the
    greater of half of the disk and 100 GB.
 

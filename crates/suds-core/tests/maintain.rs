@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use suds_core::development::Environment;
+use suds_core::development::{self, Environment};
 use suds_core::maintain::{Context, maintain, read_pressure};
 use suds_core::organize::journal::{Event, read};
 use suds_core::pressure::Level;
 use suds_core::reclaim::execute::Authority;
 use suds_core::reclaim::git::Git;
-use suds_core::reclaim::plan::{Candidate, Decision, Kept, ReclaimPlan, Subject};
+use suds_core::reclaim::liveness::Liveness;
+use suds_core::reclaim::plan::{
+    Candidate, CheckoutScope, Decision, Kept, Observed, Policy, ReclaimPlan, Subject, plan_reclaim,
+};
 use suds_core::registry::{self, Event as RegistryEvent};
 use suds_core::state::{Directories, Settings};
 use suds_core::stores::Programs;
@@ -170,6 +173,25 @@ impl Fixture {
         checkout
     }
 
+    /// The plan by the rules of a landed checkout, as it stands before a run
+    /// that reclaims the build state.
+    fn landed_plan(&self) -> ReclaimPlan {
+        let scan = development::inspect(&self.settings(true).roots, &self.environment);
+        let registry = registry::reading(&self.directories.registry());
+        let observed = Observed {
+            liveness: &Liveness::observe(),
+            registry: &registry,
+        };
+        let policy = Policy {
+            idle_seconds: 3600,
+            checkouts: CheckoutScope::Landed,
+            tolerate_unreadable_processes: true,
+        };
+        let plan = plan_reclaim(&scan, &observed, &Git::default(), policy, LATER);
+        self.reclaim_plan();
+        plan
+    }
+
     fn reclaim_plan(&self) -> ReclaimPlan {
         let report = maintain(&self.settings(true), &self.context(&Git::default())).unwrap();
         assert_eq!(
@@ -272,36 +294,33 @@ fn reclaims_under_the_standing_approval_and_records_that_authority() {
     )));
 }
 
+/// The rules of a landed checkout admit it, and a run that no person approved
+/// still names no checkout.
 #[test]
-fn removes_a_landed_checkout_with_tracked_files_and_build_state() {
+fn an_unattended_run_names_no_checkout() {
     let fixture = Fixture::new();
     let checkout = fixture.landed_checkout();
     let head = Git::default().head(&checkout).unwrap();
-    let plan = fixture.reclaim_plan();
-    let (index, candidate) = linked_candidate(&plan, &checkout);
+    let admitted = fixture.landed_plan();
+    let (_, candidate) = linked_candidate(&admitted, &checkout);
     assert_eq!(
         candidate.decision,
         Decision::Remove,
         "{:?}",
         candidate.evidence
     );
-    assert!(!checkout.exists());
-    git(
-        &fixture.repo,
-        &["show-ref", "--verify", "refs/heads/feature"],
-    );
     let proof =
         format!("the remote-tracking reference refs/remotes/origin/pull/42/head holds {head}");
     assert!(candidate.evidence.contains(&proof));
+
+    let plan = fixture.journaled_plan();
     assert!(
-        read(&fixture.directories.journal())
-            .unwrap()
+        plan.candidates
             .iter()
-            .any(|record| {
-                matches!(&record.event, Event::Removed { index: removed, evidence, .. }
-            if *removed == index && evidence.contains(&proof))
-            })
+            .all(|candidate| candidate.subject != Subject::LinkedCheckout)
     );
+    assert!(checkout.join("change.txt").exists());
+    assert!(!checkout.join("target").exists());
 }
 
 #[test]
@@ -314,7 +333,7 @@ fn keeps_a_landed_checkout_with_an_ignored_file() {
     assert!(git.is_clean(&checkout).unwrap());
     assert_eq!(git.unpushed(&checkout).unwrap(), 0);
 
-    let plan = fixture.reclaim_plan();
+    let plan = fixture.landed_plan();
     let (_, candidate) = linked_candidate(&plan, &checkout);
     assert_eq!(candidate.kept, Some(Kept::UnaccountedContent));
     assert_eq!(
@@ -333,7 +352,7 @@ fn keeps_a_landed_checkout_with_an_ignored_empty_directory() {
     fs::create_dir(&ignored).unwrap();
     assert!(Git::default().is_clean(&checkout).unwrap());
 
-    let plan = fixture.reclaim_plan();
+    let plan = fixture.landed_plan();
     let (_, candidate) = linked_candidate(&plan, &checkout);
     assert_eq!(candidate.kept, Some(Kept::UnaccountedContent));
     assert_eq!(
@@ -354,7 +373,7 @@ fn keeps_a_landed_checkout_with_a_linked_checkout_beneath_it() {
     );
     assert!(Git::default().is_clean(&checkout).unwrap());
 
-    let plan = fixture.reclaim_plan();
+    let plan = fixture.landed_plan();
     let (_, candidate) = linked_candidate(&plan, &checkout);
     assert_eq!(candidate.kept, Some(Kept::HoldsCheckout));
     assert_eq!(
@@ -383,7 +402,7 @@ fn keeps_a_pushed_checkout_after_an_ordinary_release() {
     )
     .unwrap();
 
-    let plan = fixture.reclaim_plan();
+    let plan = fixture.landed_plan();
     assert_eq!(
         linked_candidate(&plan, &checkout).1.kept,
         Some(Kept::NoLandedRelease)
@@ -409,7 +428,7 @@ fn keeps_a_landed_checkout_that_a_second_client_still_holds() {
     }
     fixture.release_landed(&checkout);
 
-    let plan = fixture.reclaim_plan();
+    let plan = fixture.landed_plan();
     assert_eq!(
         linked_candidate(&plan, &checkout).1.kept,
         Some(Kept::Registered)
@@ -520,8 +539,8 @@ fn an_unattended_run_removes_exactly_what_its_rules_name() {
             .cloned()
             .collect()
     };
-    let mut expected: BTreeSet<PathBuf> = beneath(&landed);
-    for target in [&fixture.repo, &unpushed, &changed] {
+    let mut expected: BTreeSet<PathBuf> = BTreeSet::new();
+    for target in [&fixture.repo, &landed, &unpushed, &changed] {
         let gone: BTreeSet<PathBuf> = beneath(&target.join("target"));
         expected.extend(gone);
     }
@@ -618,6 +637,8 @@ fn an_unattended_run_spares_a_running_build() {
             root.as_path()
         };
         let build = RunningBuild::start(&target, directory, root.join("stop"));
+        // A change within the plan's own second counts as later.
+        std::thread::sleep(Duration::from_millis(1100));
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();

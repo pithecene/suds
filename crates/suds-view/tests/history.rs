@@ -42,6 +42,8 @@ fn candidate(path: &Path) -> Candidate {
         checkout: NativePath::new(parent.to_owned()),
         repository: None,
         expected: EntryRevision::from_metadata(&fs::metadata(parent).unwrap()),
+        owner: None,
+        head: None,
         allocated_bytes: 3 * GIB,
         logical_bytes: 3 * GIB,
         decision: Decision::Remove,

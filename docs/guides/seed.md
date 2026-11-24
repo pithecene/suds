@@ -67,9 +67,8 @@ Linux, and APFS clones on macOS.
 ## Limits
 
 - The command seeds the build state of Cargo alone.
-- On Linux, a measurement counts a cloned block once, in the first file
-  that the scan reaches. A file below 16 KiB counts in full. On macOS, a
-  measurement counts a cloned file in each checkout that holds it, so the
-  reported usage exceeds the space that the disk holds for clones.
+- A measurement counts a cloned block once, in the first file that the scan
+  reaches. A file below 16 KiB counts in full. On macOS, so does a file that
+  shares only a part of its blocks.
 - Cargo compiles the workspace's own packages again after a seed, because
   the new checkout's source files are newer than the cloned artifacts.

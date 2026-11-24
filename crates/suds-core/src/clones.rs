@@ -1,17 +1,19 @@
 //! The extents that a file shares with another file.
 //!
-//! A filesystem that clones files, such as btrfs or XFS, stores a cloned
+//! A filesystem that clones files, such as btrfs, XFS, or APFS, stores a cloned
 //! block once for each file that holds it. A measurement that sums each
 //! file's blocks counts such a block once for each file. The kernel names
 //! each shared extent of a file, so a scan counts the extent in the first
-//! file that reaches it, as it counts a file with several links.
+//! file that reaches it, as it counts a file with several links. APFS names
+//! the file's clones in place of its extents.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::Metadata;
 use std::io;
 use std::path::Path;
 
-/// One extent on the disk: its first byte and its length in bytes.
+/// One extent on the disk: its first byte and its length in bytes. On macOS,
+/// the number of a file's clones stands in for the place on the disk.
 pub(crate) type Extent = (u64, u64);
 
 /// The ranges of each filesystem's disk that a scan has counted.
@@ -49,11 +51,11 @@ impl Counted {
     }
 }
 
-/// The size below which a scan asks for no file's extents. The question
-/// costs one open for each file, and small files hold few shared bytes.
-/// On one workstation the floor kept 89 percent of the correction. It
-/// cost a seventh of the time.
-#[cfg(target_os = "linux")]
+/// The size below which a scan asks for no file's clones. Each question costs
+/// one call, and small files hold few shared bytes. The floor kept 89 percent
+/// of the correction on one Linux workstation, which cost a seventh of the
+/// time. It kept 97 percent on one macOS workstation, at a fourteenth.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const FLOOR: u64 = 16 * 1024;
 
 /// Each extent of the regular file at `path` that the file shares, in the
@@ -215,8 +217,154 @@ mod map {
     }
 }
 
+/// The data of the regular file at `path`, as one extent, where it shares
+/// every block with a clone. APFS gives a file that changes another number.
+/// A file below the floor counts in full.
+#[cfg(target_os = "macos")]
+pub(crate) fn shared(path: &Path, meta: &Metadata) -> io::Result<Vec<Extent>> {
+    use std::os::unix::fs::MetadataExt;
+
+    if meta.blocks() == 0 || meta.len() < FLOOR {
+        return Ok(Vec::new());
+    }
+    let Some(clones) = apfs::clones(path)? else {
+        return Ok(Vec::new());
+    };
+    // Another entry may have taken the path since the scan read `meta`.
+    if (clones.device, clones.inode) != (meta.dev(), meta.ino()) {
+        return Ok(Vec::new());
+    }
+    let bytes = clones.bytes.min(meta.blocks() * 512);
+    Ok(apfs::extent(clones.number, bytes).into_iter().collect())
+}
+
+/// The attributes by which APFS names a file's clones.
+#[cfg(target_os = "macos")]
+mod apfs {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    use super::Extent;
+
+    /// The file shares every block with another file, which the system's
+    /// headers name `EF_SHARES_ALL_BLOCKS`.
+    const SHARES_ALL: u64 = 0x40;
+    /// The range of places that each number owns, so no two numbers' extents
+    /// touch.
+    const SPAN: u64 = 1 << 32;
+
+    /// A file whose data shares every block with another file.
+    pub struct Clones {
+        pub device: u64,
+        pub inode: u64,
+        /// The number that the file shares with its clones.
+        pub number: u64,
+        /// The allocated bytes of the data alone. A resource fork is no part
+        /// of what the number names.
+        pub bytes: u64,
+    }
+
+    /// The answer in the kernel's layout: its length, the sets of returned
+    /// attributes, and then each attribute in the order of its set.
+    #[repr(C, packed(4))]
+    #[derive(Clone, Copy)]
+    struct Answer {
+        length: u32,
+        returned: libc::attribute_set_t,
+        device: i32,
+        inode: u64,
+        data_bytes: i64,
+        number: u64,
+        flags: u64,
+    }
+
+    /// The clones of the file at `path`, or none where the file shares less
+    /// than every block or the filesystem names no clones.
+    #[expect(
+        unsafe_code,
+        reason = "no safe interface reads the clone attributes of APFS"
+    )]
+    pub fn clones(path: &Path) -> io::Result<Option<Clones>> {
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        let mut request = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: libc::ATTR_CMN_RETURNED_ATTRS
+                | libc::ATTR_CMN_DEVID
+                | libc::ATTR_CMN_FILEID,
+            volattr: 0,
+            dirattr: 0,
+            fileattr: libc::ATTR_FILE_DATAALLOCSIZE,
+            forkattr: libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS,
+        };
+        let mut answer = std::mem::MaybeUninit::<Answer>::zeroed();
+        // SAFETY: the path ends in a null byte. The kernel reads `request`,
+        // and it writes at most the size of `Answer`, for which zero bytes
+        // and any other bytes are valid.
+        let (status, answer) = unsafe {
+            let status = libc::getattrlist(
+                path.as_ptr(),
+                (&raw mut request).cast(),
+                answer.as_mut_ptr().cast(),
+                size_of::<Answer>(),
+                libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
+            );
+            (status, answer.assume_init())
+        };
+        if status != 0 {
+            let err = io::Error::last_os_error();
+            // A filesystem without these attributes names no clone.
+            return match err.raw_os_error() {
+                Some(libc::EINVAL | libc::ENOTSUP) => Ok(None),
+                _ => Err(err),
+            };
+        }
+        let returned = answer.returned;
+        // An attribute that the filesystem leaves out moves those behind it.
+        let complete = returned.commonattr == request.commonattr
+            && returned.fileattr == request.fileattr
+            && returned.forkattr == request.forkattr;
+        if !complete || answer.flags & SHARES_ALL == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Clones {
+            device: u64::from(answer.device.cast_unsigned()),
+            inode: answer.inode,
+            number: answer.number,
+            bytes: u64::try_from(answer.data_bytes).unwrap_or(0),
+        }))
+    }
+
+    /// The extent that stands for `bytes` of the clones `number`, or none
+    /// where the two exceed the range of places.
+    pub fn extent(number: u64, bytes: u64) -> Option<Extent> {
+        (bytes < SPAN).then_some(())?;
+        Some((number.checked_mul(SPAN)?, bytes))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Answer, extent};
+
+        #[test]
+        fn the_answer_holds_the_kernels_layout() {
+            assert_eq!(size_of::<Answer>(), 4 + 20 + 4 + 8 + 8 + 8 + 8);
+        }
+
+        #[test]
+        fn two_numbers_own_ranges_apart() {
+            let (first, length) = extent(7, (1 << 32) - 1).unwrap();
+            assert!(first + length < extent(8, 1).unwrap().0);
+            assert_eq!(extent(7, 1 << 32), None);
+            assert_eq!(extent(1 << 33, 1), None);
+        }
+    }
+}
+
 /// No other system names a shared extent to a scan.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn shared(_path: &Path, _meta: &Metadata) -> io::Result<Vec<Extent>> {
     Ok(Vec::new())
 }

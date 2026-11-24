@@ -18,6 +18,10 @@ serde_json.workspace = true
 # device.
 rustix.workspace = true
 
+# APFS names a file's clones through getattrlist, which rustix lacks.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

@@ -53,7 +53,7 @@ another. Each reading says in its `enforced` field whether a filesystem
 limit enforces the ceiling, as [Arena](arena.md) describes.
 
 With the owner's standing approval in the settings, `maintain` reclaims
-derived state, removes eligible landed linked checkouts, and trims the
+derived state and trims the
 stores. The journal records the standing approval as the run's authority.
 
 Suds reads its settings from the file `settings.json`. On Linux the file

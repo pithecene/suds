@@ -91,6 +91,13 @@ pub struct Candidate {
     pub repository: Option<NativePath>,
     /// The directory's revision at planning.
     pub expected: EntryRevision,
+    /// The revision of the owning checkout's `.git` entry at planning. A plan
+    /// of an earlier release names none, and a run removes nothing of it.
+    #[serde(default)]
+    pub owner: Option<EntryRevision>,
+    /// The head of a linked checkout at planning.
+    #[serde(default)]
+    pub head: Option<String>,
     pub allocated_bytes: u64,
     pub logical_bytes: u64,
     pub decision: Decision,
@@ -242,6 +249,7 @@ pub fn plan_reclaim(
                 &build.repositories,
             );
             candidates.extend(candidate(
+                git,
                 &build.path,
                 subject,
                 checkout,
@@ -272,6 +280,7 @@ pub fn plan_reclaim(
             };
             let subject = Subject::LinkedCheckout;
             candidates.extend(candidate(
+                git,
                 &checkout.path,
                 subject,
                 checkout,
@@ -306,6 +315,7 @@ pub fn plan_reclaim(
             &repositories,
         );
         candidates.extend(candidate(
+            git,
             &store.path,
             subject,
             owner,
@@ -681,7 +691,9 @@ impl Judge<'_> {
     /// Keeps a candidate whose newest entry changed within the idle time.
     fn recent(&self, newest: Option<&str>, evidence: &mut Vec<String>) -> Option<Kept> {
         match newest {
-            Some(newest) if newest > self.idle_since.as_str() => {
+            // A time states whole seconds, so a change within the same second
+            // counts as later.
+            Some(newest) if newest >= self.idle_since.as_str() => {
                 evidence.push(format!(
                     "an entry changed at {newest}, after {}",
                     self.idle_since
@@ -799,6 +811,7 @@ fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
 /// Builds one candidate, or none when the directory vanished after the
 /// inspection.
 fn candidate(
+    git: &Git,
     path: &Path,
     subject: Subject,
     checkout: &Checkout,
@@ -807,12 +820,17 @@ fn candidate(
     evidence: Vec<String>,
 ) -> Option<Candidate> {
     let meta = fs::symlink_metadata(path).ok()?;
+    let owner = fs::symlink_metadata(checkout.path.join(".git")).ok();
     Some(Candidate {
         path: NativePath::new(path.to_path_buf()),
         subject,
         checkout: NativePath::new(checkout.path.clone()),
         repository: checkout.repository.clone().map(NativePath::new),
         expected: EntryRevision::from_metadata(&meta),
+        owner: owner.as_ref().map(EntryRevision::from_metadata),
+        head: (subject == Subject::LinkedCheckout)
+            .then(|| git.head(path).ok())
+            .flatten(),
         allocated_bytes: measure.allocated_bytes,
         logical_bytes: measure.logical_bytes,
         decision: if kept.is_some() {

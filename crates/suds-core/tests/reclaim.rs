@@ -189,6 +189,14 @@ impl Fixture {
     }
 }
 
+/// The refusal of a checkout in a run that no person approved.
+fn not_covered(checkout: &Path) -> String {
+    format!(
+        "{} is a checkout, which the standing approval does not cover",
+        checkout.display()
+    )
+}
+
 const IDLE_SECONDS: i64 = 3600;
 
 /// Opens the journal, and waits when it is busy. A test in another thread
@@ -1010,6 +1018,8 @@ fn removes_a_released_checkout_and_its_build_state_in_one_run() {
     // happens at the present, so a change during the run counts as recent.
     let idle = std::time::Duration::from_secs(IDLE);
     backdate(&fixture.linked, SystemTime::now() - 2 * idle);
+    // A change within the plan's own second counts as later.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let plan = fixture.plan_at(&nobody(), false, now());
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
     assert_eq!(
@@ -1043,9 +1053,16 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
     fs::set_permissions(&module, fs::Permissions::from_mode(0o555)).unwrap();
     fixture.record(&fixture.linked, registry::Event::Released);
 
-    let plan = fixture.plan(&nobody(), false);
+    // The plan is of the present, so the change that Suds makes to the cache's
+    // permissions is later than the plan.
+    backdate(
+        &fixture.linked,
+        SystemTime::now() - std::time::Duration::from_secs(2 * IDLE),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let plan = fixture.plan_at(&nobody(), false, now());
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
-    let report = fixture.apply(&plan);
+    let report = fixture.apply_at(&plan, &mut nobody, now());
     assert_eq!(report.status, RunStatus::Complete, "{:?}", report.removals);
     assert!(!fixture.linked.exists());
 }
@@ -1076,12 +1093,12 @@ fn refuses_an_ignored_file_that_appeared_after_planning() {
         .find(|removal| removal.path.as_path() == fixture.linked)
         .unwrap();
     assert!(!removal.removed);
-    assert_eq!(removal.refusal.as_deref(), Some(reason.as_str()));
+    assert_eq!(removal.refusal, Some(not_covered(&fixture.linked)));
     assert_eq!(fs::read_to_string(&added).unwrap(), "workflow history");
     assert!(!fixture.linked.join("target").exists());
     assert!(read(&fixture.journal).unwrap().iter().any(|record| {
         matches!(&record.event, Event::RemovalRefused { run, reason: recorded, .. }
-            if run == &report.run && recorded == &reason)
+            if run == &report.run && recorded == &not_covered(&fixture.linked))
     }));
 
     // A person's plan keeps the record as well, and the plan states it.
@@ -1096,7 +1113,7 @@ fn refuses_an_ignored_file_that_appeared_after_planning() {
 #[test]
 fn refuses_a_landed_checkout_when_its_tracking_reference_disappears() {
     let fixture = Fixture::new();
-    let head = fixture.release_landed();
+    fixture.release_landed();
     let at = now() + 2 * IDLE_SECONDS;
     let plan = fixture.plan_with_scope(&nobody(), CheckoutScope::Landed, at);
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
@@ -1105,18 +1122,15 @@ fn refuses_a_landed_checkout_when_its_tracking_reference_disappears() {
         &["update-ref", "-d", "refs/remotes/origin/feature"],
     );
 
+    let later = fixture.plan_with_scope(&nobody(), CheckoutScope::Landed, at);
+    assert_eq!(find(&later, &fixture.linked).kept, Some(Kept::Unverified));
     let report = fixture.apply_unattended(&plan, at);
     let removal = report
         .removals
         .iter()
         .find(|removal| removal.path.as_path() == fixture.linked)
         .unwrap();
-    assert_eq!(
-        removal.refusal,
-        Some(format!(
-            "no remote-tracking reference holds the released head {head}"
-        ))
-    );
+    assert_eq!(removal.refusal, Some(not_covered(&fixture.linked)));
     assert!(fixture.linked.join("src/lib.rs").is_file());
 }
 
@@ -1137,7 +1151,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         Some(Kept::UnpushedCommits)
     );
 
-    let head = fixture.release_landed();
+    fixture.release_landed();
     let plan = fixture.plan(&nobody(), false);
     let candidate = find(&plan, &fixture.linked);
     assert_eq!(
@@ -1147,7 +1161,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         candidate.evidence
     );
 
-    // Standing approval needs a reference that contains the released head.
+    // Standing approval covers no checkout.
     let unattended = fixture.apply_unattended(&plan, now() + 2 * IDLE_SECONDS);
     assert!(fixture.linked.exists());
     let removal = unattended
@@ -1155,12 +1169,7 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
         .iter()
         .find(|removal| removal.path.as_path() == fixture.linked)
         .unwrap();
-    assert_eq!(
-        removal.refusal,
-        Some(format!(
-            "no remote-tracking reference holds the released head {head}"
-        ))
-    );
+    assert_eq!(removal.refusal, Some(not_covered(&fixture.linked)));
 
     // A commit after the report is work that no remote holds.
     write(&fixture.linked.join("src/more.rs"), "pub fn g() {}");
@@ -1217,4 +1226,139 @@ fn a_persons_run_keeps_a_linked_checkout_with_an_ignored_file() {
             assert!(fixture.linked.join("src/lib.rs").exists());
         }
     }
+}
+
+/// A person approves a plan as it stood. A change after the plan keeps its
+/// candidate, however long the candidate then stands idle.
+#[test]
+fn a_change_after_the_plan_keeps_its_candidate() {
+    let fixture = Fixture::new();
+    let mut plan = fixture.plan(&nobody(), true);
+    // The fixture's files are newer than this plan.
+    plan.created_at = "2001-01-01T00:00:00Z".to_owned();
+    let report = fixture.apply(&plan);
+    assert!(report.removals.iter().all(|removal| !removal.removed));
+    assert!(fixture.linked.join("target").exists());
+    assert!(fixture.repo.join("target").exists());
+}
+
+/// A repository that appears between the owner and the build output can track
+/// what the outer one ignores.
+#[test]
+fn keeps_build_state_that_another_checkout_came_to_own() {
+    let fixture = Fixture::new();
+    let inner = fixture.repo.join("crates/inner");
+    write(&inner.join("Cargo.toml"), "[package]");
+    build_output(&inner);
+    let plan = fixture.plan(&nobody(), false);
+    let target = inner.join("target");
+    assert_eq!(find(&plan, &target).decision, Decision::Remove);
+    git(&inner, &["init"]);
+    git(&inner, &["add", "--force", "target"]);
+    fixture.apply(&plan);
+    assert!(target.exists());
+}
+
+#[test]
+fn keeps_build_state_whose_repository_another_one_replaced() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan(&nobody(), false);
+    let target = fixture.repo.join("target");
+    assert_eq!(find(&plan, &target).decision, Decision::Remove);
+    let repository = fixture.repo.join(".git");
+    fs::rename(&repository, fixture.repo.join("earlier.git")).unwrap();
+    git(&fixture.repo, &["init"]);
+    let report = fixture.apply(&plan);
+    assert!(target.exists());
+    let removal = report.removals.iter().find(|r| r.path.as_path() == target);
+    assert!(
+        removal
+            .unwrap()
+            .refusal
+            .as_ref()
+            .unwrap()
+            .contains("another repository")
+    );
+}
+
+/// A checkout can be build state by its layout, and its root then holds the
+/// pointer to a repository.
+#[test]
+fn keeps_build_state_that_became_a_checkout() {
+    let fixture = Fixture::new();
+    let target = fixture.repo.join("target");
+    let plan = fixture.plan(&nobody(), false);
+    write(
+        &target.join(".git"),
+        "gitdir: /elsewhere/store/worktrees/target",
+    );
+    let report = fixture.apply(&plan);
+    assert!(target.exists());
+    let removal = report.removals.iter().find(|r| r.path.as_path() == target);
+    assert!(
+        removal
+            .unwrap()
+            .refusal
+            .as_ref()
+            .unwrap()
+            .contains("another checkout")
+    );
+}
+
+#[test]
+fn keeps_a_checkout_whose_head_moved_after_the_plan() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan(&nobody(), true);
+    let candidate = find(&plan, &fixture.linked);
+    assert_eq!(
+        candidate.decision,
+        Decision::Remove,
+        "{:?}",
+        candidate.evidence
+    );
+    git(&fixture.linked, &["switch", "--quiet", "--detach"]);
+    git(
+        &fixture.linked,
+        &["commit", "--quiet", "--allow-empty", "-m", "later"],
+    );
+    git(
+        &fixture.linked,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/later"],
+    );
+    let report = fixture.apply(&plan);
+    assert!(fixture.linked.exists());
+    let removal = report
+        .removals
+        .iter()
+        .find(|r| r.path.as_path() == fixture.linked);
+    assert!(
+        removal
+            .unwrap()
+            .refusal
+            .as_ref()
+            .unwrap()
+            .contains("the head of")
+    );
+}
+
+#[test]
+fn keeps_build_state_whose_checkout_points_to_another_repository() {
+    let fixture = Fixture::new();
+    backdate(
+        &fixture.linked,
+        SystemTime::now() - std::time::Duration::from_secs(2 * IDLE),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let plan = fixture.plan_at(&nobody(), false, now());
+    let target = fixture.linked.join("target");
+    assert_eq!(find(&plan, &target).decision, Decision::Remove);
+    // The same content keeps every rule of Git, so only the change shows.
+    let pointer = fixture.linked.join(".git");
+    let content = fs::read(&pointer).unwrap();
+    fs::write(&pointer, content).unwrap();
+    let report = fixture.apply_at(&plan, &mut nobody, now());
+    assert!(target.exists());
+    let removal = report.removals.iter().find(|r| r.path.as_path() == target);
+    let refusal = removal.unwrap().refusal.as_ref().unwrap();
+    assert!(refusal.contains("changed after"), "{refusal}");
 }

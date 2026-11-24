@@ -214,7 +214,7 @@ pub struct StoresArgs {
 pub struct ReclaimArgs {
     /// A directory beneath which Suds looks for checkouts. Repeat the option
     /// for several directories.
-    #[arg(long = "root", value_name = "DIR", required = true)]
+    #[arg(long = "root", value_name = "DIR", required_unless_present = "apply")]
     pub roots: Vec<PathBuf>,
 
     /// The time for which a directory must have stood unchanged.
@@ -226,10 +226,19 @@ pub struct ReclaimArgs {
     #[arg(long)]
     pub checkouts: bool,
 
-    /// Remove what the plan names. Without the option, Suds prints the plan
-    /// and changes nothing.
+    /// Record the plan in the journal, so a person can approve it by its
+    /// identifier.
     #[arg(long)]
-    pub apply: bool,
+    pub save: bool,
+
+    /// Remove what the saved plan of this identifier names, and nothing else.
+    /// Without the option, Suds prints a plan and removes nothing.
+    #[arg(
+        long,
+        value_name = "PLAN",
+        conflicts_with_all = ["roots", "idle_minutes", "checkouts", "save", "tolerate_unreadable_processes"]
+    )]
+    pub apply: Option<String>,
 
     /// Proceed while the system hides the working directory of a process of
     /// this user. Without the option, such a process keeps every directory.

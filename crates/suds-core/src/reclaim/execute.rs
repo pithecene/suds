@@ -146,23 +146,27 @@ pub fn apply(
                     run: run.clone(),
                     index,
                 })?;
-                if candidate.subject == Subject::LinkedCheckout {
-                    // Git removes the checkout's Go caches with it, and Git
-                    // cannot enter a directory that no one may write.
-                    match authority {
-                        Authority::Person => {
-                            for cache in go_caches_beneath(plan, candidate.path.as_path()) {
-                                grant_owner_write(cache);
-                            }
-                        }
-                        Authority::StandingApproval => {
-                            for cache in &checked.go_caches {
-                                grant_owner_write(cache);
-                            }
-                        }
-                    }
+                // Git removes a checkout's Go caches with it, and Git cannot
+                // enter a directory that no one may write. The change walks
+                // each cache, so the checkout's check runs again after it.
+                for cache in &checked.go_caches {
+                    grant_owner_write(cache);
                 }
-                remove(candidate, git).map(|()| checked.evidence)
+                let checked = if checked.go_caches.is_empty() {
+                    Ok(checked)
+                } else {
+                    let liveness = observe();
+                    let standings = registry();
+                    let judge = Judge {
+                        liveness: &liveness,
+                        registry: &standings,
+                        git,
+                        idle_since: idle_since(now, plan.idle_seconds),
+                        tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
+                    };
+                    check(journal.directory(), candidate, authority, &judge)
+                };
+                checked.and_then(|checked| remove(candidate, git).map(|()| checked.evidence))
             }
         };
         let refusal = match outcome {
@@ -296,12 +300,23 @@ fn check(
                 ));
             }
             let (measure, survey, repositories) = development::survey_tree(path);
-            judge.checkout(
+            let (kept, mut evidence) = judge.checkout(
                 path,
                 measure.newest_modified.as_deref(),
                 &survey,
                 &repositories,
-            )
+            );
+            if kept.is_none() {
+                // The entries may have changed since the plan.
+                let go_caches = judge
+                    .unaccounted(path, &mut evidence)
+                    .map_err(|_| evidence.last().cloned().unwrap_or_default())?;
+                return Ok(CheckedRemoval {
+                    evidence,
+                    go_caches,
+                });
+            }
+            (kept, evidence)
         }
         Subject::FetchedToolchain { ecosystem } => {
             if development::toolchain_at(path) != Some(ecosystem) {
@@ -331,20 +346,6 @@ fn check(
         }),
         None => Ok(CheckedRemoval::default()),
     }
-}
-
-/// Each Go cache of the plan that lies beneath `checkout`.
-fn go_caches_beneath<'a>(
-    plan: &'a ReclaimPlan,
-    checkout: &'a Path,
-) -> impl Iterator<Item = &'a Path> {
-    plan.candidates
-        .iter()
-        .filter(|candidate| {
-            matches!(candidate.subject, Subject::BuildState { ecosystem } if ecosystem == Ecosystem::Go)
-        })
-        .map(|candidate| candidate.path.as_path())
-        .filter(move |path| path.starts_with(checkout))
 }
 
 /// Lets the owner write each directory beneath `path`, without following a

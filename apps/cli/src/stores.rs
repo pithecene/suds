@@ -63,6 +63,7 @@ fn plan_row(entry: &Entry) -> Vec<String> {
     let (decision, detail) = match &entry.decision {
         Decision::Within => ("within", String::new()),
         Decision::Trim { trim } => ("trim", trim.display()),
+        Decision::Evict { eviction } => ("evict", eviction.display()),
         Decision::Audit { reason } => ("audit", reason.clone()),
         Decision::Keep { reason } => ("keep", reason.clone()),
         Decision::AwaitsPerson { names } => (
@@ -93,12 +94,17 @@ fn write_plan(out: &mut impl Write, plan: &StoresPlan) -> io::Result<()> {
     let trims = plan
         .entries
         .iter()
-        .filter(|entry| matches!(entry.decision, Decision::Trim { .. }))
+        .filter(|entry| {
+            matches!(
+                entry.decision,
+                Decision::Trim { .. } | Decision::Evict { .. }
+            )
+        })
         .count();
     writeln!(out)?;
     writeln!(
         out,
-        "The plan runs {trims} trims, each through the store's own program. Suds changed nothing. Run the command with --apply to run them."
+        "The plan runs {trims} trims, each through the store's own program, except that Suds evicts from Go's build cache itself. Suds changed nothing. Run the command with --apply to run them."
     )
 }
 

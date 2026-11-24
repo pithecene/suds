@@ -44,7 +44,9 @@ rules hold for every release:
   adapter for the program that owns the state. The current release calls
   Git, which owns each checkout, and on macOS `lsof`, which reads the
   process table. It calls Go, pnpm, ccache, mise, and Docker, and each one
-  trims only its own store. It calls `systemctl` and `launchctl`, which own
+  trims only its own store. Suds evicts the entries of Go's build cache
+  itself, because Go offers no trim to a size
+  ([0007](docs/decisions/0007-go-cache-eviction.md)). It calls `systemctl` and `launchctl`, which own
   the user's units, only in an installation that a person approved.
 - Read file contents only through an explicit capability or an action of
   the user. Background inspection reads metadata alone.

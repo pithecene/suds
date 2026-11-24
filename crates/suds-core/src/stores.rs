@@ -1,9 +1,10 @@
 //! Budgets of the shared stores.
 //!
-//! Each store belongs to a program, and only that program trims it: Suds
-//! runs the program's own command through a typed adapter and never removes
-//! a store's entry itself. A store that exceeds its budget takes its
-//! program's trim, and Suds only reports a store whose program offers none.
+//! Each store belongs to a program, and that program trims it: Suds runs the
+//! program's own command through a typed adapter. Go's build cache is the
+//! one exception, because Go offers no trim to a size, and Suds evicts its
+//! entries itself (docs/decisions/0007-go-cache-eviction.md). Suds only
+//! reports a store whose program offers no trim.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -13,6 +14,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::development::{self, DevelopmentScan, Environment, Store, StoreClass, StoreStatus};
+use crate::go_cache::{Eviction, USE_PRECISION_SECONDS, inside_checkout};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
@@ -26,6 +28,8 @@ pub const STORES_RUN_SCHEMA: &str = "suds.stores-run/v1";
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
+/// The identifier of Go's build cache.
+pub const GO_BUILD_CACHE: &str = "go.build-cache";
 /// The identifier of the container engine's images.
 pub const DOCKER_IMAGES: &str = "docker.images";
 /// The identifier of the container engine's build cache.
@@ -327,12 +331,6 @@ pub fn builder_budget_option(docker: &Path) -> &'static str {
 fn trim_of(id: &str, path: Option<&Path>, budget: u64, inputs: &Inputs<'_>) -> Option<Trim> {
     let programs = inputs.programs;
     let trim = match id {
-        "go.build-cache" => Trim::new(
-            &programs.go,
-            vec![word("clean"), word("-cache")],
-            "every cached build output, which the next build regenerates",
-        )
-        .with("GOCACHE", path?),
         "go.module-cache" => Trim::new(
             &programs.go,
             vec![word("clean"), word("-modcache")],
@@ -405,6 +403,9 @@ pub enum Decision {
     Within,
     /// The store exceeds its budget, and its program trims it.
     Trim { trim: Trim },
+    /// The store exceeds its budget, and Suds evicts the entries that its
+    /// program used least recently.
+    Evict { eviction: Eviction },
     /// The store has no budget, or its program offers no trim, so Suds
     /// reports its size alone.
     Audit { reason: String },
@@ -601,6 +602,25 @@ pub fn plan_stores(scan: &DevelopmentScan, inputs: &Inputs<'_>) -> StoresPlan {
                 reason: "the store has no budget".to_owned(),
             },
             (StoreStatus::Present, Some(budget)) if measured <= budget => Decision::Within,
+            // A build in progress keeps the entries that it uses, so a recent
+            // change elsewhere in the cache keeps nothing else.
+            (StoreStatus::Present, Some(budget)) if store.id == GO_BUILD_CACHE => {
+                let kept = inputs.idle_seconds.saturating_add(USE_PRECISION_SECONDS);
+                let since = inputs
+                    .now
+                    .saturating_sub(i64::try_from(kept).unwrap_or(i64::MAX));
+                match Eviction::of(&store.path, budget, since).and_then(|eviction| {
+                    inside_checkout(&store.path).map(|inside| (eviction, inside))
+                }) {
+                    // A trim removes nothing beneath a checkout that a client
+                    // may hold.
+                    Ok((_, true)) => Decision::Keep {
+                        reason: "the cache lies inside a checkout".to_owned(),
+                    },
+                    Ok((eviction, false)) => Decision::Evict { eviction },
+                    Err(reason) => Decision::Audit { reason },
+                }
+            }
             (StoreStatus::Present, Some(budget)) => {
                 let recent = store
                     .measure
@@ -743,15 +763,22 @@ pub fn apply(
     })?;
     let mut trims = Vec::new();
     for entry in &plan.entries {
-        let Decision::Trim { trim } = &entry.decision else {
-            continue;
+        let command = match &entry.decision {
+            Decision::Trim { trim } => trim.display(),
+            Decision::Evict { eviction } => eviction.display(),
+            _ => continue,
         };
         journal.append(Event::StoreTrimStarted {
             run: run.clone(),
             store: entry.id.clone(),
-            command: trim.display(),
+            command: command.clone(),
         })?;
-        let outcome = trim.run().and_then(|()| measure(entry));
+        let ran = match &entry.decision {
+            Decision::Evict { eviction } => eviction.run(),
+            Decision::Trim { trim } => trim.run(),
+            _ => Ok(()),
+        };
+        let outcome = ran.and_then(|()| measure(entry));
         journal.append(match &outcome {
             Ok(after) => Event::StoreTrimmed {
                 run: run.clone(),
@@ -767,7 +794,7 @@ pub fn apply(
         })?;
         trims.push(TrimOutcome {
             store: entry.id.clone(),
-            command: trim.display(),
+            command,
             before_bytes: entry.measured_bytes.unwrap_or(0),
             after_bytes: outcome.as_ref().ok().copied(),
             failure: outcome.err(),

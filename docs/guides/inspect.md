@@ -176,7 +176,7 @@ replacement affects only the report.
 - **Hard-linked files** contribute their bytes once for each root, through
   the first link that the scan reaches, and each link still counts as a
   file.
-- **Cloned blocks** contribute their bytes once for each scan on Linux,
+- **Cloned blocks** contribute their bytes once for each scan,
   through the first file that the scan reaches. Btrfs and XFS clone a
   file, and the kernel names each extent that a file shares. The scan asks
   for the extents of each file of 16 KiB or more, so a smaller clone counts
@@ -185,7 +185,9 @@ replacement affects only the report.
   seconds before. A file that the scan cannot open counts in full, and
   the report records the error. A compressed extent counts in each file,
   because the kernel states its length before compression. Two subvolumes
-  of btrfs that share a block each count it. The
+  of btrfs that share a block each count it. On macOS, APFS names the clones
+  of a file. A file that shares every block counts once for each scan, and a
+  file that shares only a part of its blocks counts in full. The
   first file's checkout holds the bytes in a report, so the removal of
   that checkout alone frees less than its figure.
 - **Symbolic links** count as entries, and the scan never follows them. A

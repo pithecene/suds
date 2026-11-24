@@ -534,18 +534,17 @@ impl Walker {
         // A cloned extent stores its data once, so only the first file that
         // the traversal reaches under the root contributes its bytes.
         let mut counted_before = 0_u64;
-        if counts_storage {
-            match shared {
-                Ok(shared) => {
-                    for extent in shared {
-                        let before = self.cloned.claim(meta.dev(), *extent);
-                        counted_before = counted_before.saturating_add(before);
-                    }
+        match shared {
+            Ok(shared) if counts_storage => {
+                for extent in shared {
+                    let before = self.cloned.claim(meta.dev(), *extent);
+                    counted_before = counted_before.saturating_add(before);
                 }
-                // The file's blocks count in full, and the result states
-                // that the scan could not read which of them it shares.
-                Err(err) => self.record_error(path, err),
             }
+            Ok(_) => {}
+            // The file's blocks count in full, and the result states
+            // that the scan could not read which of them it shares.
+            Err(err) => self.record_error(path, err),
         }
         tally.count(*kind, meta, counts_storage, counted_before);
         Some(EntryRevision::from_metadata(meta))
@@ -827,5 +826,72 @@ mod tests {
         assert_eq!(measured.error_count, 1);
         assert_eq!(measured.errors[0].kind, ErrorKind::PermissionDenied);
         assert_eq!(measured.errors[0].path, file);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::fs;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    use rustix::fs::{CWD, CloneFlags, fclonefileat};
+    use tempfile::TempDir;
+
+    use super::measure_entry;
+
+    const MIB: u64 = 1 << 20;
+
+    /// Clones a file, or states that this filesystem clones none.
+    fn clone(source: &Path, target: &Path) -> bool {
+        let opened = fs::File::open(source).unwrap();
+        opened.sync_all().unwrap();
+        fclonefileat(&opened, CWD, target, CloneFlags::empty()).is_ok()
+    }
+
+    #[test]
+    fn a_cloned_file_counts_once_until_it_changes() {
+        let dir = TempDir::new().unwrap();
+        let device = fs::metadata(dir.path()).unwrap().dev();
+        let source = dir.path().join("a.rlib");
+        let bytes: Vec<u8> = (0..4 * MIB as u32).map(|n| (n % 251) as u8).collect();
+        fs::write(&source, &bytes).unwrap();
+        let copy = dir.path().join("b.rlib");
+        if !clone(&source, &copy) || !clone(&source, &dir.path().join("c.rlib")) {
+            eprintln!("skipped: the filesystem clones no file");
+            return;
+        }
+        // A file with equal content is no clone.
+        fs::write(dir.path().join("d.rlib"), &bytes).unwrap();
+        let one = fs::metadata(&source).unwrap().blocks() * 512;
+        let measured = measure_entry(dir.path(), device);
+        assert_eq!(measured.error_count, 0);
+        assert_eq!(measured.measure.files, 4);
+        assert_eq!(measured.measure.logical_bytes, 4 * bytes.len() as u64);
+        let sum = measured.measure.allocated_bytes;
+        assert!((2 * one..2 * one + MIB).contains(&sum), "{sum} of {one}");
+        // A scan of one clone alone counts it in full.
+        let alone = measure_entry(&copy, device).measure;
+        assert_eq!(alone.allocated_bytes, one);
+
+        // Each resource fork belongs to one clone alone, so both count.
+        let forks = [&copy, &dir.path().join("c.rlib")].map(|file| file.join("..namedfork/rsrc"));
+        for (fork, byte) in forks.iter().zip([3u8, 5]) {
+            fs::write(fork, vec![byte; MIB as usize]).unwrap();
+        }
+        let forked = measure_entry(dir.path(), device).measure.allocated_bytes;
+        assert!(forked >= sum + 2 * MIB, "{forked} after {sum}");
+        for fork in &forks {
+            fs::write(fork, []).unwrap();
+        }
+
+        // A changed clone shares a part of its blocks, and it counts in full.
+        let mut changed = fs::OpenOptions::new().write(true).open(&copy).unwrap();
+        changed.seek(SeekFrom::Start(0)).unwrap();
+        changed.write_all(&vec![1u8; MIB as usize]).unwrap();
+        changed.sync_all().unwrap();
+        let sum = measure_entry(dir.path(), device).measure.allocated_bytes;
+        assert!((3 * one..3 * one + MIB).contains(&sum), "{sum} of {one}");
     }
 }

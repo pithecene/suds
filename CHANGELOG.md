@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A measurement on macOS counts a cloned file once**: a scan counts a file of 16 KiB or more that shares every block with a clone in the first place that it reaches. A seeded checkout therefore raises the usage by what it adds. On one workstation the measured workspace fell from 284 GiB to 199 GiB. A file that shares only a part of its blocks counts in full.
+
 ## [0.1.7] - 2026-11-22
 
 ### Changed

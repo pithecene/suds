@@ -70,7 +70,13 @@ fn store(id: &str, ecosystem: Ecosystem, gib: u64, status: StoreStatus) -> Store
         id: id.to_owned(),
         class: StoreClass::SharedStore,
         ecosystem,
-        path: PathBuf::from("/stores").join(id),
+        // An eviction names a directory that exists. This one is no cache of
+        // Go, so a run refuses it.
+        path: if id == "go.build-cache" {
+            PathBuf::from("/usr/share")
+        } else {
+            PathBuf::from("/stores").join(id)
+        },
         status,
         measure: Measure {
             allocated_bytes: gib * GIB,
@@ -150,8 +156,13 @@ fn decides_each_store_by_its_budget_and_its_program() {
     let stubs = Stubs::new();
     let plan = plan(&every_store(), &stubs.programs(), NOW);
 
+    let Decision::Evict { eviction } = decision(&plan, "go.build-cache") else {
+        panic!("the cache exceeds its budget");
+    };
+    assert_eq!(eviction.budget_bytes, 10 * GIB);
+    // Go states a use to the hour, so an hour joins the idle time.
+    assert_eq!(eviction.used_since, NOW - 2 * 3600);
     for id in [
-        "go.build-cache",
         "go.module-cache",
         "pnpm.store",
         "ccache.cache",
@@ -198,8 +209,36 @@ fn leaves_a_store_within_its_budget_and_one_that_a_build_may_write() {
     let just_after = 1_767_225_600 + 600;
     let busy = plan(&every_store(), &stubs.programs(), just_after);
     assert!(matches!(
-        decision(&busy, "go.build-cache"),
+        decision(&busy, "go.module-cache"),
         Decision::Keep { .. }
+    ));
+    // Each entry of Go's build cache states its own last use, so a build
+    // elsewhere in the cache keeps only the entries that it uses.
+    assert!(matches!(
+        decision(&busy, "go.build-cache"),
+        Decision::Evict { .. }
+    ));
+}
+
+#[test]
+fn keeps_a_build_cache_inside_a_checkout_and_audits_one_that_it_cannot_read() {
+    let stubs = Stubs::new();
+    let present = StoreStatus::Present;
+    let mut inside = scan(vec![store("go.build-cache", Ecosystem::Go, 82, present)]);
+    let checkout = TempDir::new().unwrap();
+    fs::create_dir_all(checkout.path().join("cache")).unwrap();
+    fs::create_dir(checkout.path().join(".git")).unwrap();
+    inside.stores[0].path = checkout.path().join("cache");
+    assert!(matches!(
+        decision(&plan(&inside, &stubs.programs(), NOW), "go.build-cache"),
+        Decision::Keep { .. }
+    ));
+
+    let mut absent = scan(vec![store("go.build-cache", Ecosystem::Go, 82, present)]);
+    absent.stores[0].path = PathBuf::from("/stores/absent");
+    assert!(matches!(
+        decision(&plan(&absent, &stubs.programs(), NOW), "go.build-cache"),
+        Decision::Audit { .. }
     ));
 }
 
@@ -221,7 +260,6 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
     assert_eq!(
         stubs.log(),
         [
-            "go clean -cache | GOCACHE=/stores/go.build-cache | /".to_owned(),
             "go clean -modcache | GOMODCACHE=/stores/go.module-cache | /".to_owned(),
             "pnpm store prune --store-dir /stores/pnpm.store | | /".to_owned(),
             "ccache --trim-dir /stores/ccache.cache --trim-max-size 10485760Ki | | /".to_owned(),
@@ -232,7 +270,8 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
         ]
     );
 
-    // The stub of pnpm fails, and the other trims proceed.
+    // The stub of pnpm fails and the fixture's directory is no cache,
+    // and the other trims proceed.
     assert_eq!(report.status, RunStatus::Partial);
     let failed: Vec<&str> = report
         .trims
@@ -240,17 +279,22 @@ fn runs_each_program_with_its_exact_arguments_and_journals_each_trim() {
         .filter(|trim| trim.failure.is_some())
         .map(|trim| trim.store.as_str())
         .collect();
-    assert_eq!(failed, ["pnpm.store"]);
-    assert_eq!(report.freed_bytes, (72 + 1 + 2 + 13 + 114 + 3 + 39) * GIB);
+    assert_eq!(failed, ["go.build-cache", "pnpm.store"]);
+    assert_eq!(report.freed_bytes, (1 + 2 + 13 + 114 + 3 + 39) * GIB);
 
     let summaries = JournalState::from_records(&read(&journal_dir).unwrap()).summaries();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].kind, RunKind::Stores);
     assert_eq!(summaries[0].trims.len(), 8);
-    assert_eq!(summaries[0].trims[0].command, {
+    assert!(
+        summaries[0].trims[0]
+            .command
+            .starts_with("evict from /usr/share")
+    );
+    assert_eq!(summaries[0].trims[1].command, {
         let go: &Path = &stubs.programs().go;
         format!(
-            "GOCACHE=/stores/go.build-cache {} clean -cache",
+            "GOMODCACHE=/stores/go.module-cache {} clean -modcache",
             go.display()
         )
     });

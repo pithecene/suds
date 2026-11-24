@@ -1,10 +1,11 @@
 //! Tests of an unattended maintenance run against a temporary repository.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use suds_core::development::Environment;
 use suds_core::maintain::{Context, maintain, read_pressure};
@@ -175,6 +176,10 @@ impl Fixture {
             report.reclaim.unwrap().authority,
             Authority::StandingApproval
         );
+        self.journaled_plan()
+    }
+
+    fn journaled_plan(&self) -> ReclaimPlan {
         read(&self.directories.journal())
             .unwrap()
             .into_iter()
@@ -424,4 +429,229 @@ fn refuses_settings_without_a_root() {
     let git = Git::default();
     let settings = Settings::default();
     assert!(maintain(&settings, &fixture.context(&git)).is_err());
+}
+
+/// Each path beneath `root` apart from a repository's own data, where Git
+/// records what a removal changes.
+fn paths(root: &Path) -> BTreeSet<PathBuf> {
+    let mut found = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.push(path.clone());
+            }
+            found.insert(path);
+        }
+    }
+    found
+}
+
+/// An unattended run over a workstation in small. The test compares every
+/// path before and after the run, so a removal that no rule names fails it.
+#[test]
+fn an_unattended_run_removes_exactly_what_its_rules_name() {
+    let mut fixture = Fixture::new();
+    let root = fs::canonicalize(fixture._dir.path()).unwrap();
+    let cache = root.join("go-build");
+    for n in 0..256 {
+        fs::create_dir_all(cache.join(format!("{n:02x}"))).unwrap();
+    }
+    fs::write(cache.join("README"), "cache").unwrap();
+    fs::write(cache.join("trim.txt"), "0").unwrap();
+    fs::create_dir(cache.join("fuzz")).unwrap();
+    fs::write(cache.join("fuzz/corpus"), "kept").unwrap();
+    let entry = |first: &str| {
+        let path = cache
+            .join(first)
+            .join(format!("{first}{}-d", "b".repeat(62)));
+        fs::write(&path, vec![1u8; 65536]).unwrap();
+        path
+    };
+    let stale = entry("0a");
+    let recent = entry("0b");
+    let used = SystemTime::UNIX_EPOCH + Duration::from_secs(LATER as u64 - 60);
+    fs::File::open(&recent).unwrap().set_modified(used).unwrap();
+    fixture
+        .environment
+        .variables
+        .insert("GOCACHE".to_owned(), cache.clone().into());
+
+    let landed = fixture.landed_checkout();
+    // Work that only this workstation holds, and a checkout that a client holds.
+    let unpushed = fixture.linked("unpushed");
+    // Each linked checkout commits the same content, and an equal commit
+    // has the pushed commit's identity, so this one needs its own.
+    fs::write(unpushed.join("only.txt"), "only here").unwrap();
+    git(&unpushed, &["add", "only.txt"]);
+    git(&unpushed, &["commit", "-m", "only here"]);
+    fixture.release_landed(&unpushed);
+    let changed = fixture.linked("changed");
+    fs::write(changed.join("change.txt"), "edited").unwrap();
+    fixture.release_landed(&changed);
+    let held = fixture.linked("held");
+    registry::append(
+        &fixture.directories.registry(),
+        &held,
+        "bosun",
+        Some("wf-2"),
+        RegistryEvent::Registered,
+        0,
+    )
+    .unwrap();
+
+    let mut settings = fixture.settings(true);
+    settings.budgets.insert("go.build-cache".to_owned(), 0);
+    let before = paths(&root);
+    let report = maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    let after = paths(&root);
+
+    let trims = report.stores.unwrap().trims;
+    assert_eq!(trims.len(), 1, "{trims:?}");
+    assert_eq!(trims[0].failure, None);
+    let beneath = |tree: &Path| {
+        before
+            .iter()
+            .filter(|path| path.starts_with(tree))
+            .cloned()
+            .collect()
+    };
+    let mut expected: BTreeSet<PathBuf> = beneath(&landed);
+    for target in [&fixture.repo, &unpushed, &changed] {
+        let gone: BTreeSet<PathBuf> = beneath(&target.join("target"));
+        expected.extend(gone);
+    }
+    expected.insert(stale);
+    let removed: BTreeSet<PathBuf> = before.difference(&after).cloned().collect();
+    assert_eq!(removed, expected);
+    let state = &fixture.directories.state;
+    let added: Vec<_> = after
+        .difference(&before)
+        .filter(|path| !path.starts_with(state))
+        .collect();
+    assert!(added.is_empty(), "{added:?}");
+    assert!(held.join("target/app").exists() && recent.exists());
+    assert_eq!(
+        fs::read_to_string(changed.join("change.txt")).unwrap(),
+        "edited"
+    );
+
+    // A second run finds nothing more to remove.
+    maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    assert_eq!(paths(&root), after);
+}
+
+/// A build that rewrites one file of a checkout's build state until a file
+/// appears. It fails as soon as the build state loses an entry.
+struct RunningBuild {
+    child: std::process::Child,
+    stop: PathBuf,
+}
+
+impl RunningBuild {
+    fn start(target: &Path, directory: &Path, stop: PathBuf) -> Self {
+        // A write to a file that exists leaves its directory's time alone, so
+        // the file's own time carries the recent write.
+        let script = "i=0; while [ ! -e \"$2\" ]; do i=$((i+1)); \
+                      [ -e \"$1/app\" ] && [ -e \"$1/CACHEDIR.TAG\" ] || exit 8; \
+                      echo $i > \"$1/app\" || exit 7; \
+                      [ $i -eq 3 ] && : > \"$2.began\"; sleep 0.02; done";
+        let child = Command::new("sh")
+            .args(["-c", script, "build"])
+            .arg(target)
+            .arg(&stop)
+            .current_dir(directory)
+            .spawn()
+            .unwrap();
+        let began = std::time::Instant::now();
+        while !stop.with_extension("began").exists() {
+            assert!(began.elapsed() < Duration::from_secs(20), "no build began");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        RunningBuild { child, stop }
+    }
+
+    fn finish(mut self) -> Option<i32> {
+        fs::write(&self.stop, "").unwrap();
+        self.child.wait().unwrap().code()
+    }
+}
+
+impl Drop for RunningBuild {
+    /// A failed test leaves no build behind.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Sets every entry beneath `tree` to a time `hours` before now.
+fn age(tree: &Path, hours: u64) {
+    let time = SystemTime::now() - Duration::from_secs(hours * 3600);
+    for path in paths(tree).iter().rev() {
+        fs::File::open(path).unwrap().set_modified(time).unwrap();
+    }
+    fs::File::open(tree).unwrap().set_modified(time).unwrap();
+}
+
+/// Each protection alone spares a running build. Under the far time no write
+/// is recent, so only the process's working directory keeps the first build.
+/// The second build works elsewhere, so only its recent writes keep it.
+#[test]
+fn an_unattended_run_spares_a_running_build() {
+    for inside in [true, false] {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(fixture._dir.path()).unwrap();
+        let building = fixture.linked("building");
+        let idle = fixture.linked("idle");
+        for checkout in [&building, &idle, &fixture.repo] {
+            age(&checkout.join("target"), 5);
+        }
+        let target = building.join("target");
+        let directory = if inside {
+            building.as_path()
+        } else {
+            root.as_path()
+        };
+        let build = RunningBuild::start(&target, directory, root.join("stop"));
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let now = if inside {
+            LATER
+        } else {
+            i64::try_from(now.as_secs()).unwrap()
+        };
+        let git = Git::default();
+        let context = Context {
+            now,
+            ..fixture.context(&git)
+        };
+        maintain(&fixture.settings(true), &context).unwrap();
+        // A build that stops right after a removal would not notice it.
+        let survived = ["CACHEDIR.TAG", "app"].map(|name| target.join(name).exists());
+        let code = build.finish();
+        assert_eq!(survived, [true; 2], "inside: {inside}");
+        assert_eq!(code, Some(0), "inside: {inside}");
+        // The plan states the rule, so no later refusal stands in for it.
+        let kept = if inside {
+            Kept::InUse
+        } else {
+            Kept::RecentlyModified
+        };
+        let plan = fixture.journaled_plan();
+        let candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.path.as_path() == target)
+            .unwrap();
+        assert_eq!(candidate.kept, Some(kept), "{candidate:?}");
+        // The same run removes the build state that nothing uses.
+        assert!(!idle.join("target").exists(), "inside: {inside}");
+        assert!(!fixture.repo.join("target").exists(), "inside: {inside}");
+    }
 }

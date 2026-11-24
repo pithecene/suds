@@ -12,6 +12,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **A measurement on macOS counts a cloned file once**: a scan counts a file of 16 KiB or more that shares every block with a clone in the first place that it reaches. A seeded checkout therefore raises the usage by what it adds. On one workstation the measured workspace fell from 284 GiB to 199 GiB. A file that shares only a part of its blocks counts in full.
+- **Go's build cache keeps its recent entries at a trim**: `suds stores` and a maintenance run evict the entries that Go used least recently, until the cache meets its budget. Entries that Go used within the idle time and one more hour stay. Earlier releases ran `go clean -cache`, which removed the whole cache, and kept a whole cache after a recent write. The plan's JSON states the decision `evict`.
 
 ## [0.1.7] - 2026-11-22
 

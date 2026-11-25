@@ -11,6 +11,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A claim keeps a linked checkout and its build output**: `suds release --claim-ended` states that the work in a checkout ended. Without that statement for each client and attempt, Suds keeps the checkout and its build output, so a merge or a release of an earlier version no longer frees them.
 - **A person's reclaim applies a saved plan**: `suds reclaim --root DIR --save` records the plan in the journal, and `suds reclaim --apply PLAN` removes what the plan of that identifier names. The form `--root DIR --apply` of earlier releases built a new plan that nobody had read, and Suds now refuses it. An entry that changed after the plan keeps its candidate.
 - **A scheduled run removes no checkout**: `suds maintain` names build state and stores alone under the standing approval. Earlier releases also removed a landed linked checkout.
 - **A measurement on macOS counts a cloned file once**: a scan counts a file of 16 KiB or more that shares every block with a clone in the first place that it reaches. A seeded checkout therefore raises the usage by what it adds. On one workstation the measured workspace fell from 284 GiB to 199 GiB. A file that shares only a part of its blocks counts in full.

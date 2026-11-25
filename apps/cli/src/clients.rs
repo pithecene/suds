@@ -56,10 +56,17 @@ fn hold(args: &HoldArgs, event: Event) -> Result<ExitCode, String> {
     if args.landed.is_some() && event != Event::Released {
         return Err("only a release reports a landed commit".to_owned());
     }
+    if args.claim_ended && event != Event::Released {
+        return Err("only a release states an ended claim".to_owned());
+    }
     let path = directories()?.registry();
     let attempt = args.attempt.as_deref();
     let now = now_seconds();
-    let record = match &args.landed {
+    let landed = args.landed.as_deref();
+    let record = match landed {
+        _ if args.claim_ended => {
+            registry::append_ended(&path, &checkout, &args.client, attempt, landed, now)?
+        }
         Some(landed) => {
             registry::append_landed(&path, &checkout, &args.client, attempt, landed, now)?
         }

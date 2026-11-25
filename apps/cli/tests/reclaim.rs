@@ -137,3 +137,30 @@ fn builds_no_plan_at_an_apply() {
     }
     assert!(target.join("app").exists());
 }
+
+#[test]
+fn a_release_states_an_ended_claim_and_a_registration_does_not() {
+    let fixture = Fixture::new();
+    let hold = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_suds"))
+            .args(arguments)
+            .args(["--checkout", "workspace", "--client", "session"])
+            .current_dir(&fixture.root)
+            .env("HOME", fixture.root.join("home"))
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .unwrap()
+    };
+    assert!(!hold(&["register", "--claim-ended"]).status.success());
+    // No checkout lies there yet.
+    assert!(!hold(&["release", "--claim-ended"]).status.success());
+    fs::create_dir_all(fixture.root.join("workspace/.git")).unwrap();
+    let plain = text(&hold(&["release"]).stdout);
+    assert!(!plain.contains("claim_ended"), "{plain}");
+    let head = "a".repeat(40);
+    let ended = hold(&["release", "--claim-ended", "--landed", &head]);
+    let record: serde_json::Value = serde_json::from_slice(&ended.stdout).unwrap();
+    assert!(record["claim_ended"]["inode"].is_u64());
+    assert_eq!(record["landed"], head.as_str());
+}

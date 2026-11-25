@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
+use crate::inspection::EntryRevision;
 use crate::organize::native::NativePath;
 use crate::timestamp;
 
@@ -35,6 +36,11 @@ pub struct Record {
     /// On a release, the head that the client reports as landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed: Option<String>,
+    /// On a release that states an ended claim, the revision of the checkout's
+    /// `.git` entry. A new checkout at the same path has another one. A release
+    /// of an earlier version states nothing, so the claim holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ended: Option<EntryRevision>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +59,9 @@ pub struct Standing {
     pub at: String,
     /// The head that a release reported as landed.
     pub landed: Option<String>,
+    /// The checkout that the latest record of each client and attempt names as
+    /// one whose claim ended.
+    pub claim_ended: Option<EntryRevision>,
 }
 
 /// The latest standing of each checkout that the registry names.
@@ -107,6 +116,7 @@ pub fn append(
         attempt: attempt.map(str::to_owned),
         event,
         landed: None,
+        claim_ended: None,
     };
     write(path, record)
 }
@@ -122,12 +132,43 @@ pub fn append_landed(
     landed: &str,
     now: i64,
 ) -> Result<Record, String> {
-    let full = matches!(landed.len(), 40 | 64)
-        && landed
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
-    if !full {
-        return Err(format!("{landed} is no full commit name"));
+    release(path, checkout, client, attempt, Some(landed), None, now)
+}
+
+/// Appends a release of `checkout` that states that the claim ended, with the
+/// head that landed, if any.
+pub fn append_ended(
+    path: &Path,
+    checkout: &Path,
+    client: &str,
+    attempt: Option<&str>,
+    landed: Option<&str>,
+    now: i64,
+) -> Result<Record, String> {
+    let git = checkout.join(".git");
+    let meta = fs::symlink_metadata(&git)
+        .map_err(|err| format!("could not read {}: {err}", git.display()))?;
+    let ended = Some(EntryRevision::from_metadata(&meta));
+    release(path, checkout, client, attempt, landed, ended, now)
+}
+
+fn release(
+    path: &Path,
+    checkout: &Path,
+    client: &str,
+    attempt: Option<&str>,
+    landed: Option<&str>,
+    claim_ended: Option<EntryRevision>,
+    now: i64,
+) -> Result<Record, String> {
+    if let Some(landed) = landed {
+        let full = matches!(landed.len(), 40 | 64)
+            && landed
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        if !full {
+            return Err(format!("{landed} is no full commit name"));
+        }
     }
     let record = Record {
         schema: REGISTRY_SCHEMA.to_owned(),
@@ -136,7 +177,8 @@ pub fn append_landed(
         client: client.to_owned(),
         attempt: attempt.map(str::to_owned),
         event: Event::Released,
-        landed: Some(landed.to_owned()),
+        landed: landed.map(str::to_owned),
+        claim_ended,
     };
     write(path, record)
 }
@@ -233,6 +275,17 @@ pub fn standings(records: &[Record]) -> Standings {
         if !seen.insert((path, record.client.as_str(), record.attempt.as_deref())) {
             continue;
         }
+        let ended = record.claim_ended.as_ref();
+        let ended = ended.filter(|_| record.event == Event::Released);
+        if let Some(current) = standings.get_mut(path)
+            && current.claim_ended.as_ref() != ended
+        {
+            current.claim_ended = None;
+        }
+        let claim_ended = match standings.get(path) {
+            Some(current) => current.claim_ended,
+            None => ended.cloned(),
+        };
         if let Some(current) = standings.get(path)
             && (current.event == Event::Registered || record.event == Event::Released)
         {
@@ -246,6 +299,7 @@ pub fn standings(records: &[Record]) -> Standings {
                 attempt: record.attempt.clone(),
                 at: record.at.clone(),
                 landed: record.landed.clone(),
+                claim_ended,
             },
         );
     }

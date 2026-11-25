@@ -9,6 +9,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-25
+
 ### Added
 
 - **A plan states who claims each checkout**: `suds register --claim TEXT` records a text such as a session's name, and `suds reclaim` shows it in the column `CLAIM` and the desktop's evidence. A run keeps a linked checkout or its build output when the claims changed after the plan.
@@ -197,7 +199,8 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Readable plans**: the reclaim table names the reason for each kept directory before its fact, and a store that Suds could not measure shows no size and one line of the failure. The default budget of ccache rises to 10 GiB, above the 5 GiB at which ccache bounds its own cache, so the plan no longer trims a cache at its own limit.
 - **Build state with a fetched repository**: `suds reclaim` kept every build directory that held a Git repository, which kept each CMake build that fetches a dependency. It now asks Git about each such repository and keeps the directory only where one holds a change or a commit that no remote and no tag holds. The development profile lists such a repository as part of its build state and as no checkout.
 
-[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/pithecene/suds/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/pithecene/suds/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/pithecene/suds/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/pithecene/suds/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/pithecene/suds/compare/v0.1.4...v0.1.5

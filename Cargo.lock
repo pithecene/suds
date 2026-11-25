@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "suds"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "clap",
  "serde",
@@ -4377,11 +4377,11 @@ dependencies = [
 
 [[package]]
 name = "suds-build"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "suds-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "libc",
  "rustix 1.1.6",
@@ -4392,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "suds-desktop"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "i-slint-backend-testing",
  "slint",
@@ -4405,7 +4405,7 @@ dependencies = [
 
 [[package]]
 name = "suds-view"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "jiff",
  "serde",

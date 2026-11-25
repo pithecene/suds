@@ -1483,3 +1483,28 @@ fn an_ended_claim_frees_no_later_checkout_at_the_same_path() {
     let plan = fixture.plan(&nobody(), true);
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
 }
+
+#[test]
+fn an_unread_git_entry_keeps_build_state_as_unverified() {
+    let fixture = Fixture::new();
+    let scan = inspect(
+        std::slice::from_ref(&fixture.workspace),
+        &Environment::default(),
+    );
+    fs::rename(fixture.repo.join(".git"), fixture.repo.join("earlier.git")).unwrap();
+    let policy = Policy {
+        idle_seconds: IDLE,
+        checkouts: CheckoutScope::DerivedOnly,
+        tolerate_unreadable_processes: false,
+    };
+    let observed = Observed {
+        liveness: &nobody(),
+        registry: &fixture.standings(),
+    };
+    let at = now() + 2 * IDLE_SECONDS;
+    let plan = plan_reclaim(&scan, &observed, &Git::default(), policy, at);
+    let candidate = find(&plan, &fixture.repo.join("target"));
+    assert_eq!(candidate.kept, Some(Kept::Unverified));
+    let fact = candidate.evidence.last().unwrap();
+    assert!(fact.starts_with("could not read"), "{fact}");
+}

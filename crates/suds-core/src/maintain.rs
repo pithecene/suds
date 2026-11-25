@@ -6,12 +6,9 @@
 //! derived state and eligible landed checkouts and trims stores under the
 //! standing approval of decision 0002. The journal records that authority.
 
-use std::fs::{self, OpenOptions};
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::fs;
 use std::path::Path;
 
-use rustix::fs::OFlags;
 use serde::Serialize;
 
 use crate::arena;
@@ -62,29 +59,6 @@ pub struct Context<'a> {
     pub now: i64,
 }
 
-/// Serializes concurrent maintenance runs before scanning development storage.
-fn lock_maintain(pressure_path: &Path) -> Result<fs::File, String> {
-    let lock_path = pressure_path.with_extension("maintain.lock");
-    let failed = |err: io::Error| format!("could not lock {}: {err}", lock_path.display());
-    if let Some(directory) = lock_path.parent() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(directory)
-            .map_err(failed)?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
-        .open(&lock_path)
-        .map_err(failed)?;
-    file.lock().map_err(failed)?;
-    Ok(file)
-}
-
 /// Measures the development storage, records the pressure, and reclaims
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
@@ -94,7 +68,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
     let path = context.directories.pressure();
     // Coordinate concurrent maintenance callers before scanning the workspace.
-    let _maintain_lock = lock_maintain(&path)?;
+    let _maintain_lock = registry::lock(&path.with_extension("maintain.lock"))?;
     let scan = development::inspect(&settings.roots, context.environment);
     let inspection = development::build_report(&scan, context.now);
     // The pressure counts every root and every store, so the audit covers

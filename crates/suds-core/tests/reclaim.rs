@@ -1652,30 +1652,34 @@ fn keeps_a_worktree_with_an_unpushed_private_reference() {
     );
 }
 
-#[test]
-fn registration_after_observation_wins_over_reclaim_commit() {
-    let fixture = Fixture::new();
-    fixture.record(&fixture.linked, registry::Event::Released);
-    let plan = fixture.plan(&nobody(), false);
-    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
-
+fn apply_with_concurrent_register(
+    fixture: &Fixture,
+    plan: &ReclaimPlan,
+    watched_candidate: &Path,
+    registered_checkout: &Path,
+    attempt: &str,
+    claim: Option<&str>,
+) -> ReclaimReport {
     let registry_path = fixture.registry();
-    let linked = fixture.linked.clone();
+    let watched = watched_candidate.to_path_buf();
+    let checkout = registered_checkout.to_path_buf();
+    let attempt = attempt.to_owned();
+    let claim = claim.map(str::to_owned);
     let mut hooked = false;
     let mut hook = |candidate: &suds_core::reclaim::plan::Candidate| {
-        if candidate.path.as_path() == linked && !hooked {
+        if candidate.path.as_path() == watched && !hooked {
             hooked = true;
-            // Pause reclamation after observation, register from another thread,
-            // then resume reclamation.
             let reg_path = registry_path.clone();
-            let checkout = linked.clone();
+            let checkout = checkout.clone();
+            let attempt = attempt.clone();
+            let claim = claim.clone();
             let registered = std::thread::spawn(move || {
                 registry::register(
                     &reg_path,
                     &checkout,
                     "bosun",
-                    Some("wf-race"),
-                    Some("session race"),
+                    Some(&attempt),
+                    claim.as_deref(),
                     100,
                 )
             })
@@ -1688,7 +1692,7 @@ fn registration_after_observation_wins_over_reclaim_commit() {
     let mut journal = open_journal(&fixture.journal);
     let report = suds_core::reclaim::execute::apply_with_hook(
         &mut journal,
-        &plan,
+        plan,
         Conditions {
             authority: Authority::Person,
             observe: &mut nobody,
@@ -1701,6 +1705,24 @@ fn registration_after_observation_wins_over_reclaim_commit() {
     )
     .unwrap();
     assert!(hooked);
+    report
+}
+
+#[test]
+fn registration_after_observation_wins_over_reclaim_commit() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+
+    let report = apply_with_concurrent_register(
+        &fixture,
+        &plan,
+        &fixture.linked,
+        &fixture.linked,
+        "wf-race",
+        Some("session race"),
+    );
     assert!(fixture.linked.exists());
     let removal = report
         .removals
@@ -1738,40 +1760,8 @@ fn parent_checkout_registration_after_observation_protects_child_build_state() {
     let target = fixture.repo.join("target");
     assert_eq!(find(&plan, &target).decision, Decision::Remove);
 
-    let registry_path = fixture.registry();
-    let repo = fixture.repo.clone();
-    let target_path = target.clone();
-    let mut hooked = false;
-    let mut hook = |candidate: &suds_core::reclaim::plan::Candidate| {
-        if candidate.path.as_path() == target_path && !hooked {
-            hooked = true;
-            let reg_path = registry_path.clone();
-            let checkout = repo.clone();
-            let registered = std::thread::spawn(move || {
-                registry::register(&reg_path, &checkout, "bosun", Some("wf-parent"), None, 100)
-            })
-            .join()
-            .unwrap();
-            assert!(registered.is_ok(), "{registered:?}");
-        }
-    };
-
-    let mut journal = open_journal(&fixture.journal);
-    let report = suds_core::reclaim::execute::apply_with_hook(
-        &mut journal,
-        &plan,
-        Conditions {
-            authority: Authority::Person,
-            observe: &mut nobody,
-            registry: &mut || fixture.standings(),
-            registry_path: Some(&registry_path),
-            git: &Git::default(),
-            now: now() + 2 * IDLE_SECONDS,
-        },
-        Some(&mut hook),
-    )
-    .unwrap();
-    assert!(hooked);
+    let report =
+        apply_with_concurrent_register(&fixture, &plan, &target, &fixture.repo, "wf-parent", None);
     assert!(target.exists());
     let removal = report
         .removals

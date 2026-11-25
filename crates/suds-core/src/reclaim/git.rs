@@ -190,7 +190,7 @@ impl Git {
     }
 
     /// Worktree-private references (`refs/worktree`, `refs/bisect`,
-    /// `refs/rewritten`) that disappear when this worktree is removed.
+    /// `refs/rewritten`) that leave with this worktree.
     fn private_refs(&self, checkout: &Path) -> Result<Vec<String>, String> {
         let output = self.run(
             checkout,

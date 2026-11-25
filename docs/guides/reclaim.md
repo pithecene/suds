@@ -57,6 +57,12 @@ changed, staged, or untracked file there. No process may work in the
 checkout, no entry may have changed within the idle time, and no client may
 hold an unreleased registration.
 
+A linked checkout and its build output also stay until a release states that
+each claim on the checkout ended. The option is `--claim-ended`. A merge,
+a release without that statement, and an absent registration end no claim. The
+statement binds the checkout that stands there, and no later one at its path. The
+build output of a main checkout has no claim.
+
 Git removes a checkout together with the files that it ignores. Each run
 therefore accounts for every entry, whoever approves it. The head's tree
 accounts for tracked files, and the build-state rules account for ignored build
@@ -66,7 +72,8 @@ fetched keeps the checkout until its build state leaves.
 
 A remote-tracking branch can show that a remote holds the checkout's
 head. A person who runs `suds reclaim --apply` can also use a release with
-`--landed COMMIT` as evidence while the head still matches `COMMIT`.
+`--landed COMMIT` as evidence while the head still matches `COMMIT`. A release
+can state both.
 
 A scheduled run names no checkout, whatever the standing approval. A checkout
 leaves only through a plan that a person read.

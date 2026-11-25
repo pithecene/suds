@@ -104,6 +104,12 @@ pub struct HoldArgs {
     /// remote holds, though perhaps by another commit, as after a squash.
     #[arg(long, value_name = "COMMIT")]
     pub landed: Option<String>,
+
+    /// With `release`, state that the session or the person who claimed the
+    /// checkout ends that claim. Any other release keeps a linked checkout and
+    /// its build output.
+    #[arg(long)]
+    pub claim_ended: bool,
 }
 
 #[derive(Debug, Args)]

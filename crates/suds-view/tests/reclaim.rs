@@ -110,8 +110,7 @@ impl Workstation {
     /// Records that the linked checkout's client released it.
     fn release(&self) {
         let registry = self.directories().registry();
-        let event = registry::Event::Released;
-        registry::append(&registry, &self.linked, "bosun", None, event, 0).unwrap();
+        registry::append_ended(&registry, &self.linked, "bosun", None, None, 0).unwrap();
     }
 
     /// Plans as if the idle time and one more hour had passed since the
@@ -138,10 +137,10 @@ fn a_proposal_lists_what_the_plan_removes_and_why_it_keeps_the_rest() {
     let workstation = Workstation::new();
     let proposal = workstation.propose();
 
-    // Nobody released the linked checkout, so the plan removes build state alone.
+    // Nobody ended the claim on the linked checkout, so it keeps its build state.
     let paths: BTreeSet<&str> = proposal.removals.iter().map(|e| e.path.as_str()).collect();
     let build = |checkout: &Path| checkout.join("target").to_string_lossy().into_owned();
-    let expected = [build(&workstation.repo), build(&workstation.linked)];
+    let expected = [build(&workstation.repo)];
     assert_eq!(paths, expected.iter().map(String::as_str).collect());
     for entry in &proposal.removals {
         assert!(matches!(entry.subject, Subject::BuildState { .. }));
@@ -152,24 +151,27 @@ fn a_proposal_lists_what_the_plan_removes_and_why_it_keeps_the_rest() {
     }
     let sizes: Vec<u64> = proposal.removals.iter().map(|entry| entry.bytes).collect();
     assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]), "{sizes:?}");
-    assert_eq!(proposal.kept, []);
+    assert_eq!(proposal.kept.len(), 1);
+    assert_eq!(proposal.kept[0].reason, Kept::Claimed);
+    assert_eq!(proposal.kept[0].count, 1);
 
     assert!(proposal.complete());
 
     let all = proposal.removing(&BTreeSet::new());
-    assert_eq!(all, (2, proposal.plan.removable_bytes()));
+    assert_eq!(all, (1, proposal.plan.removable_bytes()));
 }
 
 #[test]
 fn a_recent_change_keeps_a_directory_and_the_proposal_counts_it() {
     let workstation = Workstation::new();
+    workstation.release();
     let now = later() - 2 * i64::try_from(IDLE_SECONDS).unwrap();
     let proposal = propose(&workstation.environment, true, now).unwrap();
 
     assert_eq!(proposal.removals, []);
     assert_eq!(proposal.kept.len(), 1);
     assert_eq!(proposal.kept[0].reason, Kept::RecentlyModified);
-    assert_eq!(proposal.kept[0].count, 2);
+    assert_eq!(proposal.kept[0].count, 3);
 }
 
 #[test]
@@ -212,10 +214,13 @@ fn a_checkout_that_stays_keeps_its_build_state() {
 #[test]
 fn an_approved_run_removes_the_chosen_entries_and_the_journal_records_it() {
     let workstation = Workstation::new();
+    workstation.release();
     let proposal = workstation.propose();
     let stays = workstation.position(&proposal, &workstation.repo.join("target"));
     let mut excluded = BTreeSet::new();
     proposal.toggle(&mut excluded, stays);
+    let checkout = workstation.position(&proposal, &workstation.linked);
+    proposal.toggle(&mut excluded, checkout);
 
     let plan = proposal.chosen(&excluded);
     let report = apply(&workstation.environment, &plan, later()).unwrap();
@@ -240,6 +245,7 @@ fn a_proposal_states_what_the_inspection_missed() {
     use std::os::unix::fs::PermissionsExt;
 
     let workstation = Workstation::new();
+    workstation.release();
     let root = workstation.repo.parent().unwrap();
     // No directory holds the second root, and the first holds a directory that refuses a reading.
     let settings = workstation.directories().settings();
@@ -260,7 +266,7 @@ fn a_proposal_states_what_the_inspection_missed() {
     // A superuser reads the closed directory, and the inspection then misses no entry.
     assert_eq!(proposal.unread > 0, refused);
     assert!(!proposal.complete());
-    assert_eq!(proposal.removals.len(), 2);
+    assert_eq!(proposal.removals.len(), 3);
 }
 
 // The file systems of macOS refuse a name that no text encodes.

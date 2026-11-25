@@ -144,17 +144,24 @@ impl Fixture {
         fs::create_dir(checkout.join("target")).unwrap();
         fs::write(checkout.join("target/CACHEDIR.TAG"), "Signature: cargo").unwrap();
         fs::write(checkout.join("target/app"), "binary").unwrap();
+        // Each test of another rule starts from an ended claim.
+        self.end_claim(&checkout);
         checkout
+    }
+
+    fn end_claim(&self, checkout: &Path) {
+        let registry = self.directories.registry();
+        registry::append_ended(&registry, checkout, "session", None, None, 0).unwrap();
     }
 
     fn release_landed(&self, checkout: &Path) {
         let head = Git::default().head(checkout).unwrap();
-        registry::append_landed(
+        registry::append_ended(
             &self.directories.registry(),
             checkout,
             "bosun",
             Some("wf-1"),
-            &head,
+            Some(&head),
             0,
         )
         .unwrap();
@@ -405,10 +412,10 @@ fn keeps_a_pushed_checkout_after_an_ordinary_release() {
     let plan = fixture.landed_plan();
     assert_eq!(
         linked_candidate(&plan, &checkout).1.kept,
-        Some(Kept::NoLandedRelease)
+        Some(Kept::Claimed)
     );
     assert!(checkout.join("change.txt").exists());
-    assert!(!checkout.join("target").exists());
+    assert!(checkout.join("target/app").exists());
 }
 
 #[test]

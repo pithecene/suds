@@ -56,9 +56,9 @@ work.
 7. A client calls the primitives. It gives Suds facts, which are its holds
    and its releases. It may give the manager a goal, such as an amount to
    free beneath a root, and it never gives a list of paths to remove.
-8. A linked checkout that no client released leaves only through a plan
-   that a person approves. A client's call and a scheduled run consider
-   released checkouts alone.
+8. A linked checkout leaves only through a plan that a person approves, and
+   only after a release states that each claim on it ended. Until then its
+   build output stays as well.
 9. The first manager is a set of rules in code, and each recommendation
    names its rule and its evidence. A model may later explain a plan or
    propose one, and no proposal that a model generates applies itself.
@@ -87,7 +87,7 @@ work.
 - `suds reclaim --checkouts` no longer serves a client's call. Bosun's
   specification of its storage calls (pithecene/bosun,
   `records/specs/STORAGE.md`) states which of Bosun's records end a hold.
-- A checkout that no client ever registered stays until a person decides,
+- A checkout that no client ever registered stays until a person ends its claim,
   so the window needs a view of such checkouts with their evidence.
 - The window of decision 0003 gains the manager's recommendations as a
   subject beside the arena's state.

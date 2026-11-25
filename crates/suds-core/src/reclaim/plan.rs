@@ -166,6 +166,8 @@ pub enum Kept {
     HoldsMountPoint,
     /// A client registered the checkout and has not released it.
     Registered,
+    /// No release states that each claim on the linked checkout ended.
+    Claimed,
     /// Suds could not establish a fact that a removal needs.
     Unverified,
     /// Another user owns a directory in it, so the user who runs Suds
@@ -196,6 +198,7 @@ impl Kept {
             Kept::HoldsCheckout => "holds_checkout",
             Kept::HoldsMountPoint => "holds_mount_point",
             Kept::Registered => "registered",
+            Kept::Claimed => "claimed",
             Kept::OwnedByAnotherUser => "owned_by_another_user",
             Kept::Unverified => "unverified",
         }
@@ -685,6 +688,27 @@ impl Judge<'_> {
             ));
         }
         evidence.push(format!("no process works in {}", checkout.display()));
+        // The checkout of a session outlives its processes, its merge, and its
+        // idle time, so only a stated end frees it and its build output.
+        let pointer = checkout.join(".git");
+        let git = match fs::symlink_metadata(&pointer) {
+            Ok(git) => git,
+            Err(err) => {
+                evidence.push(format!("could not read {}: {err}", pointer.display()));
+                return Some(Kept::Unverified);
+            }
+        };
+        let revision = Some(EntryRevision::from_metadata(&git));
+        let ended = standings
+            .get(checkout)
+            .is_some_and(|standing| standing.claim_ended == revision);
+        if !git.is_dir() && !ended {
+            evidence.push(format!(
+                "no release states that each claim on {} ended",
+                checkout.display()
+            ));
+            return Some(Kept::Claimed);
+        }
         None
     }
 

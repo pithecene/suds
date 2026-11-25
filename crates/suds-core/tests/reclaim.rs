@@ -72,19 +72,35 @@ impl Fixture {
         git(&linked, &["push", "origin", "feature"]);
         build_output(&repo);
         build_output(&linked);
-        Fixture {
+        let fixture = Fixture {
             journal: root.join("journal"),
             _dir: dir,
             workspace,
             repo,
             linked,
-        }
+        };
+        // Each test of another rule starts from an ended claim.
+        fixture.end_claim(&fixture.linked);
+        fixture
+    }
+
+    fn end_claim(&self, checkout: &Path) {
+        registry::append_ended(&self.registry(), checkout, "session", None, None, 0).unwrap();
     }
 
     /// Plans as if `IDLE` and one more hour had passed since the fixture's
     /// files changed, so no file counts as recent.
     fn plan(&self, liveness: &Result<Liveness, String>, checkouts: bool) -> ReclaimPlan {
         self.plan_at(liveness, checkouts, now() + 2 * IDLE_SECONDS)
+    }
+
+    /// The plan of a scheduled run, which names no checkout.
+    fn plan_derived(&self) -> ReclaimPlan {
+        self.plan_with_scope(
+            &nobody(),
+            CheckoutScope::DerivedOnly,
+            now() + 2 * IDLE_SECONDS,
+        )
     }
 
     fn plan_at(
@@ -133,12 +149,25 @@ impl Fixture {
     }
 
     fn record(&self, checkout: &Path, event: registry::Event) {
-        registry::append(&self.registry(), checkout, "bosun", Some("wf-1"), event, 0).unwrap();
+        if event == registry::Event::Released {
+            registry::append_ended(&self.registry(), checkout, "bosun", Some("wf-1"), None, 0)
+                .unwrap();
+        } else {
+            registry::append(&self.registry(), checkout, "bosun", Some("wf-1"), event, 0).unwrap();
+        }
     }
 
     fn release_landed(&self) -> String {
         let head = Git::default().head(&self.linked).unwrap();
-        registry::append_landed(&self.registry(), &self.linked, "bosun", None, &head, 0).unwrap();
+        registry::append_ended(
+            &self.registry(),
+            &self.linked,
+            "bosun",
+            None,
+            Some(&head),
+            0,
+        )
+        .unwrap();
         head
     }
 
@@ -233,7 +262,7 @@ fn find<'a>(plan: &'a ReclaimPlan, path: &Path) -> &'a Candidate {
 #[test]
 fn removes_idle_build_state_and_leaves_every_source_file() {
     let fixture = Fixture::new();
-    let plan = fixture.plan(&nobody(), false);
+    let plan = fixture.plan_derived();
     assert_eq!(plan.candidates.len(), 2);
     assert!(
         plan.candidates
@@ -501,28 +530,28 @@ fn refuses_at_apply_build_state_that_changed_within_the_idle_time() {
 #[test]
 fn observes_the_processes_again_before_each_removal() {
     let fixture = Fixture::new();
-    let plan = fixture.plan(&nobody(), false);
+    let plan = fixture.plan_derived();
     assert_eq!(plan.candidates.len(), 2);
-    // A process starts in the linked checkout after the first removal.
+    // A process starts in the main checkout after the first removal.
     let mut calls = 0;
-    let linked = fixture.linked.clone();
+    let main = fixture.repo.clone();
     let report = fixture.apply_with(&plan, &mut || {
         calls += 1;
         if calls == 1 {
             nobody()
         } else {
-            Ok(Liveness::of(vec![linked.clone()]))
+            Ok(Liveness::of(vec![main.clone()]))
         }
     });
     assert_eq!(report.status, RunStatus::Partial);
-    assert!(!fixture.repo.join("target").exists());
-    assert!(fixture.linked.join("target").exists());
+    assert!(!fixture.linked.join("target").exists());
+    assert!(fixture.repo.join("target").exists());
 }
 
 #[test]
 fn the_journal_lists_a_reclaim_run_with_its_removals() {
     let fixture = Fixture::new();
-    let plan = fixture.plan(&nobody(), false);
+    let plan = fixture.plan_derived();
     let report = fixture.apply(&plan);
     let summaries = JournalState::from_records(&read(&fixture.journal).unwrap()).summaries();
     assert_eq!(summaries.len(), 1);
@@ -535,7 +564,7 @@ fn the_journal_lists_a_reclaim_run_with_its_removals() {
     assert!(summary.removals.iter().all(|removal| removal.removed));
     assert_eq!(
         summary.removals[0].path.as_path(),
-        fixture.repo.join("target")
+        fixture.linked.join("target")
     );
 }
 
@@ -1020,6 +1049,9 @@ fn removes_a_released_checkout_and_its_build_state_in_one_run() {
     backdate(&fixture.linked, SystemTime::now() - 2 * idle);
     // A change within the plan's own second counts as later.
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The backdating changed the revision of the pointer.
+    fixture.record(&fixture.linked, registry::Event::Released);
+    fixture.end_claim(&fixture.linked);
     let plan = fixture.plan_at(&nobody(), false, now());
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
     assert_eq!(
@@ -1060,6 +1092,9 @@ fn removes_a_released_checkout_that_holds_a_read_only_go_cache() {
         SystemTime::now() - std::time::Duration::from_secs(2 * IDLE),
     );
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The backdating changed the revision of the pointer.
+    fixture.record(&fixture.linked, registry::Event::Released);
+    fixture.end_claim(&fixture.linked);
     let plan = fixture.plan_at(&nobody(), false, now());
     assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
     let report = fixture.apply_at(&plan, &mut nobody, now());
@@ -1349,6 +1384,8 @@ fn keeps_build_state_whose_checkout_points_to_another_repository() {
         SystemTime::now() - std::time::Duration::from_secs(2 * IDLE),
     );
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The backdating changed the revision of the pointer.
+    fixture.end_claim(&fixture.linked);
     let plan = fixture.plan_at(&nobody(), false, now());
     let target = fixture.linked.join("target");
     assert_eq!(find(&plan, &target).decision, Decision::Remove);
@@ -1361,4 +1398,113 @@ fn keeps_build_state_whose_checkout_points_to_another_repository() {
     let removal = report.removals.iter().find(|r| r.path.as_path() == target);
     let refusal = removal.unwrap().refusal.as_ref().unwrap();
     assert!(refusal.contains("changed after"), "{refusal}");
+}
+
+/// No process works in the checkout and no file is recent, so only the claim
+/// keeps it. The main checkout's build output has no claim.
+#[test]
+fn a_claim_keeps_a_linked_checkout_and_its_builds_until_a_release_states_its_end() {
+    use registry::Event::{Registered, Released};
+    let fixture = Fixture::new();
+    let path = fixture.registry();
+    let linked = fixture.linked.clone();
+    let target = linked.join("target");
+    let kept = |reason: Kept| {
+        let plan = fixture.plan(&nobody(), true);
+        for candidate in [&linked, &target] {
+            assert_eq!(find(&plan, candidate).kept, Some(reason));
+        }
+        let build = find(&plan, &fixture.repo.join("target"));
+        assert_eq!(build.decision, Decision::Remove);
+        let derived = fixture.plan_derived();
+        assert_eq!(find(&derived, &target).kept, Some(reason));
+        fixture
+            .apply_unattended(&derived, now() + 2 * IDLE_SECONDS)
+            .removals
+            .len()
+    };
+    // A registration that failed left no record.
+    fs::remove_file(&path).unwrap();
+    assert_eq!(kept(Kept::Claimed), 1);
+    build_output(&fixture.repo);
+    // The session claims the checkout.
+    registry::append(&path, &linked, "bosun", Some("wf-1"), Registered, 0).unwrap();
+    assert_eq!(kept(Kept::Registered), 1);
+    build_output(&fixture.repo);
+    // An earlier version releases it at a merge and states no end.
+    let head = Git::default().head(&linked).unwrap();
+    registry::append(&path, &linked, "bosun", Some("wf-1"), Released, 0).unwrap();
+    assert_eq!(kept(Kept::Claimed), 1);
+    build_output(&fixture.repo);
+    registry::append_landed(&path, &linked, "bosun", Some("wf-1"), &head, 0).unwrap();
+    assert_eq!(kept(Kept::Claimed), 1);
+    build_output(&fixture.repo);
+    // The end of another claim leaves this one.
+    fixture.end_claim(&linked);
+    assert_eq!(kept(Kept::Claimed), 1);
+    build_output(&fixture.repo);
+
+    registry::append_ended(&path, &linked, "bosun", Some("wf-1"), None, 0).unwrap();
+    let plan = fixture.plan(&nobody(), true);
+    assert_eq!(find(&plan, &linked).decision, Decision::Remove);
+    assert_eq!(find(&plan, &target).decision, Decision::Remove);
+    // A claim after the plan keeps both.
+    registry::append(&path, &linked, "bosun", Some("wf-2"), Registered, 0).unwrap();
+    fixture.apply(&plan);
+    assert!(target.exists());
+    // Its release by an earlier version does too.
+    registry::append(&path, &linked, "bosun", Some("wf-2"), Released, 0).unwrap();
+    fixture.apply(&plan);
+    assert!(target.exists());
+    registry::append_ended(&path, &linked, "bosun", Some("wf-2"), None, 0).unwrap();
+    fixture.apply(&plan);
+    assert!(!linked.exists());
+}
+
+/// The registration of the new checkout failed, so the path holds only the
+/// earlier checkout's ended claim.
+#[test]
+fn an_ended_claim_frees_no_later_checkout_at_the_same_path() {
+    let fixture = Fixture::new();
+    let path = fixture.linked.to_str().unwrap();
+    git(&fixture.repo, &["worktree", "remove", "--force", path]);
+    git(&fixture.repo, &["worktree", "add", path, "feature"]);
+    build_output(&fixture.linked);
+    let plan = fixture.plan(&nobody(), true);
+    for candidate in [&fixture.linked, &fixture.linked.join("target")] {
+        assert_eq!(find(&plan, candidate).kept, Some(Kept::Claimed));
+    }
+    // Another client's end leaves the claim of the client that registered
+    // the earlier checkout.
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), true);
+    assert_eq!(find(&plan, &fixture.linked).kept, Some(Kept::Claimed));
+    fixture.end_claim(&fixture.linked);
+    let plan = fixture.plan(&nobody(), true);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+}
+
+#[test]
+fn an_unread_git_entry_keeps_build_state_as_unverified() {
+    let fixture = Fixture::new();
+    let scan = inspect(
+        std::slice::from_ref(&fixture.workspace),
+        &Environment::default(),
+    );
+    fs::rename(fixture.repo.join(".git"), fixture.repo.join("earlier.git")).unwrap();
+    let policy = Policy {
+        idle_seconds: IDLE,
+        checkouts: CheckoutScope::DerivedOnly,
+        tolerate_unreadable_processes: false,
+    };
+    let observed = Observed {
+        liveness: &nobody(),
+        registry: &fixture.standings(),
+    };
+    let at = now() + 2 * IDLE_SECONDS;
+    let plan = plan_reclaim(&scan, &observed, &Git::default(), policy, at);
+    let candidate = find(&plan, &fixture.repo.join("target"));
+    assert_eq!(candidate.kept, Some(Kept::Unverified));
+    let fact = candidate.evidence.last().unwrap();
+    assert!(fact.starts_with("could not read"), "{fact}");
 }

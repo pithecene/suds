@@ -189,14 +189,55 @@ impl Git {
             .map(|name| name.trim().to_owned())
     }
 
-    /// The number of commits of the checkout's head that no remote-tracking
-    /// branch holds.
-    pub fn unpushed(&self, checkout: &Path) -> Result<u64, String> {
-        let count = self.run(
+    /// Worktree-private references (`refs/worktree`, `refs/bisect`,
+    /// `refs/rewritten`) that leave with this worktree.
+    fn private_refs(&self, checkout: &Path) -> Result<Vec<String>, String> {
+        let output = self.run(
             checkout,
-            &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/worktree",
+                "refs/bisect",
+                "refs/rewritten",
+            ],
             None,
         )?;
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// The number of commits of the checkout's head and worktree-private
+    /// references that no remote-tracking branch holds.
+    pub fn unpushed(&self, checkout: &Path) -> Result<u64, String> {
+        let private = self.private_refs(checkout)?;
+        let mut args: Vec<&str> = vec!["rev-list", "--count", "HEAD"];
+        args.extend(private.iter().map(String::as_str));
+        args.extend(["--not", "--remotes"]);
+        let count = self.run(checkout, &args, None)?;
+        count.trim().parse().map_err(|err| {
+            format!(
+                "git printed no commit count for {}: {err}",
+                checkout.display()
+            )
+        })
+    }
+
+    /// The number of commits held by worktree-private references that no
+    /// remote-tracking branch holds.
+    pub fn unpushed_private(&self, checkout: &Path) -> Result<u64, String> {
+        let private = self.private_refs(checkout)?;
+        if private.is_empty() {
+            return Ok(0);
+        }
+        let mut args: Vec<&str> = vec!["rev-list", "--count"];
+        args.extend(private.iter().map(String::as_str));
+        args.extend(["--not", "--remotes"]);
+        let count = self.run(checkout, &args, None)?;
         count.trim().parse().map_err(|err| {
             format!(
                 "git printed no commit count for {}: {err}",

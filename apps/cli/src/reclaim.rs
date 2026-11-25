@@ -67,10 +67,12 @@ fn apply(args: &ReclaimArgs, id: &str) -> Result<ExitCode, String> {
     let mut journal = Journal::open(&directory).map_err(|err| err.to_string())?;
     let plan = execute::recorded(&journal, id)
         .ok_or_else(|| format!("the journal records no reclaim plan {id}"))?;
+    let registry_path = Directories::of(&Environment::of_process()).map(|d| d.registry());
     let conditions = Conditions {
         authority: Authority::Person,
         observe: &mut Liveness::observe,
         registry: &mut standings,
+        registry_path: registry_path.as_deref(),
         git: &Git::default(),
         now: now_seconds(),
     };

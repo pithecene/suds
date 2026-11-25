@@ -157,6 +157,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         authority: Authority::StandingApproval,
         observe: &mut Liveness::observe,
         registry: &mut || registry::reading(&registry_path),
+        registry_path: Some(&registry_path),
         git: context.git,
         now: context.now,
     };

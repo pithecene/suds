@@ -61,7 +61,16 @@ A linked checkout and its build output also stay until a release states that
 each claim on the checkout ended. The option is `--claim-ended`. A merge,
 a release without that statement, and an absent registration end no claim. The
 statement binds the checkout that stands there, and no later one at its path. The
-build output of a main checkout has no claim.
+build output of a main checkout needs no such statement, and an unreleased
+registration still keeps it.
+
+The plan lists the claims that concern a candidate. A claim names the
+candidate's checkout, a checkout above it, or a path inside the candidate. Its
+line shows its standing, its client, its attempt, and the text of its latest
+registration beside the time. An ended claim stays in the list, so the person who
+approves a removal reads who held the checkout. A text belongs to its registration, so a
+text older than the checkout names an earlier one. A run keeps a linked checkout
+or its build output when the claims differ from those of its plan.
 
 Git removes a checkout together with the files that it ignores. Each run
 therefore accounts for every entry, whoever approves it. The head's tree

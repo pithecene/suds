@@ -1456,8 +1456,12 @@ fn a_claim_keeps_a_linked_checkout_and_its_builds_until_a_release_states_its_end
     registry::append(&path, &linked, "bosun", Some("wf-2"), Released, 0).unwrap();
     fixture.apply(&plan);
     assert!(target.exists());
+    // A person who approved the plan read no claim of this attempt, so even its
+    // end keeps both until another plan states it.
     registry::append_ended(&path, &linked, "bosun", Some("wf-2"), None, 0).unwrap();
     fixture.apply(&plan);
+    assert!(target.exists());
+    fixture.apply(&fixture.plan(&nobody(), true));
     assert!(!linked.exists());
 }
 
@@ -1474,6 +1478,11 @@ fn an_ended_claim_frees_no_later_checkout_at_the_same_path() {
     for candidate in [&fixture.linked, &fixture.linked.join("target")] {
         assert_eq!(find(&plan, candidate).kept, Some(Kept::Claimed));
     }
+    let stated = find(&plan, &fixture.linked).claim_lines();
+    assert!(
+        stated[0].starts_with("ended for another .git revision"),
+        "{stated:?}"
+    );
     // Another client's end leaves the claim of the client that registered
     // the earlier checkout.
     fixture.record(&fixture.linked, registry::Event::Released);
@@ -1507,4 +1516,96 @@ fn an_unread_git_entry_keeps_build_state_as_unverified() {
     assert_eq!(candidate.kept, Some(Kept::Unverified));
     let fact = candidate.evidence.last().unwrap();
     assert!(fact.starts_with("could not read"), "{fact}");
+}
+
+/// A plan states each client's claim on a checkout, whether the claim holds or
+/// ended, and a kept candidate states it too.
+#[test]
+fn a_plan_states_each_claim_on_a_candidate() {
+    let fixture = Fixture::new();
+    let (path, linked) = (fixture.registry(), fixture.linked.clone());
+    fs::remove_file(&path).unwrap();
+    let lines = |candidate: &Path| find(&fixture.plan(&nobody(), true), candidate).claim_lines();
+    assert_eq!(lines(&linked), ["no client states a claim"]);
+    let claim = |attempt: &str, text: &str| {
+        registry::append_claim(&path, &linked, "bosun", Some(attempt), text, 0).unwrap();
+    };
+    claim("wf-1", "session one");
+    claim("wf-2", " session two ");
+    registry::append_ended(&path, &linked, "bosun", Some("wf-1"), None, 60).unwrap();
+    let on = format!("{:?}", linked.display().to_string());
+    let first = "1970-01-01T00:00:00Z";
+    let stated = [
+        format!(
+            "ended since 1970-01-01T00:01:00Z, client \"bosun\", attempt \"wf-1\", \
+             registered {first} as \"session one\", on {on}"
+        ),
+        format!(
+            "held since {first}, client \"bosun\", attempt \"wf-2\", \
+             registered {first} as \"session two\", on {on}"
+        ),
+    ];
+    assert_eq!(lines(&linked), stated);
+    assert_eq!(lines(&linked.join("target")), stated);
+    for text in [" ", "two\nlines"] {
+        assert!(registry::append_claim(&path, &linked, "bosun", None, text, 0).is_err());
+    }
+
+    // A quote in a name ends no field of the line.
+    let name = "bosun\", attempt \"wf-9";
+    registry::append_claim(&path, &linked, name, None, "x", 0).unwrap();
+    assert!(
+        lines(&linked)
+            .iter()
+            .any(|line| line.contains(r#"client "bosun\", attempt \"wf-9""#))
+    );
+
+    // A path of two lines stays on one line.
+    let odd = linked.join("a\"b\nc");
+    registry::append_claim(&path, &odd, "odd", None, "x", 0).unwrap();
+    let stated = lines(&linked);
+    let line = stated.iter().find(|line| line.contains("\"odd\"")).unwrap();
+    assert!(line.ends_with(r#"a\"b\nc""#), "{line}");
+
+    // A registration without a text states none, whatever came before it.
+    fixture.record(&linked, registry::Event::Registered);
+    assert!(lines(&linked)[0].contains("without a text"));
+    let released = registry::Event::Released;
+    registry::append(&path, &linked, "bosun", Some("wf-1"), released, 0).unwrap();
+    assert!(lines(&linked)[0].starts_with("released without an end"));
+}
+
+/// The same client claims the checkout again and ends the claim within the
+/// second of the plan, so only the registry's records differ.
+#[test]
+fn a_changed_claim_keeps_the_candidate_of_an_approved_plan() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let claim_and_end = |checkout: &Path| {
+        fixture.record(checkout, registry::Event::Registered);
+        fixture.record(checkout, registry::Event::Released);
+    };
+    claim_and_end(&fixture.linked);
+    claim_and_end(repo);
+    let mut plan = fixture.plan(&nobody(), true);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+    claim_and_end(&fixture.linked);
+    // The main checkout's build state has no claim.
+    claim_and_end(repo);
+    let report = fixture.apply(&plan);
+    assert!(fixture.linked.join("target").exists());
+    assert!(!repo.join("target").exists());
+    let removal = report
+        .removals
+        .iter()
+        .find(|removal| removal.path.as_path() == fixture.linked);
+    let refusal = removal.unwrap().refusal.as_ref().unwrap();
+    assert!(refusal.contains("the claims on"), "{refusal}");
+
+    // A plan of an earlier release states no claims.
+    for candidate in &mut plan.candidates {
+        candidate.claims = None;
+    }
+    fixture.apply(&plan);
+    assert!(fixture.linked.join("target").exists());
 }

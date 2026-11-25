@@ -168,6 +168,7 @@ fn released(client: &str, landed: Option<&str>) -> Standing {
         at: "2026-11-19T00:00:00Z".to_owned(),
         landed: landed.map(str::to_owned),
         claim_ended: None,
+        claims: Vec::new(),
     }
 }
 

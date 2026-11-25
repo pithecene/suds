@@ -44,6 +44,7 @@ fn candidate(path: &Path) -> Candidate {
         expected: EntryRevision::from_metadata(&fs::metadata(parent).unwrap()),
         owner: None,
         head: None,
+        claims: None,
         allocated_bytes: 3 * GIB,
         logical_bytes: 3 * GIB,
         decision: Decision::Remove,

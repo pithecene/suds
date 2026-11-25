@@ -92,7 +92,7 @@ fn standings() -> Reading {
 
 fn write_plan(out: &mut impl Write, plan: &ReclaimPlan, saved: bool) -> io::Result<()> {
     let mut rows = vec![
-        ["DECISION", "KIND", "ALLOCATED", "PATH", "REASON"]
+        ["DECISION", "KIND", "ALLOCATED", "PATH", "CLAIM", "REASON"]
             .map(str::to_owned)
             .to_vec(),
     ];
@@ -110,10 +110,11 @@ fn write_plan(out: &mut impl Write, plan: &ReclaimPlan, saved: bool) -> io::Resu
             candidate.subject.label().to_owned(),
             format_bytes(candidate.allocated_bytes),
             escape(&candidate.path.display()),
+            escape(&candidate.claim_lines().join("; ")),
             escape(&reason(candidate)),
         ]);
     }
-    write_rows(out, "", &rows, &[false, false, true, false, false])?;
+    write_rows(out, "", &rows, &[false, false, true, false, false, false])?;
     writeln!(out)?;
     writeln!(
         out,

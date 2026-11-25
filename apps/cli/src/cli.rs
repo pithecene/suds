@@ -100,6 +100,11 @@ pub struct HoldArgs {
     #[arg(long, value_name = "ID")]
     pub attempt: Option<String>,
 
+    /// With `register`, the text for who claims the checkout, such as a
+    /// session. A plan shows it to the person who approves the plan.
+    #[arg(long, value_name = "TEXT")]
+    pub claim: Option<String>,
+
     /// With `release`, the commit at the checkout's head whose change a
     /// remote holds, though perhaps by another commit, as after a squash.
     #[arg(long, value_name = "COMMIT")]

@@ -59,11 +59,17 @@ fn hold(args: &HoldArgs, event: Event) -> Result<ExitCode, String> {
     if args.claim_ended && event != Event::Released {
         return Err("only a release states an ended claim".to_owned());
     }
+    if args.claim.is_some() && event != Event::Registered {
+        return Err("only a registration states a claim's text".to_owned());
+    }
     let path = directories()?.registry();
     let attempt = args.attempt.as_deref();
     let now = now_seconds();
     let landed = args.landed.as_deref();
     let record = match landed {
+        _ if let Some(claim) = &args.claim => {
+            registry::append_claim(&path, &checkout, &args.client, attempt, claim, now)?
+        }
         _ if args.claim_ended => {
             registry::append_ended(&path, &checkout, &args.client, attempt, landed, now)?
         }

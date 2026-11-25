@@ -27,6 +27,9 @@ registration adds knowledge and no permission:
   `suds reclaim`, a linked checkout that its clients have released takes
   priority over other checkouts. The rules of [Reclamation](reclaim.md)
   decide whether it leaves.
+- With `--claim TEXT`, a registration states who claims the checkout, such as
+  a session. Suds reads nothing from the text, and a plan shows it. A later
+  registration for the same client and attempt replaces the text.
 - With `--claim-ended`, a release states that the session or the person who
   claimed the checkout ends the claim. Suds keeps a linked checkout and its
   build output until the latest release of each client and attempt states it.

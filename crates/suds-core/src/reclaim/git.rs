@@ -190,7 +190,8 @@ impl Git {
     }
 
     /// Worktree-private references (`refs/worktree`, `refs/bisect`,
-    /// `refs/rewritten`) that leave with this worktree.
+    /// `refs/rewritten`) and per-worktree pseudoreferences (`ORIG_HEAD`,
+    /// `MERGE_HEAD`, etc.) that leave with this worktree.
     fn private_refs(&self, checkout: &Path) -> Result<Vec<String>, String> {
         let output = self.run(
             checkout,
@@ -203,12 +204,32 @@ impl Git {
             ],
             None,
         )?;
-        Ok(output
+        let mut refs: Vec<String> = output
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(str::to_owned)
-            .collect())
+            .collect();
+        for pseudo in [
+            "ORIG_HEAD",
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_HEAD",
+            "AUTO_MERGE",
+        ] {
+            if let Ok(oid) = self.run(
+                checkout,
+                &["rev-parse", "--verify", "-q", &format!("{pseudo}^{{commit}}")],
+                None,
+            ) {
+                let oid = oid.trim();
+                if !oid.is_empty() {
+                    refs.push(oid.to_owned());
+                }
+            }
+        }
+        Ok(refs)
     }
 
     /// The number of commits of the checkout's head and worktree-private

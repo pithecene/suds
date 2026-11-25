@@ -23,7 +23,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Worktree-private references and registration races**: `suds reclaim` now counts unpushed commits on worktree-private references (`refs/worktree`, `refs/bisect`, `refs/rewritten`) even when `HEAD` is remotely reachable or reported `--landed`. Registration and reclamation now share a local coordination lock: reclamation re-verifies ownership under the lock before removal, and `suds register` verifies the checkout still exists under the lock before acknowledging protection.
+- **Worktree-private references and registration races**: `suds reclaim` counts unpushed commits on worktree-private references (`refs/worktree`, `refs/bisect`, `refs/rewritten`) and per-worktree pseudoreferences (`ORIG_HEAD`, `MERGE_HEAD`, etc.), and requires a surviving remote-tracking reference even for `--landed` heads. Registration and reclamation share a local coordination lock: reclamation re-verifies ownership under the lock before removal, and `suds register` verifies the checkout exists under the lock before acknowledging protection.
 - **A person's reclaim keeps a checkout with ignored files**: `suds reclaim --apply` removed a released linked checkout together with files that Git ignores, such as `.env`. It now accounts for every entry as a scheduled run does, and the plan names the first entry that keeps the checkout.
 
 ## [0.1.7] - 2026-11-22

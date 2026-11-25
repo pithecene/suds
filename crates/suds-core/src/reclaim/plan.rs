@@ -606,12 +606,26 @@ impl Judge<'_> {
         if let Some(commit) = self.landed(checkout)
             && self.git.head(checkout).is_ok_and(|head| head == commit)
         {
-            if !self.record_tracking_ref(checkout, commit, evidence) {
-                evidence.push(format!(
-                    "its client reported the head {commit} as landed on a remote"
-                ));
+            match self.git.unpushed_private(checkout) {
+                Ok(0) => {}
+                Ok(count) => {
+                    evidence.push(format!(
+                        "its worktree-private references hold {count} commits that no remote holds"
+                    ));
+                    return Some(Kept::UnpushedCommits);
+                }
+                Err(reason) => {
+                    evidence.push(reason);
+                    return Some(Kept::Unverified);
+                }
             }
-            return None;
+            if self.record_tracking_ref(checkout, commit, evidence) {
+                return None;
+            }
+            evidence.push(format!(
+                "its client reported the head {commit} as landed, but no remote-tracking reference holds it"
+            ));
+            return Some(Kept::UnpushedCommits);
         }
         match self.git.unpushed(checkout) {
             Ok(0) => {

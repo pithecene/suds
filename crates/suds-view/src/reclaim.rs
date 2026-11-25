@@ -265,10 +265,12 @@ pub fn apply(
     let directories = directories(environment)?;
     let mut journal = Journal::open(&directories.journal()).map_err(|err| err.to_string())?;
     let git = Git::default();
+    let registry_path = directories.registry();
     let conditions = execute::Conditions {
         authority: execute::Authority::Person,
         observe: &mut Liveness::observe,
         registry: &mut || standings(&directories),
+        registry_path: Some(&registry_path),
         git: &git,
         now,
     };

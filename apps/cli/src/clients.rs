@@ -66,17 +66,24 @@ fn hold(args: &HoldArgs, event: Event) -> Result<ExitCode, String> {
     let attempt = args.attempt.as_deref();
     let now = now_seconds();
     let landed = args.landed.as_deref();
-    let record = match landed {
-        _ if let Some(claim) = &args.claim => {
-            registry::append_claim(&path, &checkout, &args.client, attempt, claim, now)?
-        }
-        _ if args.claim_ended => {
-            registry::append_ended(&path, &checkout, &args.client, attempt, landed, now)?
-        }
-        Some(landed) => {
-            registry::append_landed(&path, &checkout, &args.client, attempt, landed, now)?
-        }
-        None => registry::append(&path, &checkout, &args.client, attempt, event, now)?,
+    let record = match event {
+        Event::Registered => registry::register(
+            &path,
+            &checkout,
+            &args.client,
+            attempt,
+            args.claim.as_deref(),
+            now,
+        )?,
+        Event::Released => match landed {
+            _ if args.claim_ended => {
+                registry::append_ended(&path, &checkout, &args.client, attempt, landed, now)?
+            }
+            Some(landed) => {
+                registry::append_landed(&path, &checkout, &args.client, attempt, landed, now)?
+            }
+            None => registry::append(&path, &checkout, &args.client, attempt, event, now)?,
+        },
     };
     planned(emit(Format::Json, &record, |_, _: &Record| Ok(())))
 }

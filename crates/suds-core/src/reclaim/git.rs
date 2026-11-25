@@ -220,7 +220,12 @@ impl Git {
         ] {
             if let Ok(oid) = self.run(
                 checkout,
-                &["rev-parse", "--verify", "-q", &format!("{pseudo}^{{commit}}")],
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "-q",
+                    &format!("{pseudo}^{{commit}}"),
+                ],
                 None,
             ) {
                 let oid = oid.trim();

@@ -1874,7 +1874,7 @@ fn overlapping_registration_blocks_until_locked_removal_finishes_and_reports_mis
     assert!(!fixture.linked.exists());
 
     // Once removal releases the lock, registration unblocks and sees the
-    // removed checkout is gone.
+    // checkout no longer exists.
     let reg_result = reg_thread.expect("hook ran").join().unwrap();
     let err = reg_result.unwrap_err();
     assert!(err.contains("no longer exists"), "{err}");

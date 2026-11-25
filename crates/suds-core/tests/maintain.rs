@@ -715,3 +715,50 @@ fn publishes_post_maintenance_pressure_recovery_and_headroom() {
     let saved = read_pressure(&fixture.directories.pressure()).unwrap();
     assert_eq!(saved, report.pressure);
 }
+
+#[test]
+fn lock_wait_does_not_backdate_initial_observation_or_bypass_transition() {
+    let fixture = Fixture::new();
+    let mut settings = fixture.settings(true);
+    settings.ceiling_bytes = Some(1024 * 1024);
+
+    // Seed an existing Hard pressure reading at t = 1000 with no pending recovery.
+    let initial = suds_core::pressure::Pressure {
+        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: "1970-01-01T00:16:40Z".to_owned(),
+        level: Level::Hard,
+        lower_since: None,
+        usage_bytes: 1024 * 1024,
+        ceiling_bytes: 1024 * 1024,
+        enforced: false,
+        filesystem_available_bytes: Some(10 * 1024 * 1024),
+        complete: true,
+    };
+    fs::create_dir_all(&fixture.directories.state).unwrap();
+    fs::write(
+        fixture.directories.pressure(),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+
+    // Caller starts at t = 1000, waits 600 seconds on the maintenance lock,
+    // then observes low usage at t = 1600 and finishes post-cleanup at t = 1600.
+    let mut context = fixture.context(&Git::default());
+    context.now = 1000;
+    let mut clock = || 1600;
+    let report =
+        suds_core::maintain::maintain_with_clock(&settings, &context, &mut clock).unwrap();
+
+    // Hard stays held because the 300-second transition started at the fresh
+    // post-lock observation (1600), not the stale start time (1000).
+    assert_eq!(report.pressure.level, Level::Hard);
+    assert_eq!(
+        report.pressure.observed_at, "1970-01-01T00:26:40Z",
+        "observed_at must not backdate to lock-wait start"
+    );
+    assert_eq!(
+        report.pressure.lower_since.as_deref(),
+        Some("1970-01-01T00:26:40Z"),
+        "recovery transition must start at the fresh post-lock observation"
+    );
+}

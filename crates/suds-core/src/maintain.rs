@@ -64,6 +64,18 @@ pub struct Context<'a> {
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
     let started = Instant::now();
+    let mut clock =
+        || context.now.saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(0));
+    maintain_with_clock(settings, context, &mut clock)
+}
+
+/// Like [`maintain`], reading observation timestamps from `clock` after
+/// acquiring the maintenance lock and after cleanup.
+pub fn maintain_with_clock(
+    settings: &Settings,
+    context: &Context<'_>,
+    clock: &mut dyn FnMut() -> i64,
+) -> Result<MaintenanceReport, String> {
     let first = settings
         .roots
         .first()
@@ -72,7 +84,8 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     // Coordinate concurrent maintenance callers before scanning the workspace.
     let _maintain_lock = registry::lock(&path.with_extension("maintain.lock"))?;
     let scan = development::inspect(&settings.roots, context.environment);
-    let inspection = development::build_report(&scan, context.now);
+    let initial_now = clock();
+    let inspection = development::build_report(&scan, initial_now);
     // The pressure counts every root and every store, so the audit covers
     // each of them.
     let others: Vec<_> = settings
@@ -90,7 +103,7 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         enforced: audited.enforced,
         filesystem_available_bytes: available_before,
         complete: inspection.status == ReportStatus::Complete,
-        now: context.now,
+        now: initial_now,
     };
     let reading = pressure::next(
         read_pressure(&path).as_ref(),
@@ -165,11 +178,10 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .map_err(|err| err.to_string())?,
     );
 
-    // Publish a post-maintenance observation stamped with elapsed time so
+    // Publish a post-maintenance observation from the same advancing clock so
     // recovery starts after cleanup without backdating the transition window.
-    let elapsed = i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
-    let post_now = context.now.saturating_add(elapsed);
     let post_scan = development::inspect(&settings.roots, context.environment);
+    let post_now = clock();
     let post_inspection = development::build_report(&post_scan, post_now);
     let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
     let available_after = Some(post_audited.available_bytes);

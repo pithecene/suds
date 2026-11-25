@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -62,6 +63,7 @@ pub struct Context<'a> {
 /// Measures the development storage, records the pressure, and reclaims
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
+    let started = Instant::now();
     let first = settings
         .roots
         .first()
@@ -163,11 +165,12 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .map_err(|err| err.to_string())?,
     );
 
-    // Publish a post-maintenance observation so clients immediately see
-    // recovered usage and start the transition window without waiting for the
-    // next scheduled run.
+    // Publish a post-maintenance observation stamped with elapsed time so
+    // recovery starts after cleanup without backdating the transition window.
+    let elapsed = i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
+    let post_now = context.now.saturating_add(elapsed);
     let post_scan = development::inspect(&settings.roots, context.environment);
-    let post_inspection = development::build_report(&post_scan, context.now);
+    let post_inspection = development::build_report(&post_scan, post_now);
     let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
     let available_after = Some(post_audited.available_bytes);
     let post_measurement = Measurement {
@@ -176,12 +179,18 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         enforced: post_audited.enforced,
         filesystem_available_bytes: available_after,
         complete: post_inspection.status == ReportStatus::Complete,
-        now: context.now,
+        now: post_now,
     };
     let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
     write_pressure(&path, &post_reading)?;
     report.pressure = post_reading;
     report.filesystem_available_after_bytes = available_after;
+    if post_inspection.error_count > 0 {
+        report.error_count = report
+            .error_count
+            .saturating_add(post_inspection.error_count);
+        report.errors.extend(post_inspection.errors);
+    }
     Ok(report)
 }
 

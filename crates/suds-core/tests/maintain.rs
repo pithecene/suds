@@ -691,10 +691,10 @@ fn publishes_post_maintenance_pressure_recovery_and_headroom() {
     // Seed a large build artifact in the main checkout's target directory so
     // initial pressure hits Hard against a tight ceiling, then drops after
     // maintain removes target/.
-    let payload = vec![b'x'; 256 * 1024];
+    let payload = vec![b'x'; 2 * 1024 * 1024];
     fs::write(fixture.repo.join("target/big.bin"), &payload).unwrap();
     let mut settings = fixture.settings(true);
-    settings.ceiling_bytes = Some(200 * 1024);
+    settings.ceiling_bytes = Some(1024 * 1024);
 
     let report = maintain(&settings, &fixture.context(&Git::default())).unwrap();
     assert!(!fixture.repo.join("target").exists());
@@ -703,8 +703,8 @@ fn publishes_post_maintenance_pressure_recovery_and_headroom() {
     // Post-maintenance measurement reflects the reduced usage and starts the
     // transition window while preserving the 5-minute recovery delay.
     assert!(
-        report.pressure.usage_bytes < 200 * 1024,
-        "post-cleanup usage {} exceeds ceiling",
+        report.pressure.usage_bytes < 800 * 1024,
+        "post-cleanup usage {} exceeds soft threshold",
         report.pressure.usage_bytes
     );
     assert_eq!(report.pressure.level, Level::Hard);

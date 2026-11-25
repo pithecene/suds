@@ -743,7 +743,8 @@ fn lock_wait_does_not_backdate_initial_observation_or_bypass_transition() {
 
     // Caller starts at t = 1000, waits 600 seconds on the maintenance lock,
     // then observes low usage at t = 1600 and finishes post-cleanup at t = 1600.
-    let mut context = fixture.context(&Git::default());
+    let git = Git::default();
+    let mut context = fixture.context(&git);
     context.now = 1000;
     let mut clock = || 1600;
     let report = suds_core::maintain::maintain_with_clock(&settings, &context, &mut clock).unwrap();

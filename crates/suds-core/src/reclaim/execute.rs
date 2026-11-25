@@ -263,6 +263,16 @@ fn check(
     granted: &Granted,
 ) -> Result<CheckedRemoval, String> {
     let checked = judged(journal, candidate, authority, judge, planned_at)?;
+    // The plan's approval covers the claims that the plan stated. The build
+    // state of a main checkout has no claim.
+    let claims = judge.claims(candidate.checkout.as_path(), candidate.path.as_path());
+    let linked = candidate.repository.is_some();
+    if linked && (claims.is_none() || claims != candidate.claims) {
+        return Err(format!(
+            "the claims on {} changed after Suds built the plan",
+            candidate.path.display()
+        ));
+    }
     match changed(candidate.path.as_path(), planned_at, granted)? {
         None => Ok(checked),
         Some(entry) => Err(format!(

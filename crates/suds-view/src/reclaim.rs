@@ -107,7 +107,11 @@ impl Proposal {
                     subject: candidate.subject,
                     bytes: candidate.allocated_bytes,
                     within: holder.filter(|holder| *holder != position),
-                    evidence: candidate.evidence.clone(),
+                    evidence: candidate
+                        .claim_lines()
+                        .into_iter()
+                        .chain(candidate.evidence.iter().cloned())
+                        .collect(),
                 }
             })
             .collect();

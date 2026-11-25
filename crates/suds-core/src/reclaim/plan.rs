@@ -21,7 +21,7 @@ use crate::organize::plan::new_id;
 use crate::reclaim::accounted;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
-use crate::registry::{self, Reading};
+use crate::registry::{self, Claim, Reading};
 use crate::timestamp;
 
 /// The schema tag of every reclaim plan.
@@ -98,6 +98,12 @@ pub struct Candidate {
     /// The head of a linked checkout at planning.
     #[serde(default)]
     pub head: Option<String>,
+    /// The claims at planning that name the owning checkout, a checkout above
+    /// it, or a path that the candidate contains. A plan of an earlier
+    /// release or of an unread registry names none, and a run then
+    /// removes no linked checkout and none of its build state.
+    #[serde(default)]
+    pub claims: Option<Vec<Claim>>,
     pub allocated_bytes: u64,
     pub logical_bytes: u64,
     pub decision: Decision,
@@ -105,6 +111,23 @@ pub struct Candidate {
     pub kept: Option<Kept>,
     /// Each fact that supports the decision.
     pub evidence: Vec<String>,
+}
+
+impl Candidate {
+    /// The line of each claim, as a person reads it before an approval.
+    pub fn claim_lines(&self) -> Vec<String> {
+        match &self.claims {
+            None => vec!["the claims are unknown".to_owned()],
+            Some(claims) if claims.is_empty() => vec!["no client states a claim".to_owned()],
+            Some(claims) => claims
+                .iter()
+                .map(|claim| {
+                    let own = claim.checkout == self.checkout;
+                    claim.line(self.owner.as_ref().filter(|_| own))
+                })
+                .collect(),
+        }
+    }
 }
 
 /// The class of a candidate.
@@ -252,7 +275,7 @@ pub fn plan_reclaim(
                 &build.repositories,
             );
             candidates.extend(candidate(
-                git,
+                &judge,
                 &build.path,
                 subject,
                 checkout,
@@ -283,7 +306,7 @@ pub fn plan_reclaim(
             };
             let subject = Subject::LinkedCheckout;
             candidates.extend(candidate(
-                git,
+                &judge,
                 &checkout.path,
                 subject,
                 checkout,
@@ -318,7 +341,7 @@ pub fn plan_reclaim(
             &repositories,
         );
         candidates.extend(candidate(
-            git,
+            &judge,
             &store.path,
             subject,
             owner,
@@ -634,6 +657,13 @@ impl Judge<'_> {
         }
     }
 
+    /// Each claim on `checkout` or beneath `path`, or none when Suds could not
+    /// read the registry.
+    pub(super) fn claims(&self, checkout: &Path, path: &Path) -> Option<Vec<Claim>> {
+        let standings = self.registry.as_ref().ok()?;
+        Some(registry::claims(standings, checkout, path))
+    }
+
     /// Keeps a candidate when a process works in its checkout, or when Suds
     /// cannot tell where each of this user's processes works.
     fn in_use(&self, checkout: &Path, evidence: &mut Vec<String>) -> Option<Kept> {
@@ -835,7 +865,7 @@ fn surveyed(survey: &Survey, evidence: &mut Vec<String>) -> Option<Kept> {
 /// Builds one candidate, or none when the directory vanished after the
 /// inspection.
 fn candidate(
-    git: &Git,
+    judge: &Judge<'_>,
     path: &Path,
     subject: Subject,
     checkout: &Checkout,
@@ -853,8 +883,9 @@ fn candidate(
         expected: EntryRevision::from_metadata(&meta),
         owner: owner.as_ref().map(EntryRevision::from_metadata),
         head: (subject == Subject::LinkedCheckout)
-            .then(|| git.head(path).ok())
+            .then(|| judge.git.head(path).ok())
             .flatten(),
+        claims: judge.claims(&checkout.path, path),
         allocated_bytes: measure.allocated_bytes,
         logical_bytes: measure.logical_bytes,
         decision: if kept.is_some() {

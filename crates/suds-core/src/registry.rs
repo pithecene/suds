@@ -5,7 +5,7 @@
 //! permission: Suds still verifies every fact before it removes anything.
 //! The registry is an append-only file with one JSON record on each line.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -33,6 +33,10 @@ pub struct Record {
     /// The client's own name for the work, such as a workflow's identifier.
     pub attempt: Option<String>,
     pub event: Event,
+    /// On a registration, the client's text for who claims the checkout, such
+    /// as a session. Suds shows the text and reads nothing from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
     /// On a release, the head that the client reports as landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed: Option<String>,
@@ -50,6 +54,51 @@ pub enum Event {
     Released,
 }
 
+/// The claim that one client and attempt made on a checkout, as a plan states
+/// it to the person who approves the plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    pub checkout: NativePath,
+    pub client: String,
+    pub attempt: Option<String>,
+    /// The client's latest record for the attempt, and its time.
+    pub event: Event,
+    pub at: String,
+    /// The checkout that the latest record names as one whose claim ended.
+    pub ended: Option<EntryRevision>,
+    /// The position of the latest record in the registry, which differs after
+    /// any later record of the client and attempt, even in the same second.
+    pub position: usize,
+    /// The text of the latest registration, and that registration's time.
+    pub text: Option<String>,
+    pub registered_at: Option<String>,
+}
+
+impl Claim {
+    /// The claim in one line, beside the revision of the `.git` entry that
+    /// stands at the claim's path, where the reader knows it.
+    pub fn line(&self, standing: Option<&EntryRevision>) -> String {
+        let standing = match (self.event, &self.ended) {
+            (Event::Registered, _) => "held",
+            (Event::Released, None) => "released without an end",
+            (Event::Released, Some(ended)) if standing.is_some_and(|now| now != ended) => {
+                "ended for another .git revision"
+            }
+            (Event::Released, Some(_)) => "ended",
+        };
+        let mut line = format!("{standing} since {}, client {:?}", self.at, self.client);
+        if let Some(attempt) = &self.attempt {
+            line.push_str(&format!(", attempt {attempt:?}"));
+        }
+        match (&self.registered_at, &self.text) {
+            (Some(at), Some(text)) => line.push_str(&format!(", registered {at} as {text:?}")),
+            (Some(at), None) => line.push_str(&format!(", registered {at} without a text")),
+            (None, _) => line.push_str(", never registered"),
+        }
+        format!("{line}, on {:?}", self.checkout.display())
+    }
+}
+
 /// The newest outstanding registration of a checkout, or its latest release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Standing {
@@ -62,6 +111,8 @@ pub struct Standing {
     /// The checkout that the latest record of each client and attempt names as
     /// one whose claim ended.
     pub claim_ended: Option<EntryRevision>,
+    /// The claim of each client and attempt.
+    pub claims: Vec<Claim>,
 }
 
 /// The latest standing of each checkout that the registry names.
@@ -97,6 +148,58 @@ pub fn held_beneath<'a>(standings: &'a Standings, path: &Path) -> Option<(&'a Pa
         .find(|(held, _)| held.starts_with(path))
 }
 
+/// The claims that name `checkout`, a checkout above it, or a path that `path`
+/// contains, in a stable order.
+pub fn claims(standings: &Standings, checkout: &Path, path: &Path) -> Vec<Claim> {
+    let mut claims: Vec<Claim> = standings
+        .iter()
+        .filter(|(held, _)| checkout.starts_with(held) || held.starts_with(path))
+        .flat_map(|(_, standing)| standing.claims.iter().cloned())
+        .collect();
+    claims.sort_by(|a, b| {
+        let key = |claim: &Claim| {
+            (
+                claim.checkout.as_path().to_path_buf(),
+                claim.client.clone(),
+                claim.attempt.clone(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    claims
+}
+
+/// Appends a registration of `checkout` whose client states `claim` as the
+/// text for who claims it.
+pub fn append_claim(
+    path: &Path,
+    checkout: &Path,
+    client: &str,
+    attempt: Option<&str>,
+    claim: &str,
+    now: i64,
+) -> Result<Record, String> {
+    let claim = claim.trim();
+    if claim.is_empty() {
+        return Err("the text of a claim is empty".to_owned());
+    }
+    if claim.chars().any(char::is_control) {
+        return Err("the text of a claim holds a control character".to_owned());
+    }
+    let record = Record {
+        schema: REGISTRY_SCHEMA.to_owned(),
+        at: timestamp::format_utc(now),
+        checkout: NativePath::new(checkout.to_path_buf()),
+        client: client.to_owned(),
+        attempt: attempt.map(str::to_owned),
+        event: Event::Registered,
+        claim: Some(claim.to_owned()),
+        landed: None,
+        claim_ended: None,
+    };
+    write(path, record)
+}
+
 /// Appends one record to the registry at `path`, and creates the file and
 /// its directory when they do not exist. The file opens without following a
 /// symbolic link, and one write holds the whole line.
@@ -115,6 +218,7 @@ pub fn append(
         client: client.to_owned(),
         attempt: attempt.map(str::to_owned),
         event,
+        claim: None,
         landed: None,
         claim_ended: None,
     };
@@ -177,6 +281,7 @@ fn release(
         client: client.to_owned(),
         attempt: attempt.map(str::to_owned),
         event: Event::Released,
+        claim: None,
         landed: landed.map(str::to_owned),
         claim_ended,
     };
@@ -268,6 +373,33 @@ fn committed_length(bytes: &[u8]) -> usize {
 
 /// One client can release only its own registration for an attempt.
 pub fn standings(records: &[Record]) -> Standings {
+    // A release states no text, so it keeps that of its registration.
+    let mut claims = BTreeMap::new();
+    for (position, record) in records.iter().enumerate() {
+        let attempt = record.attempt.as_deref();
+        let key = (record.checkout.as_path(), record.client.as_str(), attempt);
+        let claim = claims.entry(key).or_insert_with(|| Claim {
+            checkout: record.checkout.clone(),
+            client: record.client.clone(),
+            attempt: record.attempt.clone(),
+            event: record.event,
+            at: record.at.clone(),
+            ended: None,
+            position,
+            text: None,
+            registered_at: None,
+        });
+        (claim.event, claim.at) = (record.event, record.at.clone());
+        claim.ended = match record.event {
+            Event::Registered => None,
+            Event::Released => record.claim_ended,
+        };
+        claim.position = position;
+        if record.event == Event::Registered {
+            claim.text.clone_from(&record.claim);
+            claim.registered_at = Some(record.at.clone());
+        }
+    }
     let mut seen = HashSet::new();
     let mut standings = Standings::new();
     for record in records.iter().rev() {
@@ -300,8 +432,14 @@ pub fn standings(records: &[Record]) -> Standings {
                 at: record.at.clone(),
                 landed: record.landed.clone(),
                 claim_ended,
+                claims: Vec::new(),
             },
         );
+    }
+    for ((path, _, _), claim) in claims {
+        if let Some(standing) = standings.get_mut(path) {
+            standing.claims.push(claim);
+        }
     }
     standings
 }

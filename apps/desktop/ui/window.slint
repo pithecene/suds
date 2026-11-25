@@ -798,11 +798,24 @@ export component Window inherits Window {
                             spacing: 8px;
                             Heading { text: "EVIDENCE"; }
                             if root.plan-evidence.length == 0: Caption { text: "Select a removal to read each fact that the plan found for it."; wrap: word-wrap; }
-                            for fact[position] in root.plan-evidence: Text {
-                                text: fact;
-                                font-size: 12px;
-                                wrap: position == 0 ? char-wrap : word-wrap;
-                                color: position == 0 ? Tones.muted : Palette.foreground;
+                            if root.plan-evidence.length > 0: ScrollView {
+                                height: min(facts.preferred-height, 320px);
+                                content-width: self.visible-width;
+                                content-height: facts.preferred-height;
+                                // Another removal's evidence starts at its path.
+                                property <int> shown: root.plan-selected;
+                                changed shown => { self.content-y = 0; }
+                                facts := VerticalLayout {
+                                    width: parent.visible-width;
+                                    alignment: start;
+                                    spacing: 8px;
+                                    for fact[position] in root.plan-evidence: Text {
+                                        text: fact;
+                                        font-size: 12px;
+                                        wrap: position == 0 ? char-wrap : word-wrap;
+                                        color: position == 0 ? Tones.muted : Palette.foreground;
+                                    }
+                                }
                             }
                         }
                     }

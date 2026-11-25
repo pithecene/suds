@@ -158,9 +158,31 @@ fn a_release_states_an_ended_claim_and_a_registration_does_not() {
     fs::create_dir_all(fixture.root.join("workspace/.git")).unwrap();
     let plain = text(&hold(&["release"]).stdout);
     assert!(!plain.contains("claim_ended"), "{plain}");
+    assert!(!hold(&["release", "--claim", "x"]).status.success());
+    let claimed = text(&hold(&["register", "--claim", "session one"]).stdout);
+    assert!(claimed.contains("session one"), "{claimed}");
     let head = "a".repeat(40);
     let ended = hold(&["release", "--claim-ended", "--landed", &head]);
     let record: serde_json::Value = serde_json::from_slice(&ended.stdout).unwrap();
     assert!(record["claim_ended"]["inode"].is_u64());
     assert_eq!(record["landed"], head.as_str());
+}
+
+#[test]
+fn prints_the_claim_on_each_candidate() {
+    let fixture = Fixture::new();
+    fixture.project("named");
+    let claimed = Command::new(env!("CARGO_BIN_EXE_suds"))
+        .args(["register", "--checkout", "workspace/named", "--client"])
+        .args(["bosun", "--claim", "session one"])
+        .current_dir(&fixture.root)
+        .env("HOME", fixture.root.join("home"))
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .status();
+    assert!(claimed.unwrap().success());
+    let plan = text(&fixture.plan("60").stdout);
+    assert!(plan.contains("CLAIM"), "{plan}");
+    assert!(plan.contains("held since"), "{plan}");
+    assert!(plan.contains("as \"session one\""), "{plan}");
 }

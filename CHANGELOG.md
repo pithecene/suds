@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A plan states who claims each checkout**: `suds register --claim TEXT` records a text such as a session's name, and `suds reclaim` shows it in the column `CLAIM` and the desktop's evidence. A run keeps a linked checkout or its build output when the claims changed after the plan.
+
 ### Changed
 
 - **A claim keeps a linked checkout and its build output**: `suds release --claim-ended` states that the work in a checkout ended. Without that statement for each client and attempt, Suds keeps the checkout and its build output, so a merge or a release of an earlier version no longer frees them.

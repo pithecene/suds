@@ -64,8 +64,11 @@ pub struct Context<'a> {
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
     let started = Instant::now();
-    let mut clock =
-        || context.now.saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(0));
+    let mut clock = || {
+        context
+            .now
+            .saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(0))
+    };
     maintain_with_clock(settings, context, &mut clock)
 }
 

@@ -746,8 +746,7 @@ fn lock_wait_does_not_backdate_initial_observation_or_bypass_transition() {
     let mut context = fixture.context(&Git::default());
     context.now = 1000;
     let mut clock = || 1600;
-    let report =
-        suds_core::maintain::maintain_with_clock(&settings, &context, &mut clock).unwrap();
+    let report = suds_core::maintain::maintain_with_clock(&settings, &context, &mut clock).unwrap();
 
     // Hard stays held because the 300-second transition started at the fresh
     // post-lock observation (1600), not the stale start time (1000).

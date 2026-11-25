@@ -34,10 +34,9 @@ registration adds knowledge and no permission:
   claimed the checkout ends the claim. Suds keeps a linked checkout and its
   build output until the latest release of each client and attempt states it.
 - A client can report delivery with `suds release --checkout DIR --client
-  bosun --attempt wf-12 --landed COMMIT`. After a squash merge, a pull
-  request's head can serve as evidence if Git fetched it into a local
-  remote-tracking reference. A person can also approve removal based on a
-  matching release when no local reference contains the released head.
+  bosun --attempt wf-12 --landed COMMIT`. Even with a matching `--landed`
+  report, Suds still requires a local remote-tracking reference that contains
+  the checkout's head before removing it.
 
 The `maintain` command is the run that a schedule starts. It inspects the
 roots that the settings name, and it records one `suds.pressure/v1` reading

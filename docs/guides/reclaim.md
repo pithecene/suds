@@ -79,10 +79,10 @@ output. Any other entry keeps the checkout, such as an ignored `.env` or a
 tool's own records, and the plan names the first one. A repository that a build
 fetched keeps the checkout until its build state leaves.
 
-A remote-tracking branch can show that a remote holds the checkout's
-head. A person who runs `suds reclaim --apply` can also use a release with
-`--landed COMMIT` as evidence while the head still matches `COMMIT`. A release
-can state both.
+A remote-tracking reference must contain the checkout's head before Suds
+removes it, even when a release reports `--landed COMMIT` for that head.
+Suds also keeps the checkout if a worktree-private reference or per-worktree
+pseudoreference such as `ORIG_HEAD` holds an unpushed commit.
 
 A scheduled run names no checkout, whatever the standing approval. A checkout
 leaves only through a plan that a person read.

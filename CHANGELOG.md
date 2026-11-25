@@ -23,7 +23,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Post-maintenance pressure recovery, pre-scan locking, and macOS `lsof` visibility**: `suds maintain` now serializes concurrent callers before scanning, publishes a post-cleanup pressure reading (preserving the five-minute transition window), and records observed filesystem free bytes before and after maintenance. On macOS, `lsof` now preserves same-user unreadable working-directory entries with process and command context while ignoring other users' inaccessible processes.
+- **Post-maintenance pressure recovery, pre-scan locking, and macOS `lsof` visibility**: `suds maintain` serializes concurrent runs before scanning and publishes a post-cleanup pressure reading that keeps the five-minute transition window. The report also records filesystem free bytes before and after maintenance. On macOS, `lsof` keeps unreadable working-directory entries for the current user with process and command context, while ignoring other users' processes.
 - **A person's reclaim keeps a checkout with ignored files**: `suds reclaim --apply` removed a released linked checkout together with files that Git ignores, such as `.env`. It now accounts for every entry as a scheduled run does, and the plan names the first entry that keeps the checkout.
 
 ## [0.1.7] - 2026-11-22

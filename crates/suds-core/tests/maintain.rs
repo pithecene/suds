@@ -704,13 +704,13 @@ fn publishes_post_maintenance_pressure_recovery_and_headroom() {
     // transition window while preserving the 5-minute recovery delay.
     assert!(
         report.pressure.usage_bytes < 200 * 1024,
-        "expected post-cleanup usage below ceiling, got {}",
+        "post-cleanup usage {} exceeds ceiling",
         report.pressure.usage_bytes
     );
     assert_eq!(report.pressure.level, Level::Hard);
     assert!(
         report.pressure.lower_since.is_some(),
-        "expected recovery transition window to start immediately after cleanup"
+        "recovery transition window did not start after cleanup"
     );
     let saved = read_pressure(&fixture.directories.pressure()).unwrap();
     assert_eq!(saved, report.pressure);

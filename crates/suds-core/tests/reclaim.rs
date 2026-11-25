@@ -1176,8 +1176,8 @@ fn refuses_a_landed_checkout_when_its_tracking_reference_disappears() {
 #[test]
 fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
     let fixture = Fixture::new();
-    // The forge squashed the branch and deleted it, so no remote holds the
-    // head's own commits.
+    // Without a surviving remote-tracking reference, a client's --landed
+    // assertion alone cannot prove that HEAD's commits stay reachable.
     git(
         &fixture.repo,
         &["push", "--quiet", "origin", "--delete", "feature"],
@@ -1191,6 +1191,19 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
     );
 
     fixture.release_landed();
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(
+        find(&plan, &fixture.linked).kept,
+        Some(Kept::UnpushedCommits)
+    );
+
+    // Once a surviving remote-tracking reference holds HEAD, the checkout
+    // becomes eligible on a person's plan.
+    let head = Git::default().head(&fixture.linked).unwrap();
+    git(
+        &fixture.repo,
+        &["update-ref", "refs/remotes/origin/feature", &head],
+    );
     let plan = fixture.plan(&nobody(), false);
     let candidate = find(&plan, &fixture.linked);
     assert_eq!(
@@ -1218,7 +1231,12 @@ fn removes_a_released_checkout_whose_head_a_client_reports_as_landed() {
     assert!(fixture.linked.join("src/more.rs").exists());
     assert_ne!(report.status, RunStatus::Complete);
 
-    // A report of the new head lets the checkout leave.
+    // Pushing the new head and reporting it lets the checkout leave.
+    let new_head = Git::default().head(&fixture.linked).unwrap();
+    git(
+        &fixture.repo,
+        &["update-ref", "refs/remotes/origin/feature", &new_head],
+    );
     fixture.release_landed();
     let plan = fixture.plan(&nobody(), false);
     fixture.apply(&plan);
@@ -1690,7 +1708,7 @@ fn apply_with_concurrent_register(
     };
 
     let mut journal = open_journal(&fixture.journal);
-    let report = suds_core::reclaim::execute::apply_with_hook(
+    let report = suds_core::reclaim::execute::apply_with_hooks(
         &mut journal,
         plan,
         Conditions {
@@ -1701,7 +1719,10 @@ fn apply_with_concurrent_register(
             git: &Git::default(),
             now: now() + 2 * IDLE_SECONDS,
         },
-        Some(&mut hook),
+        suds_core::reclaim::execute::ApplyHooks {
+            before_lock: Some(&mut hook),
+            under_lock_before_remove: None,
+        },
     )
     .unwrap();
     assert!(hooked);
@@ -1769,4 +1790,92 @@ fn parent_checkout_registration_after_observation_protects_child_build_state() {
         .find(|r| r.path.as_path() == target)
         .unwrap();
     assert!(!removal.removed);
+}
+
+#[test]
+fn keeps_a_worktree_with_a_unique_orig_head() {
+    let fixture = Fixture::new();
+    let base = Git::default().head(&fixture.linked).unwrap();
+    git(&fixture.linked, &["switch", "--quiet", "--detach"]);
+    write(&fixture.linked.join("src/reset.rs"), "pub fn r() {}\n");
+    git(&fixture.linked, &["add", "src/reset.rs"]);
+    git(&fixture.linked, &["commit", "--quiet", "-m", "reset me"]);
+    // Resetting back to the remotely reachable base stores the unique commit in
+    // the worktree-private ORIG_HEAD pseudoreference.
+    git(&fixture.linked, &["reset", "--quiet", "--hard", &base]);
+
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(
+        find(&plan, &fixture.linked).kept,
+        Some(Kept::UnpushedCommits)
+    );
+}
+
+#[test]
+fn overlapping_registration_blocks_until_locked_removal_finishes_and_reports_missing() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+
+    let registry_path = fixture.registry();
+    let linked = fixture.linked.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let mut reg_thread: Option<std::thread::JoinHandle<Result<registry::Record, String>>> = None;
+
+    let mut under_lock = |candidate: &suds_core::reclaim::plan::Candidate| {
+        if candidate.path.as_path() == linked && reg_thread.is_none() {
+            let reg_path = registry_path.clone();
+            let checkout = linked.clone();
+            let tx = done_tx.clone();
+            reg_thread = Some(std::thread::spawn(move || {
+                let res = registry::register(
+                    &reg_path,
+                    &checkout,
+                    "bosun",
+                    Some("wf-overlap"),
+                    Some("session overlap"),
+                    300,
+                );
+                let _ = tx.send(());
+                res
+            }));
+            // While reclamation holds the coordination lock, registration must
+            // block and never acknowledge protection before removal finishes.
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_millis(150))
+                    .is_err(),
+                "registration acknowledged protection while reclamation held the coordination lock"
+            );
+        }
+    };
+
+    let mut journal = open_journal(&fixture.journal);
+    let report = suds_core::reclaim::execute::apply_with_hooks(
+        &mut journal,
+        &plan,
+        Conditions {
+            authority: Authority::Person,
+            observe: &mut nobody,
+            registry: &mut || fixture.standings(),
+            registry_path: Some(&registry_path),
+            git: &Git::default(),
+            now: now() + 2 * IDLE_SECONDS,
+        },
+        suds_core::reclaim::execute::ApplyHooks {
+            before_lock: None,
+            under_lock_before_remove: Some(&mut under_lock),
+        },
+    )
+    .unwrap();
+    assert_eq!(report.status, RunStatus::Complete);
+    assert!(!fixture.linked.exists());
+
+    // Once removal releases the lock, registration unblocks and sees the
+    // checkout no longer exists.
+    let reg_result = reg_thread.expect("hook ran").join().unwrap();
+    let err = reg_result.unwrap_err();
+    assert!(err.contains("no longer exists"), "{err}");
 }

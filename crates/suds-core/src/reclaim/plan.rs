@@ -619,12 +619,13 @@ impl Judge<'_> {
                     return Some(Kept::Unverified);
                 }
             }
-            if !self.record_tracking_ref(checkout, commit, evidence) {
-                evidence.push(format!(
-                    "its client reported the head {commit} as landed on a remote"
-                ));
+            if self.record_tracking_ref(checkout, commit, evidence) {
+                return None;
             }
-            return None;
+            evidence.push(format!(
+                "its client reported the head {commit} as landed, but no remote-tracking reference holds it"
+            ));
+            return Some(Kept::UnpushedCommits);
         }
         match self.git.unpushed(checkout) {
             Ok(0) => {

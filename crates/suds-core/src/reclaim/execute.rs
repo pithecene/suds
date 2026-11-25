@@ -82,6 +82,17 @@ pub struct Conditions<'a> {
     pub now: i64,
 }
 
+/// Optional hooks for deterministic concurrency tests around the registry
+/// coordination lock.
+#[derive(Default)]
+pub struct ApplyHooks<'a> {
+    /// Runs after candidate observation and before acquiring the coordination lock.
+    pub before_lock: Option<&'a mut dyn FnMut(&Candidate)>,
+    /// Runs after final ownership verification while holding the coordination
+    /// lock, immediately before removal.
+    pub under_lock_before_remove: Option<&'a mut dyn FnMut(&Candidate)>,
+}
+
 /// Records `plan` and removes each candidate that it decided to remove. One
 /// refusal leaves the other candidates to proceed, and a journal failure
 /// stops the run.
@@ -90,16 +101,15 @@ pub fn apply(
     plan: &ReclaimPlan,
     conditions: Conditions<'_>,
 ) -> Result<ReclaimReport, JournalError> {
-    apply_with_hook(journal, plan, conditions, None)
+    apply_with_hooks(journal, plan, conditions, ApplyHooks::default())
 }
 
-/// Like [`apply`], invoking an optional hook after candidate observation and
-/// before acquiring the registry coordination lock for deterministic tests.
-pub fn apply_with_hook(
+/// Like [`apply`], invoking optional test hooks around the coordination lock.
+pub fn apply_with_hooks(
     journal: &mut Journal,
     plan: &ReclaimPlan,
     conditions: Conditions<'_>,
-    mut before_commit: Option<&mut dyn FnMut(&Candidate)>,
+    mut hooks: ApplyHooks<'_>,
 ) -> Result<ReclaimReport, JournalError> {
     let Conditions {
         authority,
@@ -203,7 +213,7 @@ pub fn apply_with_hook(
                     )
                 };
                 checked.and_then(|checked| {
-                    if let Some(hook) = before_commit.as_deref_mut() {
+                    if let Some(hook) = hooks.before_lock.as_deref_mut() {
                         hook(candidate);
                     }
                     let _coord = match registry_path {
@@ -254,6 +264,9 @@ pub fn apply_with_hook(
                             "the claims on {} changed after Suds built the plan",
                             candidate.path.display()
                         ));
+                    }
+                    if let Some(hook) = hooks.under_lock_before_remove.as_deref_mut() {
+                        hook(candidate);
                     }
                     remove(candidate, git).map(|()| checked.evidence)
                 })

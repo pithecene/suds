@@ -248,12 +248,13 @@ fn only_measures_without_the_standing_approval() {
     assert!(!reading.enforced);
     assert!(reading.complete);
     assert_eq!(report.error_count, 0);
-    // The run leaves no staged file beside the reading.
-    let state: Vec<_> = fs::read_dir(&fixture.directories.state)
+    // The run leaves no staged file beside the reading and its lock.
+    let mut state: Vec<_> = fs::read_dir(&fixture.directories.state)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
-    assert_eq!(state, ["pressure.json"]);
+    state.sort();
+    assert_eq!(state, ["pressure.json", "pressure.maintain.lock"]);
 }
 
 #[test]
@@ -682,4 +683,82 @@ fn an_unattended_run_spares_a_running_build() {
         assert!(!idle.join("target").exists(), "inside: {inside}");
         assert!(!fixture.repo.join("target").exists(), "inside: {inside}");
     }
+}
+
+#[test]
+fn publishes_post_maintenance_pressure_recovery_and_headroom() {
+    let fixture = Fixture::new();
+    // Seed a large build artifact in the main checkout's target directory so
+    // initial pressure hits Hard against a tight ceiling, then drops after
+    // maintain removes target/.
+    let payload = vec![b'x'; 2 * 1024 * 1024];
+    fs::write(fixture.repo.join("target/big.bin"), &payload).unwrap();
+    let mut settings = fixture.settings(true);
+    settings.ceiling_bytes = Some(1024 * 1024);
+
+    let report = maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    assert!(!fixture.repo.join("target").exists());
+    assert!(report.filesystem_available_before_bytes.is_some());
+    assert!(report.filesystem_available_after_bytes.is_some());
+    // Post-maintenance measurement reflects the reduced usage and starts the
+    // transition window while preserving the 5-minute recovery delay.
+    assert!(
+        report.pressure.usage_bytes < 800 * 1024,
+        "post-cleanup usage {} exceeds soft threshold",
+        report.pressure.usage_bytes
+    );
+    assert_eq!(report.pressure.level, Level::Hard);
+    assert!(
+        report.pressure.lower_since.is_some(),
+        "recovery transition window did not start after cleanup"
+    );
+    let saved = read_pressure(&fixture.directories.pressure()).unwrap();
+    assert_eq!(saved, report.pressure);
+}
+
+#[test]
+fn lock_wait_does_not_backdate_initial_observation_or_bypass_transition() {
+    let fixture = Fixture::new();
+    let mut settings = fixture.settings(true);
+    settings.ceiling_bytes = Some(1024 * 1024);
+
+    // Seed an existing Hard pressure reading at t = 1000 with no pending recovery.
+    let initial = suds_core::pressure::Pressure {
+        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: "1970-01-01T00:16:40Z".to_owned(),
+        level: Level::Hard,
+        lower_since: None,
+        usage_bytes: 1024 * 1024,
+        ceiling_bytes: 1024 * 1024,
+        enforced: false,
+        filesystem_available_bytes: Some(10 * 1024 * 1024),
+        complete: true,
+    };
+    fs::create_dir_all(&fixture.directories.state).unwrap();
+    fs::write(
+        fixture.directories.pressure(),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+
+    // Caller starts at t = 1000, waits 600 seconds on the maintenance lock,
+    // then observes low usage at t = 1600 and finishes post-cleanup at t = 1600.
+    let git = Git::default();
+    let mut context = fixture.context(&git);
+    context.now = 1000;
+    let mut clock = || 1600;
+    let report = suds_core::maintain::maintain_with_clock(&settings, &context, &mut clock).unwrap();
+
+    // Hard stays held because the 300-second transition started at the fresh
+    // post-lock observation (1600), not the stale start time (1000).
+    assert_eq!(report.pressure.level, Level::Hard);
+    assert_eq!(
+        report.pressure.observed_at, "1970-01-01T00:26:40Z",
+        "observed_at must not backdate to lock-wait start"
+    );
+    assert_eq!(
+        report.pressure.lower_since.as_deref(),
+        Some("1970-01-01T00:26:40Z"),
+        "recovery transition must start at the fresh post-lock observation"
+    );
 }

@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -39,6 +40,12 @@ pub struct MaintenanceReport {
     pub errors: Vec<TraversalError>,
     /// Whether the settings hold the owner's standing approval.
     pub standing_approval: bool,
+    /// Observed free bytes on the primary filesystem before maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_available_before_bytes: Option<u64>,
+    /// Observed free bytes on the primary filesystem after maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_available_after_bytes: Option<u64>,
     pub reclaim: Option<ReclaimReport>,
     pub stores: Option<StoresReport>,
 }
@@ -56,12 +63,32 @@ pub struct Context<'a> {
 /// Measures the development storage, records the pressure, and reclaims
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
+    let started = Instant::now();
+    let mut clock = || {
+        context
+            .now
+            .saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(0))
+    };
+    maintain_with_clock(settings, context, &mut clock)
+}
+
+/// Like [`maintain`], reading observation timestamps from `clock` after
+/// acquiring the maintenance lock and after cleanup.
+pub fn maintain_with_clock(
+    settings: &Settings,
+    context: &Context<'_>,
+    clock: &mut dyn FnMut() -> i64,
+) -> Result<MaintenanceReport, String> {
     let first = settings
         .roots
         .first()
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
+    let path = context.directories.pressure();
+    // Coordinate concurrent maintenance callers before scanning the workspace.
+    let _maintain_lock = registry::lock(&path.with_extension("maintain.lock"))?;
     let scan = development::inspect(&settings.roots, context.environment);
-    let inspection = development::build_report(&scan, context.now);
+    let initial_now = clock();
+    let inspection = development::build_report(&scan, initial_now);
     // The pressure counts every root and every store, so the audit covers
     // each of them.
     let others: Vec<_> = settings
@@ -72,15 +99,15 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .chain(development::store_locations(context.environment))
         .collect();
     let audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+    let available_before = Some(audited.available_bytes);
     let measurement = Measurement {
         usage_bytes: pressure::usage(&scan),
         ceiling_bytes: audited.ceiling_bytes,
         enforced: audited.enforced,
-        filesystem_available_bytes: Some(audited.available_bytes),
+        filesystem_available_bytes: available_before,
         complete: inspection.status == ReportStatus::Complete,
-        now: context.now,
+        now: initial_now,
     };
-    let path = context.directories.pressure();
     let reading = pressure::next(
         read_pressure(&path).as_ref(),
         measurement,
@@ -89,10 +116,12 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     write_pressure(&path, &reading)?;
     let mut report = MaintenanceReport {
         schema: MAINTENANCE_SCHEMA.to_owned(),
-        pressure: reading,
+        pressure: reading.clone(),
         error_count: inspection.error_count,
         errors: inspection.errors,
         standing_approval: settings.standing_approval,
+        filesystem_available_before_bytes: available_before,
+        filesystem_available_after_bytes: available_before,
         reclaim: None,
         stores: None,
     };
@@ -151,6 +180,32 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         )
         .map_err(|err| err.to_string())?,
     );
+
+    // Publish a post-maintenance observation from the same advancing clock so
+    // recovery starts after cleanup without backdating the transition window.
+    let post_scan = development::inspect(&settings.roots, context.environment);
+    let post_now = clock();
+    let post_inspection = development::build_report(&post_scan, post_now);
+    let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+    let available_after = Some(post_audited.available_bytes);
+    let post_measurement = Measurement {
+        usage_bytes: pressure::usage(&post_scan),
+        ceiling_bytes: post_audited.ceiling_bytes,
+        enforced: post_audited.enforced,
+        filesystem_available_bytes: available_after,
+        complete: post_inspection.status == ReportStatus::Complete,
+        now: post_now,
+    };
+    let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
+    write_pressure(&path, &post_reading)?;
+    report.pressure = post_reading;
+    report.filesystem_available_after_bytes = available_after;
+    if post_inspection.error_count > 0 {
+        report.error_count = report
+            .error_count
+            .saturating_add(post_inspection.error_count);
+        report.errors.extend(post_inspection.errors);
+    }
     Ok(report)
 }
 

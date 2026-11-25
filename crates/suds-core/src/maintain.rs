@@ -6,9 +6,12 @@
 //! derived state and eligible landed checkouts and trims stores under the
 //! standing approval of decision 0002. The journal records that authority.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
+use rustix::fs::OFlags;
 use serde::Serialize;
 
 use crate::arena;
@@ -39,6 +42,12 @@ pub struct MaintenanceReport {
     pub errors: Vec<TraversalError>,
     /// Whether the settings hold the owner's standing approval.
     pub standing_approval: bool,
+    /// Observed free bytes on the primary filesystem before maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_available_before_bytes: Option<u64>,
+    /// Observed free bytes on the primary filesystem after maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_available_after_bytes: Option<u64>,
     pub reclaim: Option<ReclaimReport>,
     pub stores: Option<StoresReport>,
 }
@@ -53,6 +62,29 @@ pub struct Context<'a> {
     pub now: i64,
 }
 
+/// Serializes concurrent maintenance runs before scanning development storage.
+fn lock_maintain(pressure_path: &Path) -> Result<fs::File, String> {
+    let lock_path = pressure_path.with_extension("maintain.lock");
+    let failed = |err: io::Error| format!("could not lock {}: {err}", lock_path.display());
+    if let Some(directory) = lock_path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+            .map_err(failed)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+        .open(&lock_path)
+        .map_err(failed)?;
+    file.lock().map_err(failed)?;
+    Ok(file)
+}
+
 /// Measures the development storage, records the pressure, and reclaims
 /// under the standing approval.
 pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<MaintenanceReport, String> {
@@ -60,6 +92,9 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .roots
         .first()
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
+    let path = context.directories.pressure();
+    // Coordinate concurrent maintenance callers before scanning the workspace.
+    let _maintain_lock = lock_maintain(&path)?;
     let scan = development::inspect(&settings.roots, context.environment);
     let inspection = development::build_report(&scan, context.now);
     // The pressure counts every root and every store, so the audit covers
@@ -72,15 +107,15 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         .chain(development::store_locations(context.environment))
         .collect();
     let audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+    let available_before = Some(audited.available_bytes);
     let measurement = Measurement {
         usage_bytes: pressure::usage(&scan),
         ceiling_bytes: audited.ceiling_bytes,
         enforced: audited.enforced,
-        filesystem_available_bytes: Some(audited.available_bytes),
+        filesystem_available_bytes: available_before,
         complete: inspection.status == ReportStatus::Complete,
         now: context.now,
     };
-    let path = context.directories.pressure();
     let reading = pressure::next(
         read_pressure(&path).as_ref(),
         measurement,
@@ -89,10 +124,12 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
     write_pressure(&path, &reading)?;
     let mut report = MaintenanceReport {
         schema: MAINTENANCE_SCHEMA.to_owned(),
-        pressure: reading,
+        pressure: reading.clone(),
         error_count: inspection.error_count,
         errors: inspection.errors,
         standing_approval: settings.standing_approval,
+        filesystem_available_before_bytes: available_before,
+        filesystem_available_after_bytes: available_before,
         reclaim: None,
         stores: None,
     };
@@ -150,6 +187,26 @@ pub fn maintain(settings: &Settings, context: &Context<'_>) -> Result<Maintenanc
         )
         .map_err(|err| err.to_string())?,
     );
+
+    // Publish a post-maintenance observation so clients immediately see
+    // recovered usage and start the transition window without waiting for the
+    // next scheduled run.
+    let post_scan = development::inspect(&settings.roots, context.environment);
+    let post_inspection = development::build_report(&post_scan, context.now);
+    let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+    let available_after = Some(post_audited.available_bytes);
+    let post_measurement = Measurement {
+        usage_bytes: pressure::usage(&post_scan),
+        ceiling_bytes: post_audited.ceiling_bytes,
+        enforced: post_audited.enforced,
+        filesystem_available_bytes: available_after,
+        complete: post_inspection.status == ReportStatus::Complete,
+        now: context.now,
+    };
+    let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
+    write_pressure(&path, &post_reading)?;
+    report.pressure = post_reading;
+    report.filesystem_available_after_bytes = available_after;
     Ok(report)
 }
 

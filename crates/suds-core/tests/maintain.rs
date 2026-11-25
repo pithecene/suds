@@ -248,12 +248,13 @@ fn only_measures_without_the_standing_approval() {
     assert!(!reading.enforced);
     assert!(reading.complete);
     assert_eq!(report.error_count, 0);
-    // The run leaves no staged file beside the reading.
-    let state: Vec<_> = fs::read_dir(&fixture.directories.state)
+    // The run leaves no staged file beside the reading and its lock.
+    let mut state: Vec<_> = fs::read_dir(&fixture.directories.state)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
-    assert_eq!(state, ["pressure.json"]);
+    state.sort();
+    assert_eq!(state, ["pressure.json", "pressure.maintain.lock"]);
 }
 
 #[test]
@@ -682,4 +683,35 @@ fn an_unattended_run_spares_a_running_build() {
         assert!(!idle.join("target").exists(), "inside: {inside}");
         assert!(!fixture.repo.join("target").exists(), "inside: {inside}");
     }
+}
+
+#[test]
+fn publishes_post_maintenance_pressure_recovery_and_headroom() {
+    let fixture = Fixture::new();
+    // Seed a large build artifact in the main checkout's target directory so
+    // initial pressure hits Hard against a tight ceiling, then drops after
+    // maintain removes target/.
+    let payload = vec![b'x'; 256 * 1024];
+    fs::write(fixture.repo.join("target/big.bin"), &payload).unwrap();
+    let mut settings = fixture.settings(true);
+    settings.ceiling_bytes = Some(200 * 1024);
+
+    let report = maintain(&settings, &fixture.context(&Git::default())).unwrap();
+    assert!(!fixture.repo.join("target").exists());
+    assert!(report.filesystem_available_before_bytes.is_some());
+    assert!(report.filesystem_available_after_bytes.is_some());
+    // Post-maintenance measurement reflects the reduced usage and starts the
+    // transition window while preserving the 5-minute recovery delay.
+    assert!(
+        report.pressure.usage_bytes < 200 * 1024,
+        "expected post-cleanup usage below ceiling, got {}",
+        report.pressure.usage_bytes
+    );
+    assert_eq!(report.pressure.level, Level::Hard);
+    assert!(
+        report.pressure.lower_since.is_some(),
+        "expected recovery transition window to start immediately after cleanup"
+    );
+    let saved = read_pressure(&fixture.directories.pressure()).unwrap();
+    assert_eq!(saved, report.pressure);
 }

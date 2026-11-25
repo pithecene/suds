@@ -85,10 +85,13 @@ impl Liveness {
 
     /// Asks `lsof`, which reads the system's process table, for each
     /// process's working directory. macOS offers no file with that list.
+    /// Same-user processes whose working directory `lsof` could not read
+    /// stay recorded as unreadable.
     #[cfg(target_os = "macos")]
     pub fn observe() -> Result<Self, String> {
+        let this_user = rustix::process::getuid().as_raw();
         let output = std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-d", "cwd", "-F", "n"])
+            .args(["-a", "-d", "cwd", "-F", "pcun"])
             .output()
             .map_err(|err| format!("could not run /usr/sbin/lsof: {err}"))?;
         // The program exits with a failure when it cannot read one process,
@@ -99,29 +102,57 @@ impl Liveness {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok(Liveness::of(parse_lsof(&output.stdout)))
+        Ok(parse_lsof_with_uid(&output.stdout, this_user))
     }
 }
 
-/// The paths of the name fields in `lsof -F n` output, one field on a line.
+/// Parses `lsof -F pcun` (or `-F n`) output, keeping readable working
+/// directories and recording unreadable same-user processes with their PID
+/// and command name.
 #[cfg(any(target_os = "macos", test))]
-fn parse_lsof(output: &[u8]) -> Vec<PathBuf> {
+fn parse_lsof_with_uid(output: &[u8], this_user: u32) -> Liveness {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    output
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| line.strip_prefix(b"n"))
-        .filter(|path| path.first() == Some(&b'/'))
-        .map(|path| PathBuf::from(OsStr::from_bytes(path)))
-        .collect()
+    let mut liveness = Liveness::default();
+    let mut pid: Option<String> = None;
+    let mut command: Option<String> = None;
+    let mut uid: Option<u32> = None;
+    for line in output.split(|byte| *byte == b'\n') {
+        if let Some(rest) = line.strip_prefix(b"p") {
+            pid = Some(String::from_utf8_lossy(rest).into_owned());
+            command = None;
+            uid = None;
+        } else if let Some(rest) = line.strip_prefix(b"c") {
+            command = Some(String::from_utf8_lossy(rest).into_owned());
+        } else if let Some(rest) = line.strip_prefix(b"u") {
+            uid = std::str::from_utf8(rest).ok().and_then(|s| s.parse().ok());
+        } else if let Some(name) = line.strip_prefix(b"n") {
+            if name.first() == Some(&b'/') {
+                liveness
+                    .directories
+                    .push(PathBuf::from(OsStr::from_bytes(name)));
+            } else if !name.is_empty() && uid == Some(this_user) {
+                let proc_id = pid.as_deref().unwrap_or("unknown");
+                let proc_cmd = command.as_deref().unwrap_or("unknown");
+                liveness.unreadable.push(format!("{proc_id} ({proc_cmd})"));
+            }
+        }
+    }
+    liveness
+}
+
+/// The paths of the name fields in `lsof -F n` output, one field on a line.
+#[cfg(test)]
+fn parse_lsof(output: &[u8]) -> Vec<PathBuf> {
+    parse_lsof_with_uid(output, 0).directories
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Liveness, parse_lsof};
+    use super::{Liveness, parse_lsof, parse_lsof_with_uid};
 
     #[test]
     fn finds_a_process_at_a_tree_or_beneath_it() {
@@ -141,6 +172,18 @@ mod tests {
             parse_lsof(output),
             [PathBuf::from("/Users/a/work"), PathBuf::from("/")]
         );
+    }
+
+    #[test]
+    fn preserves_same_user_unreadable_lsof_entries_and_ignores_other_users() {
+        let output = concat!(
+            "p101\ncrustc\nu501\nfcwd\nn/Users/a/work\n",
+            "p102\ncagent\nu501\nfcwd\nn(readlink: Permission denied)\n",
+            "p103\ncrootd\nu0\nfcwd\nn(readlink: Permission denied)\n",
+        );
+        let liveness = parse_lsof_with_uid(output.as_bytes(), 501);
+        assert_eq!(liveness.directories, [PathBuf::from("/Users/a/work")]);
+        assert_eq!(liveness.unreadable(), ["102 (agent)"]);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{Candidate, Decision, Judge, ReclaimPlan, Subject, idle_since};
-use crate::registry::Reading;
+use crate::registry::{self, Reading};
 use crate::scan;
 use crate::timestamp;
 
@@ -75,6 +75,9 @@ pub struct Conditions<'a> {
     /// removal, so a client that registers during the run keeps its
     /// checkout.
     pub registry: &'a mut dyn FnMut() -> Reading,
+    /// Optional path to the registry file used to hold the shared coordination
+    /// lock across final ownership verification and removal.
+    pub registry_path: Option<&'a Path>,
     pub git: &'a Git,
     pub now: i64,
 }
@@ -87,10 +90,22 @@ pub fn apply(
     plan: &ReclaimPlan,
     conditions: Conditions<'_>,
 ) -> Result<ReclaimReport, JournalError> {
+    apply_with_hook(journal, plan, conditions, None)
+}
+
+/// Like [`apply`], invoking an optional hook after candidate observation and
+/// before acquiring the registry coordination lock for deterministic tests.
+pub fn apply_with_hook(
+    journal: &mut Journal,
+    plan: &ReclaimPlan,
+    conditions: Conditions<'_>,
+    mut before_commit: Option<&mut dyn FnMut(&Candidate)>,
+) -> Result<ReclaimReport, JournalError> {
     let Conditions {
         authority,
         observe,
         registry,
+        registry_path,
         git,
         now,
     } = conditions;
@@ -187,7 +202,61 @@ pub fn apply(
                         &granted,
                     )
                 };
-                checked.and_then(|checked| remove(candidate, git).map(|()| checked.evidence))
+                checked.and_then(|checked| {
+                    if let Some(hook) = before_commit.as_deref_mut() {
+                        hook(candidate);
+                    }
+                    let _coord = match registry_path {
+                        Some(path) => Some(registry::lock(path)?),
+                        None => None,
+                    };
+                    // Re-read and verify registry ownership under the shared
+                    // coordination lock so a concurrent registration cannot
+                    // interleave with removal.
+                    let standings = registry();
+                    match &standings {
+                        Err(reason) => return Err(reason.clone()),
+                        Ok(map) => {
+                            if let Some((held, standing)) =
+                                registry::holder(map, candidate.checkout.as_path())
+                            {
+                                return Err(format!(
+                                    "{} holds {}",
+                                    standing.client,
+                                    held.display()
+                                ));
+                            }
+                            if let Some((held, standing)) =
+                                registry::held_beneath(map, candidate.path.as_path())
+                            {
+                                return Err(format!(
+                                    "{} holds {}",
+                                    standing.client,
+                                    held.display()
+                                ));
+                            }
+                        }
+                    }
+                    let final_liveness = Ok(Liveness::default());
+                    let judge = Judge {
+                        liveness: &final_liveness,
+                        registry: &standings,
+                        git,
+                        idle_since: unchanged_since.clone(),
+                        tolerate_unreadable_processes: plan.tolerate_unreadable_processes,
+                    };
+                    same_owner(candidate, &judge, &plan.created_at)?;
+                    let claims =
+                        judge.claims(candidate.checkout.as_path(), candidate.path.as_path());
+                    let linked = candidate.repository.is_some();
+                    if linked && (claims.is_none() || claims != candidate.claims) {
+                        return Err(format!(
+                            "the claims on {} changed after Suds built the plan",
+                            candidate.path.display()
+                        ));
+                    }
+                    remove(candidate, git).map(|()| checked.evidence)
+                })
             }
         };
         let refusal = match outcome {

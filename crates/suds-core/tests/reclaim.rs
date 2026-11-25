@@ -188,10 +188,12 @@ impl Fixture {
         at: i64,
     ) -> ReclaimReport {
         let mut journal = open_journal(&self.journal);
+        let registry_path = self.registry();
         let conditions = Conditions {
             authority: Authority::Person,
             observe,
             registry: &mut || self.standings(),
+            registry_path: Some(&registry_path),
             git: &Git::default(),
             now: at,
         };
@@ -203,6 +205,7 @@ impl Fixture {
     }
 
     fn apply_unattended(&self, plan: &ReclaimPlan, at: i64) -> ReclaimReport {
+        let registry_path = self.registry();
         apply(
             &mut open_journal(&self.journal),
             plan,
@@ -210,6 +213,7 @@ impl Fixture {
                 authority: Authority::StandingApproval,
                 observe: &mut nobody,
                 registry: &mut || self.standings(),
+                registry_path: Some(&registry_path),
                 git: &Git::default(),
                 now: at,
             },
@@ -1608,4 +1612,171 @@ fn a_changed_claim_keeps_the_candidate_of_an_approved_plan() {
     }
     fixture.apply(&plan);
     assert!(fixture.linked.join("target").exists());
+}
+
+#[test]
+fn keeps_a_worktree_with_an_unpushed_private_reference() {
+    let fixture = Fixture::new();
+    // Create a unique commit held only by a worktree-private reference while
+    // HEAD stays at a remotely reachable commit.
+    let original_head = Git::default().head(&fixture.linked).unwrap();
+    git(&fixture.linked, &["switch", "--quiet", "--detach"]);
+    write(&fixture.linked.join("src/private.rs"), "pub fn p() {}\n");
+    git(&fixture.linked, &["add", "src/private.rs"]);
+    git(&fixture.linked, &["commit", "--quiet", "-m", "private"]);
+    let unique = Git::default().head(&fixture.linked).unwrap();
+    git(
+        &fixture.linked,
+        &["update-ref", "refs/worktree/keep", &unique],
+    );
+    git(
+        &fixture.linked,
+        &["switch", "--quiet", "--detach", &original_head],
+    );
+
+    // Ordinary check keeps the worktree because refs/worktree/keep is unpushed.
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(
+        find(&plan, &fixture.linked).kept,
+        Some(Kept::UnpushedCommits)
+    );
+
+    // Even a --landed release covering HEAD still keeps the worktree while
+    // refs/worktree/keep holds an unpushed commit.
+    fixture.release_landed();
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(
+        find(&plan, &fixture.linked).kept,
+        Some(Kept::UnpushedCommits)
+    );
+}
+
+#[test]
+fn registration_after_observation_wins_over_reclaim_commit() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    assert_eq!(find(&plan, &fixture.linked).decision, Decision::Remove);
+
+    let registry_path = fixture.registry();
+    let linked = fixture.linked.clone();
+    let mut hooked = false;
+    let mut hook = |candidate: &suds_core::reclaim::plan::Candidate| {
+        if candidate.path.as_path() == linked && !hooked {
+            hooked = true;
+            // Pause reclamation after observation, register from another thread,
+            // then resume reclamation.
+            let reg_path = registry_path.clone();
+            let checkout = linked.clone();
+            let registered = std::thread::spawn(move || {
+                registry::register(
+                    &reg_path,
+                    &checkout,
+                    "bosun",
+                    Some("wf-race"),
+                    Some("session race"),
+                    100,
+                )
+            })
+            .join()
+            .unwrap();
+            assert!(registered.is_ok(), "{registered:?}");
+        }
+    };
+
+    let mut journal = open_journal(&fixture.journal);
+    let report = suds_core::reclaim::execute::apply_with_hook(
+        &mut journal,
+        &plan,
+        Conditions {
+            authority: Authority::Person,
+            observe: &mut nobody,
+            registry: &mut || fixture.standings(),
+            registry_path: Some(&registry_path),
+            git: &Git::default(),
+            now: now() + 2 * IDLE_SECONDS,
+        },
+        Some(&mut hook),
+    )
+    .unwrap();
+    assert!(hooked);
+    assert!(fixture.linked.exists());
+    let removal = report
+        .removals
+        .iter()
+        .find(|r| r.path.as_path() == fixture.linked)
+        .unwrap();
+    assert!(!removal.removed);
+}
+
+#[test]
+fn registration_after_removal_reports_missing_checkout() {
+    let fixture = Fixture::new();
+    fixture.record(&fixture.linked, registry::Event::Released);
+    let plan = fixture.plan(&nobody(), false);
+    let report = fixture.apply(&plan);
+    assert_eq!(report.status, RunStatus::Complete);
+    assert!(!fixture.linked.exists());
+
+    let err = registry::register(
+        &fixture.registry(),
+        &fixture.linked,
+        "bosun",
+        Some("wf-late"),
+        None,
+        200,
+    )
+    .unwrap_err();
+    assert!(err.contains("no longer exists"), "{err}");
+}
+
+#[test]
+fn parent_checkout_registration_after_observation_protects_child_build_state() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan(&nobody(), false);
+    let target = fixture.repo.join("target");
+    assert_eq!(find(&plan, &target).decision, Decision::Remove);
+
+    let registry_path = fixture.registry();
+    let repo = fixture.repo.clone();
+    let target_path = target.clone();
+    let mut hooked = false;
+    let mut hook = |candidate: &suds_core::reclaim::plan::Candidate| {
+        if candidate.path.as_path() == target_path && !hooked {
+            hooked = true;
+            let reg_path = registry_path.clone();
+            let checkout = repo.clone();
+            let registered = std::thread::spawn(move || {
+                registry::register(&reg_path, &checkout, "bosun", Some("wf-parent"), None, 100)
+            })
+            .join()
+            .unwrap();
+            assert!(registered.is_ok(), "{registered:?}");
+        }
+    };
+
+    let mut journal = open_journal(&fixture.journal);
+    let report = suds_core::reclaim::execute::apply_with_hook(
+        &mut journal,
+        &plan,
+        Conditions {
+            authority: Authority::Person,
+            observe: &mut nobody,
+            registry: &mut || fixture.standings(),
+            registry_path: Some(&registry_path),
+            git: &Git::default(),
+            now: now() + 2 * IDLE_SECONDS,
+        },
+        Some(&mut hook),
+    )
+    .unwrap();
+    assert!(hooked);
+    assert!(target.exists());
+    let removal = report
+        .removals
+        .iter()
+        .find(|r| r.path.as_path() == target)
+        .unwrap();
+    assert!(!removal.removed);
 }

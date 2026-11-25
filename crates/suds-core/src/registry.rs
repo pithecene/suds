@@ -288,9 +288,93 @@ fn release(
     write(path, record)
 }
 
+/// Exclusive lock shared by registry writes and reclaim removals so a
+/// registration and a removal never interleave past ownership verification.
+pub struct CoordinationLock {
+    _file: fs::File,
+}
+
+/// Acquires the exclusive coordination lock beside the registry at `path`.
+pub fn lock(path: &Path) -> Result<CoordinationLock, String> {
+    let lock_path = path.with_extension("lock");
+    let failed = |err: io::Error| format!("could not lock {}: {err}", lock_path.display());
+    if let Some(directory) = lock_path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+            .map_err(failed)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
+        .open(&lock_path)
+        .map_err(failed)?;
+    file.lock().map_err(failed)?;
+    Ok(CoordinationLock { _file: file })
+}
+
+/// Registers an existing `checkout` under the coordination lock, validating
+/// that the directory still exists before acknowledging protection.
+pub fn register(
+    path: &Path,
+    checkout: &Path,
+    client: &str,
+    attempt: Option<&str>,
+    claim: Option<&str>,
+    now: i64,
+) -> Result<Record, String> {
+    let claim = match claim {
+        Some(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Err("the text of a claim is empty".to_owned());
+            }
+            if trimmed.chars().any(char::is_control) {
+                return Err("the text of a claim holds a control character".to_owned());
+            }
+            Some(trimmed.to_owned())
+        }
+        None => None,
+    };
+    let _coord = lock(path)?;
+    match fs::symlink_metadata(checkout) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!("{} is no checkout directory", checkout.display()));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("{} no longer exists", checkout.display()));
+        }
+        Err(err) => {
+            return Err(format!("could not read {}: {err}", checkout.display()));
+        }
+    }
+    let record = Record {
+        schema: REGISTRY_SCHEMA.to_owned(),
+        at: timestamp::format_utc(now),
+        checkout: NativePath::new(checkout.to_path_buf()),
+        client: client.to_owned(),
+        attempt: attempt.map(str::to_owned),
+        event: Event::Registered,
+        claim,
+        landed: None,
+        claim_ended: None,
+    };
+    write_locked(path, record)
+}
+
 /// Writes `record` as the registry's next line, and creates the file and
 /// its directory when they do not exist.
 fn write(path: &Path, record: Record) -> Result<Record, String> {
+    let _coord = lock(path)?;
+    write_locked(path, record)
+}
+
+fn write_locked(path: &Path, record: Record) -> Result<Record, String> {
     let failed = |err: io::Error| format!("could not write {}: {err}", path.display());
     if let Some(directory) = path.parent() {
         fs::DirBuilder::new()

@@ -1,17 +1,105 @@
 //! Bounded external helper execution with concurrency, launch-rate, output, and
 //! spawn-plus-wait deadline enforcement.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::budget;
+
+static GLOBAL_CANCEL: AtomicBool = AtomicBool::new(false);
+static ACTIVE_GROUPS: OnceLock<Mutex<BTreeSet<i32>>> = OnceLock::new();
+static DRAINING_HANDLES: OnceLock<Mutex<Vec<std::thread::JoinHandle<()>>>> = OnceLock::new();
+
+fn active_groups() -> &'static Mutex<BTreeSet<i32>> {
+    ACTIVE_GROUPS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn draining_handles() -> &'static Mutex<Vec<std::thread::JoinHandle<()>>> {
+    DRAINING_HANDLES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Whether process-wide cancellation (`SIGINT`/`SIGTERM`) has been requested.
+pub fn is_globally_cancelled() -> bool {
+    GLOBAL_CANCEL.load(Ordering::Acquire)
+}
+
+/// Signals process-wide cancellation and sends `SIGKILL` to every live helper
+/// process group so separate helper groups cannot outlive the CLI process.
+pub fn request_global_cancel() {
+    GLOBAL_CANCEL.store(true, Ordering::Release);
+    kill_all_active_groups();
+}
+
+fn kill_all_active_groups() {
+    let groups: Vec<i32> = {
+        let guard = active_groups()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.iter().copied().collect()
+    };
+    for raw in groups {
+        if let Some(pgid) = rustix::process::Pid::from_raw(raw) {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// Kills any remaining active helper process groups and joins all draining
+/// helper worker threads so process exit never drops exclusion locks before
+/// child process groups are terminated and reaped.
+pub fn drain_active_helpers() {
+    kill_all_active_groups();
+    let handles: Vec<std::thread::JoinHandle<()>> = {
+        let mut guard = draining_handles()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
+fn track_draining_handle(handle: std::thread::JoinHandle<()>) {
+    let mut guard = draining_handles()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard.retain(|existing| !existing.is_finished());
+    guard.push(handle);
+}
+
+struct ActiveGroupGuard(i32);
+
+impl ActiveGroupGuard {
+    fn register(pgid: i32) -> Self {
+        if pgid > 0 {
+            active_groups()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(pgid);
+        }
+        ActiveGroupGuard(pgid)
+    }
+}
+
+impl Drop for ActiveGroupGuard {
+    fn drop(&mut self) {
+        if self.0 > 0 {
+            active_groups()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
 
 /// Default maximum bytes captured from each helper stream (`4 MiB`).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -216,7 +304,7 @@ impl HelperRunner {
     ) -> Result<SlotGuard, HelperError> {
         let cap = self.policy.max_concurrent.max(1);
         loop {
-            if self.policy.cancel.load(Ordering::Acquire) {
+            if self.policy.cancel.load(Ordering::Acquire) || is_globally_cancelled() {
                 return Err(HelperError::Cancelled {
                     operation: operation.to_owned(),
                 });
@@ -255,7 +343,7 @@ impl HelperRunner {
             return Ok(());
         }
         loop {
-            if self.policy.cancel.load(Ordering::Acquire) {
+            if self.policy.cancel.load(Ordering::Acquire) || is_globally_cancelled() {
                 return Err(HelperError::Cancelled {
                     operation: operation.to_owned(),
                 });
@@ -294,17 +382,29 @@ impl HelperRunner {
     /// Executes `spec` within this runner's concurrency, rate, output, and
     /// deadline bounds. The deadline covers both `spawn` and process wait.
     pub fn run(&self, spec: HelperSpec) -> Result<HelperOutput, HelperError> {
-        self.run_holding(spec, ()).map(|(output, ())| output)
+        self.run_inner(spec, (), false).map(|(output, ())| output)
     }
 
     /// Executes `spec` while holding `guard` inside the helper worker until
-    /// the child process group finishes or terminates.
+    /// the child process group finishes or terminates and reaps. On timeout or
+    /// cancellation, sends `SIGKILL` to the helper process group and waits for
+    /// the worker to finish reaping before returning so CLI exit cannot drop
+    /// exclusion locks while a mutating helper still runs.
     pub fn run_holding<G: Send + 'static>(
         &self,
         spec: HelperSpec,
         guard: G,
     ) -> Result<(HelperOutput, G), HelperError> {
-        if self.policy.cancel.load(Ordering::Acquire) {
+        self.run_inner(spec, guard, true)
+    }
+
+    fn run_inner<G: Send + 'static>(
+        &self,
+        spec: HelperSpec,
+        guard: G,
+        wait_for_reap_on_stop: bool,
+    ) -> Result<(HelperOutput, G), HelperError> {
+        if self.policy.cancel.load(Ordering::Acquire) || is_globally_cancelled() {
             return Err(HelperError::Cancelled {
                 operation: spec.operation,
             });
@@ -336,6 +436,8 @@ impl HelperRunner {
         let slot_cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&slot_cancel);
         let shared_cancel = Arc::clone(&self.policy.cancel);
+        let child_pgid = Arc::new(AtomicI32::new(0));
+        let worker_pgid = Arc::clone(&child_pgid);
         let marked_draining = Arc::clone(&slot_guard.marked_draining);
         let max_output = self.policy.max_output_bytes;
         let background = self.policy.background_priority;
@@ -343,38 +445,55 @@ impl HelperRunner {
         let program = spec.program.clone();
         let (tx, rx) = mpsc::channel();
 
-        let spawn_result = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("suds-helper".to_owned())
             .spawn(move || {
                 let _slot_guard = slot_guard;
                 if background {
                     budget::apply_background_thread_policy();
                 }
-                let result = run_worker(spec, max_output, deadline, &worker_cancel, &shared_cancel);
+                let result = run_worker(
+                    spec,
+                    max_output,
+                    deadline,
+                    &worker_cancel,
+                    &shared_cancel,
+                    &worker_pgid,
+                );
                 let _ = tx.send(result.map(|output| (output, guard)));
-            });
-        if let Err(err) = spawn_result {
-            return Err(HelperError::SpawnFailed {
-                operation,
-                program,
+            })
+            .map_err(|err| HelperError::SpawnFailed {
+                operation: operation.clone(),
+                program: program.clone(),
                 reason: err.to_string(),
-            });
-        }
+            })?;
+
+        let stop_and_settle = |handle: std::thread::JoinHandle<()>| {
+            slot_cancel.store(true, Ordering::Release);
+            let raw_pgid = child_pgid.load(Ordering::Acquire);
+            if raw_pgid > 0
+                && let Some(pgid) = rustix::process::Pid::from_raw(raw_pgid)
+            {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+            }
+            if !marked_draining.swap(true, Ordering::AcqRel) {
+                self.draining.fetch_add(1, Ordering::AcqRel);
+            }
+            if wait_for_reap_on_stop {
+                let _ = handle.join();
+            } else {
+                track_draining_handle(handle);
+            }
+        };
 
         loop {
             let now = Instant::now();
-            if self.policy.cancel.load(Ordering::Acquire) {
-                slot_cancel.store(true, Ordering::Release);
-                if !marked_draining.swap(true, Ordering::AcqRel) {
-                    self.draining.fetch_add(1, Ordering::AcqRel);
-                }
+            if self.policy.cancel.load(Ordering::Acquire) || is_globally_cancelled() {
+                stop_and_settle(handle);
                 return Err(HelperError::Cancelled { operation });
             }
             if now >= deadline {
-                slot_cancel.store(true, Ordering::Release);
-                if !marked_draining.swap(true, Ordering::AcqRel) {
-                    self.draining.fetch_add(1, Ordering::AcqRel);
-                }
+                stop_and_settle(handle);
                 return Err(HelperError::TimedOut {
                     operation,
                     program,
@@ -383,9 +502,13 @@ impl HelperRunner {
             }
             let wait = (deadline - now).min(Duration::from_millis(20));
             match rx.recv_timeout(wait) {
-                Ok(result) => return result,
+                Ok(result) => {
+                    let _ = handle.join();
+                    return result;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = handle.join();
                     return Err(HelperError::SpawnFailed {
                         operation,
                         program,
@@ -420,6 +543,7 @@ fn run_worker(
     deadline: Instant,
     slot_cancel: &AtomicBool,
     shared_cancel: &AtomicBool,
+    child_pgid: &AtomicI32,
 ) -> Result<HelperOutput, HelperError> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
@@ -448,7 +572,14 @@ fn run_worker(
         reason: err.to_string(),
     })?;
 
-    if slot_cancel.load(Ordering::Acquire) || shared_cancel.load(Ordering::Acquire) {
+    let raw_pgid = i32::try_from(child.id()).unwrap_or(0);
+    let _active_group = ActiveGroupGuard::register(raw_pgid);
+    child_pgid.store(raw_pgid, Ordering::Release);
+
+    if slot_cancel.load(Ordering::Acquire)
+        || shared_cancel.load(Ordering::Acquire)
+        || is_globally_cancelled()
+    {
         terminate_group(&mut child);
         return Err(HelperError::Cancelled {
             operation: spec.operation,
@@ -497,7 +628,10 @@ fn run_worker(
     };
 
     let status = loop {
-        if slot_cancel.load(Ordering::Acquire) || shared_cancel.load(Ordering::Acquire) {
+        if slot_cancel.load(Ordering::Acquire)
+            || shared_cancel.load(Ordering::Acquire)
+            || is_globally_cancelled()
+        {
             terminate_group(&mut child);
             join_readers(out_handle, err_handle);
             return Err(HelperError::Cancelled {

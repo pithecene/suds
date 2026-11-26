@@ -372,3 +372,201 @@ fn timeout_kills_process_group_and_holds_guard_until_reaped() {
         "descendant process survived helper timeout"
     );
 }
+
+#[test]
+fn unreadable_orig_head_with_unique_commit_keeps_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (workspace, _repo, linked) = setup_repo_with_linked_worktree(&base);
+
+    // Create a unique unpushed commit retained only in ORIG_HEAD.
+    let pushed_head = run_git(&linked, &["rev-parse", "HEAD"]);
+    fs::write(linked.join("unique.txt"), "precious\n").unwrap();
+    run_git(&linked, &["add", "unique.txt"]);
+    run_git(&linked, &["commit", "-m", "unique unpushed"]);
+    let unique_oid = run_git(&linked, &["rev-parse", "HEAD"]);
+    run_git(&linked, &["reset", "--hard", &pushed_head]);
+    let git_dir = worktree_git_dir(&linked);
+    let orig_head = git_dir.join("ORIG_HEAD");
+    fs::write(&orig_head, format!("{unique_oid}\n")).unwrap();
+
+    // Make ORIG_HEAD unreadable: Git's `cat-file --batch-check` exits 0 with
+    // `ORIG_HEAD missing` and empty stderr, yet `git status` stays clean.
+    fs::set_permissions(&orig_head, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let git = Git::default();
+    let is_clean = git.is_clean(&linked);
+    let states = git.probe_pseudorefs(&linked);
+    let unpushed = git.unpushed(&linked);
+    let candidate = plan_linked_candidate(&base, workspace, &linked, &git);
+
+    // Restore permissions before assertions so TempDir cleanup always succeeds.
+    let _ = fs::set_permissions(&orig_head, fs::Permissions::from_mode(0o644));
+
+    assert!(is_clean.unwrap());
+    let states = states.unwrap();
+    assert!(
+        matches!(
+            states.first(),
+            Some(suds_core::reclaim::git::PseudoRefState::Unknown(_))
+        ),
+        "unreadable ORIG_HEAD must classify as Unknown, found: {states:?}"
+    );
+    assert!(
+        unpushed.is_err(),
+        "unreadable ORIG_HEAD must prevent unpushed count from returning 0"
+    );
+    assert_eq!(candidate.decision, Decision::Keep);
+    assert_eq!(candidate.kept, Some(Kept::Unverified));
+}
+
+#[test]
+fn bounded_seeding_stops_cleanly_and_cleans_staged_directory() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (_workspace, repo, linked) = setup_repo_with_linked_worktree(&base);
+
+    let target = repo.join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
+    for i in 0..40 {
+        fs::write(target.join("debug").join(format!("obj-{i}")), "bin").unwrap();
+    }
+
+    let git = Git::default();
+    let plan = suds_core::seed::plan_seed(&linked, Some(&repo), &git).unwrap();
+    assert_eq!(plan.clones.len(), 1);
+
+    let mut journal = Journal::open(&base.join("journal")).unwrap();
+    let tight = Budget {
+        max_entries: Some(10),
+        ..Budget::for_seeding()
+    };
+    let report =
+        suds_core::seed::apply_with_budget(&mut journal, &plan, Some("test"), &tight).unwrap();
+    assert!(
+        report.clones.iter().all(|c| !c.cloned),
+        "tight seed budget must refuse oversized clone: {report:?}"
+    );
+    assert!(!linked.join("target").exists());
+    let leftovers: Vec<_> = fs::read_dir(&linked)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".suds-seed-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "aborted seed must remove staged directory: {leftovers:?}"
+    );
+}
+
+#[test]
+fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let mut targets = Vec::new();
+    for name in ["repo-a", "repo-b", "repo-c"] {
+        let repo = workspace.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+
+        let target = repo.join("target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
+        for i in 0..20 {
+            fs::write(target.join("debug").join(format!("artifact-{i}")), "data").unwrap();
+        }
+        targets.push(target);
+    }
+
+    let dirs = suds_core::state::Directories {
+        state: base.join("state"),
+        config: base.join("config"),
+    };
+    let settings = suds_core::state::Settings {
+        roots: vec![workspace],
+        ceiling_bytes: Some(1024 * 1024 * 1024),
+        idle_minutes: 1,
+        standing_approval: true,
+        tolerate_unreadable_processes: true,
+        budgets: Default::default(),
+    };
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+
+    // Budget is smaller than the full 3-repo workspace (~180+ entries) yet large
+    // enough for 1+ repo plus verification/reclamation (~90 entries), so no
+    // single run finishes everything while each run advances via the cursor
+    // and reclaims completed checkouts without exceeding max_entries.
+    let per_run_cap = 150;
+    let mut clock_now = FUTURE_NOW;
+    let mut saw_partial_cursor = false;
+    let mut total_reclaimed = 0usize;
+    for _ in 0..8 {
+        let budget = Budget {
+            max_entries: Some(per_run_cap),
+            pace_every: 0,
+            background_priority: false,
+            ..Budget::for_maintenance()
+        };
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report =
+            suds_core::maintain::maintain_with_budget(&settings, &context, &budget, &mut clock)
+                .unwrap();
+        assert!(
+            report.entries_visited <= per_run_cap,
+            "run exceeded unified entry budget: {} > {per_run_cap}",
+            report.entries_visited
+        );
+        if dirs.maintain_cursor().exists() {
+            saw_partial_cursor = true;
+            assert!(
+                !report.pressure.complete,
+                "partial sliced pass must not mark pressure complete"
+            );
+            assert!(
+                report.stores.is_none(),
+                "partial sliced pass must skip unbounded store trims"
+            );
+        }
+        if let Some(reclaim) = &report.reclaim {
+            total_reclaimed += reclaim.removals.iter().filter(|r| r.removed).count();
+        }
+        if targets.iter().all(|t| !t.exists()) && !dirs.maintain_cursor().exists() {
+            break;
+        }
+    }
+    assert!(
+        saw_partial_cursor,
+        "expected at least one partial sliced pass to persist maintain-cursor.json"
+    );
+    assert_eq!(
+        total_reclaimed, 3,
+        "successive bounded runs must reclaim all 3 eligible target directories"
+    );
+    assert!(targets.iter().all(|t| !t.exists()));
+    assert!(
+        !dirs.maintain_cursor().exists(),
+        "cursor must clear once final slice completes"
+    );
+}

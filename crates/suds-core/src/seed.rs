@@ -13,17 +13,19 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
-use crate::budget::Budget;
+use crate::budget::{Budget, BudgetTracker};
 use crate::development::{self, Ecosystem};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::git::Git;
+use crate::scan::SharedScan;
 
 /// The schema tag of a seed plan.
 pub const SEED_PLAN_SCHEMA: &str = "suds.seed-plan/v1";
@@ -109,9 +111,9 @@ fn same_lock(a: &Path, b: &Path) -> bool {
 /// Plans the seed of the checkout at `destination`. With `from`, the plan
 /// takes build state from that checkout alone. Without it, the plan takes
 /// the checkout of the same repository whose build state changed last,
-/// bounded by the default execution budget.
+/// bounded by [`Budget::for_seeding`].
 pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<SeedPlan, String> {
-    plan_seed_with_budget(destination, from, git, &Budget::default())
+    plan_seed_with_budget(destination, from, git, &Budget::for_seeding())
 }
 
 /// Like [`plan_seed`], bounded by `budget` so sibling worktree enumeration
@@ -121,6 +123,17 @@ pub fn plan_seed_with_budget(
     from: Option<&Path>,
     git: &Git,
     budget: &Budget,
+) -> Result<SeedPlan, String> {
+    plan_seed_with_tracker(destination, from, git, BudgetTracker::new(budget.clone()))
+}
+
+/// Like [`plan_seed_with_budget`], sharing an existing `tracker` across
+/// planning and subsequent cloning.
+pub fn plan_seed_with_tracker(
+    destination: &Path,
+    from: Option<&Path>,
+    git: &Git,
+    tracker: Arc<BudgetTracker>,
 ) -> Result<SeedPlan, String> {
     if !development::is_checkout(destination) {
         return Err(format!(
@@ -144,11 +157,10 @@ pub fn plan_seed_with_budget(
         None => shortlist_candidates(
             checkouts,
             destination,
-            budget.max_seed_candidates,
+            tracker.budget().max_seed_candidates,
             &mut passed,
         ),
     };
-    let tracker = crate::budget::BudgetTracker::new(budget.clone());
     let mut offers = Vec::new();
     for checkout in candidates {
         if checkout == destination {
@@ -471,13 +483,33 @@ pub struct Cloned {
     pub refusal: Option<String>,
 }
 
-/// Records `plan` and clones each directory that it names. The run checks
-/// each directory's conditions again, and one refusal leaves the others to
-/// proceed. A journal failure stops the run.
+/// Records `plan` and clones each directory that it names within
+/// [`Budget::for_seeding`]. The run checks each directory's conditions again,
+/// and one refusal leaves the others to proceed. A journal failure stops the run.
 pub fn apply(
     journal: &mut Journal,
     plan: &SeedPlan,
     client: Option<&str>,
+) -> Result<SeedReport, JournalError> {
+    apply_with_budget(journal, plan, client, &Budget::for_seeding())
+}
+
+/// Like [`apply`], governed by an explicit execution `budget`.
+pub fn apply_with_budget(
+    journal: &mut Journal,
+    plan: &SeedPlan,
+    client: Option<&str>,
+    budget: &Budget,
+) -> Result<SeedReport, JournalError> {
+    apply_with_tracker(journal, plan, client, BudgetTracker::new(budget.clone()))
+}
+
+/// Like [`apply_with_budget`], sharing an existing `tracker`.
+pub fn apply_with_tracker(
+    journal: &mut Journal,
+    plan: &SeedPlan,
+    client: Option<&str>,
+    tracker: Arc<BudgetTracker>,
 ) -> Result<SeedReport, JournalError> {
     let run = new_id("run");
     journal.append(Event::SeedStarted {
@@ -489,9 +521,13 @@ pub fn apply(
     let mut shared_bytes = 0_u64;
     for clone in &plan.clones {
         let (from, to) = (clone.from.as_path(), clone.to.as_path());
-        let outcome = match refusal(from, to, plan.destination.as_path()) {
-            Some(reason) => Err(reason),
-            None => clone_build_state(from, to, &run),
+        let outcome = if tracker.is_stopped() {
+            Err("seed cloning stopped by execution budget".to_owned())
+        } else {
+            match refusal(from, to, plan.destination.as_path()) {
+                Some(reason) => Err(reason),
+                None => clone_build_state(from, to, &run, &tracker),
+            }
         };
         match outcome {
             Ok(counts) => {
@@ -552,7 +588,15 @@ struct Counts {
 /// under another name and renames it once it is whole, so a build in the
 /// destination never meets a part of one. A failure removes what the run
 /// built, and it leaves `to` absent.
-fn clone_build_state(from: &Path, to: &Path, run: &str) -> Result<Counts, String> {
+fn clone_build_state(
+    from: &Path,
+    to: &Path,
+    run: &str,
+    tracker: &Arc<BudgetTracker>,
+) -> Result<Counts, String> {
+    if tracker.is_stopped() {
+        return Err("seed cloning stopped by execution budget".to_owned());
+    }
     // The source is build state by the layout of its own checkout, as at
     // the plan's time.
     if development::build_state_at(from) != Some(Ecosystem::Cargo) {
@@ -564,13 +608,17 @@ fn clone_build_state(from: &Path, to: &Path, run: &str) -> Result<Counts, String
     let quiet = Quiet::of(from)?;
     // The run surveys the source again, because a checkout or a mount point
     // may have entered it since the plan.
-    let (_, survey, _) = development::survey_build_state(from, Ecosystem::Cargo);
+    let mut scan = SharedScan::with_tracker(Arc::clone(tracker));
+    let (_, survey, _) = development::survey_build_state_with(from, Ecosystem::Cargo, &mut scan);
+    if scan.is_stopped() {
+        return Err("seed verification stopped by execution budget".to_owned());
+    }
     if let Some(reason) = unclear(&survey) {
         return Err(format!("{}: {reason}", from.display()));
     }
     let parent = to.parent().ok_or("the destination has no parent")?;
     let staged = parent.join(format!(".suds-seed-{run}"));
-    let cloned = clone_tree(from, &staged).and_then(|counts| {
+    let cloned = clone_tree(from, &staged, tracker).and_then(|counts| {
         fs::rename(&staged, to)
             .map(|()| counts)
             .map_err(|err| format!("could not name the clone {}: {err}", to.display()))
@@ -584,9 +632,9 @@ fn clone_build_state(from: &Path, to: &Path, run: &str) -> Result<Counts, String
 }
 
 /// Clones each directory, each regular file, and each symbolic link beneath
-/// `from` to `to`, which must not exist. It follows no link and crosses no
-/// mount point.
-fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
+/// `from` to `to`, which must not exist. It follows no link, crosses no
+/// mount point, and stops cleanly when `tracker` exhausts or cancels.
+fn clone_tree(from: &Path, to: &Path, tracker: &BudgetTracker) -> Result<Counts, String> {
     let root = fs::symlink_metadata(from)
         .map_err(|err| format!("could not examine {}: {err}", from.display()))?;
     let mut counts = Counts::default();
@@ -599,6 +647,9 @@ fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
     let mut made: Vec<(PathBuf, fs::Permissions)> = Vec::new();
     let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
     while let Some((source, target)) = pending.pop() {
+        if !tracker.claim_entry() {
+            return Err("seed cloning stopped by execution budget".to_owned());
+        }
         let permissions = fs::symlink_metadata(&source)
             .map_err(|err| format!("could not examine {}: {err}", source.display()))?
             .permissions();
@@ -610,6 +661,9 @@ fn clone_tree(from: &Path, to: &Path) -> Result<Counts, String> {
         let entries = fs::read_dir(&source)
             .map_err(|err| format!("could not list {}: {err}", source.display()))?;
         for entry in entries {
+            if !tracker.claim_entry() {
+                return Err("seed cloning stopped by execution budget".to_owned());
+            }
             let entry =
                 entry.map_err(|err| format!("could not list {}: {err}", source.display()))?;
             let (source, target) = (entry.path(), target.join(entry.file_name()));

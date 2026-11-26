@@ -6,15 +6,17 @@
 //! derived state and eligible landed checkouts and trims stores under the
 //! standing approval of decision 0002. The journal records that authority.
 
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
 
 use crate::arena;
-use crate::budget::{self, Budget, ExecutionOutcome};
-use crate::development::{self, Environment};
+use crate::budget::{self, Budget, BudgetTracker, ExecutionOutcome};
+use crate::development::{self, DevelopmentScan, Environment};
 use crate::model::{ReportStatus, TraversalError};
 use crate::organize::journal::Journal;
 use crate::pressure::{self, Level, Measurement, Pressure, Thresholds};
@@ -23,7 +25,9 @@ use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{CheckoutScope, Observed, Policy, plan_reclaim};
 use crate::registry;
-use crate::state::{self, Directories, Settings, write_staged};
+use crate::state::{
+    self, Directories, MAINTAIN_CURSOR_SCHEMA, MaintainCursor, Settings, write_staged,
+};
 use crate::stores::{self, Budgets, Inputs, Programs, StoresReport};
 use crate::timestamp;
 
@@ -174,10 +178,58 @@ pub fn maintain_with_budget(
     if budget.background_priority {
         budget::apply_background_thread_policy();
     }
-    let scan =
-        development::inspect_with_budget(&settings.roots, context.environment, budget.clone());
+    let tracker = BudgetTracker::new(budget.clone());
+    let cursor_path = context.directories.maintain_cursor();
+    let skip_set: HashSet<PathBuf> = state::read_maintain_cursor(&cursor_path)
+        .filter(|cursor| cursor.roots == settings.roots)
+        .map(|cursor| cursor.completed_checkouts.into_iter().collect())
+        .unwrap_or_default();
+    // Reserve 20% of the unified entry budget for verification and bounded
+    // reclamation when standing approval is enabled so partial slices still
+    // reclaim completed checkouts without resetting the run's entry budget.
+    let scan_entry_cap = if settings.standing_approval {
+        budget
+            .max_entries
+            .filter(|limit| *limit >= 5)
+            .map(|limit| limit.saturating_sub(limit / 5).max(1))
+    } else {
+        None
+    };
+    let slice = development::inspect_with_tracker(
+        &settings.roots,
+        context.environment,
+        Arc::clone(&tracker),
+        &skip_set,
+        scan_entry_cap,
+    );
+    let scan = slice.scan;
     let initial_now = clock();
     let inspection = development::build_report(&scan, initial_now);
+    let slice_incomplete = slice.slice_capped || !scan.outcome.is_complete();
+    let full_scan_complete =
+        skip_set.is_empty() && !slice_incomplete && inspection.status == ReportStatus::Complete;
+    if !slice_incomplete {
+        // Either a single full pass completed or the final slice of a multi-run
+        // sweep finished all remaining checkouts.
+        state::clear_maintain_cursor(&cursor_path)?;
+    } else if !slice.completed_checkouts.is_empty() {
+        let mut completed: Vec<PathBuf> = skip_set
+            .iter()
+            .cloned()
+            .chain(slice.completed_checkouts.iter().cloned())
+            .collect();
+        completed.sort();
+        completed.dedup();
+        state::write_maintain_cursor(
+            &cursor_path,
+            &MaintainCursor {
+                schema: MAINTAIN_CURSOR_SCHEMA.to_owned(),
+                roots: settings.roots.clone(),
+                completed_checkouts: completed,
+                updated_at: timestamp::format_utc(initial_now),
+            },
+        )?;
+    }
     // The pressure counts every root and every store, so the audit covers
     // each of them.
     let others: Vec<_> = settings
@@ -194,7 +246,7 @@ pub fn maintain_with_budget(
         ceiling_bytes: audited.ceiling_bytes,
         enforced: audited.enforced,
         filesystem_available_bytes: available_before,
-        complete: inspection.status == ReportStatus::Complete && scan.outcome.is_complete(),
+        complete: full_scan_complete,
         now: initial_now,
     };
     let reading = pressure::next(
@@ -203,15 +255,26 @@ pub fn maintain_with_budget(
         Thresholds::default(),
     );
     write_pressure(&path, &reading)?;
+    let initial_outcome = if full_scan_complete {
+        ExecutionOutcome::Complete
+    } else if tracker.is_stopped() {
+        tracker.outcome(inspection.error_count > 0)
+    } else if slice.slice_capped {
+        ExecutionOutcome::Exhausted
+    } else if !skip_set.is_empty() {
+        ExecutionOutcome::Partial
+    } else {
+        scan.outcome
+    };
     let mut report = MaintenanceReport {
         schema: MAINTENANCE_SCHEMA.to_owned(),
         pressure: reading.clone(),
-        outcome: scan.outcome,
+        outcome: initial_outcome,
         paused: false,
         pause_reason: None,
-        entries_visited: scan.entries_visited,
-        directories_deferred: scan.directories_deferred,
-        draining_workers: scan.draining_workers,
+        entries_visited: tracker.entries_visited(),
+        directories_deferred: tracker.directories_deferred(),
+        draining_workers: tracker.draining_workers(),
         error_count: inspection.error_count,
         errors: inspection.errors,
         standing_approval: settings.standing_approval,
@@ -220,7 +283,22 @@ pub fn maintain_with_budget(
         reclaim: None,
         stores: None,
     };
-    if !settings.standing_approval || !scan.outcome.is_complete() {
+    if !settings.standing_approval {
+        return Ok(report);
+    }
+    let completed_set: HashSet<PathBuf> = slice.completed_checkouts.iter().cloned().collect();
+    let reclaim_scan: DevelopmentScan = if full_scan_complete {
+        scan.clone()
+    } else {
+        // On a partial or sliced run, act only on checkouts whose survey
+        // completed cleanly in this slice, keeping derived-only scope.
+        let mut partial = scan.clone();
+        partial
+            .checkouts
+            .retain(|checkout| completed_set.contains(&checkout.path));
+        partial
+    };
+    if reclaim_scan.checkouts.is_empty() && !full_scan_complete {
         return Ok(report);
     }
 
@@ -233,20 +311,15 @@ pub fn maintain_with_budget(
         checkouts: CheckoutScope::DerivedOnly,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
     };
-    let helper_runner =
-        crate::helper::HelperRunner::new(crate::helper::HelperPolicy::for_maintenance(
-            std::sync::Arc::clone(&budget.cancel),
-            budget.deadline,
-        ));
-    let bounded_git = context
-        .git
-        .clone()
-        .with_runner(std::sync::Arc::clone(&helper_runner));
+    let helper_runner = crate::helper::HelperRunner::new(
+        crate::helper::HelperPolicy::for_maintenance(Arc::clone(&budget.cancel), budget.deadline),
+    );
+    let bounded_git = context.git.clone().with_runner(Arc::clone(&helper_runner));
     let observed = Observed {
         liveness: &Liveness::observe_with_runner(&helper_runner),
         registry: &standings,
     };
-    let plan = plan_reclaim(&scan, &observed, &bounded_git, policy, context.now);
+    let plan = plan_reclaim(&reclaim_scan, &observed, &bounded_git, policy, context.now);
     let mut journal =
         Journal::open(&context.directories.journal()).map_err(|err| err.to_string())?;
     let mut observe_bounded = || Liveness::observe_with_runner(&helper_runner);
@@ -259,7 +332,7 @@ pub fn maintain_with_budget(
         now: context.now,
     };
     let exec_bounds = execute::ExecutionBounds {
-        tracker: crate::budget::BudgetTracker::new(budget.clone()),
+        tracker: Arc::clone(&tracker),
         lock_timeout: std::time::Duration::from_secs(5),
         max_entries_per_candidate: Some(500_000),
     };
@@ -273,67 +346,89 @@ pub fn maintain_with_budget(
         )
         .map_err(|err| err.to_string())?,
     );
+    report.entries_visited = tracker.entries_visited();
+    report.directories_deferred = tracker.directories_deferred();
+    report.draining_workers = tracker.draining_workers();
 
-    let mut budgets = Budgets::default();
-    for (id, bytes) in &settings.budgets {
-        budgets.set(id, *bytes);
+    // Only run store trims on a complete initial pass that still has budget.
+    if full_scan_complete && !tracker.is_stopped() {
+        let mut budgets = Budgets::default();
+        for (id, bytes) in &settings.budgets {
+            budgets.set(id, *bytes);
+        }
+        let engine = stores::engine_usage(&context.programs.docker);
+        let inputs = Inputs {
+            budgets: &budgets,
+            programs: context.programs,
+            engine: &engine,
+            builder_budget_option: stores::builder_budget_option(&context.programs.docker),
+            idle_seconds,
+            now: context.now,
+        };
+        let stores_plan = stores::plan_stores(&scan, &inputs);
+        let docker = &context.programs.docker;
+        report.stores = Some(
+            stores::apply_with_tracker(
+                &mut journal,
+                &stores_plan,
+                Authority::StandingApproval,
+                &tracker,
+                &mut |entry| stores::measure_after_with_tracker(entry, docker, &tracker),
+            )
+            .map_err(|err| err.to_string())?,
+        );
     }
-    let engine = stores::engine_usage(&context.programs.docker);
-    let inputs = Inputs {
-        budgets: &budgets,
-        programs: context.programs,
-        engine: &engine,
-        builder_budget_option: stores::builder_budget_option(&context.programs.docker),
-        idle_seconds,
-        now: context.now,
-    };
-    let stores_plan = stores::plan_stores(&scan, &inputs);
-    let docker = &context.programs.docker;
-    report.stores = Some(
-        stores::apply(
-            &mut journal,
-            &stores_plan,
-            Authority::StandingApproval,
-            &mut |entry| stores::measure_after(entry, docker),
-        )
-        .map_err(|err| err.to_string())?,
-    );
 
-    // Publish a post-maintenance observation from the same advancing clock so
-    // recovery starts after cleanup without backdating the transition window.
-    let post_scan =
-        development::inspect_with_budget(&settings.roots, context.environment, budget.clone());
-    let post_now = clock();
-    let post_inspection = development::build_report(&post_scan, post_now);
-    let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
-    let available_after = Some(post_audited.available_bytes);
-    let post_measurement = Measurement {
-        usage_bytes: pressure::usage(&post_scan),
-        ceiling_bytes: post_audited.ceiling_bytes,
-        enforced: post_audited.enforced,
-        filesystem_available_bytes: available_after,
-        complete: post_inspection.status == ReportStatus::Complete
-            && post_scan.outcome.is_complete(),
-        now: post_now,
-    };
-    let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
-    write_pressure(&path, &post_reading)?;
-    report.pressure = post_reading;
-    report.outcome = post_scan.outcome;
-    report.entries_visited = report
-        .entries_visited
-        .saturating_add(post_scan.entries_visited);
-    report.directories_deferred = report
-        .directories_deferred
-        .saturating_add(post_scan.directories_deferred);
-    report.draining_workers = post_scan.draining_workers;
-    report.filesystem_available_after_bytes = available_after;
-    if post_inspection.error_count > 0 {
-        report.error_count = report
-            .error_count
-            .saturating_add(post_inspection.error_count);
-        report.errors.extend(post_inspection.errors);
+    // Publish a post-maintenance observation sharing the same tracker when the
+    // pass finished all checkouts and remaining budget permits.
+    if !slice_incomplete && !tracker.is_stopped() {
+        let post_slice = development::inspect_with_tracker(
+            &settings.roots,
+            context.environment,
+            Arc::clone(&tracker),
+            &HashSet::new(),
+            None,
+        );
+        let post_scan = post_slice.scan;
+        let post_now = clock();
+        let post_inspection = development::build_report(&post_scan, post_now);
+        let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+        let available_after = Some(post_audited.available_bytes);
+        let post_complete =
+            post_inspection.status == ReportStatus::Complete && post_scan.outcome.is_complete();
+        let post_measurement = Measurement {
+            usage_bytes: pressure::usage(&post_scan),
+            ceiling_bytes: post_audited.ceiling_bytes,
+            enforced: post_audited.enforced,
+            filesystem_available_bytes: available_after,
+            complete: post_complete,
+            now: post_now,
+        };
+        let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
+        write_pressure(&path, &post_reading)?;
+        report.pressure = post_reading;
+        report.outcome = if post_complete {
+            ExecutionOutcome::Complete
+        } else {
+            tracker.outcome(post_inspection.error_count > 0 || report.error_count > 0)
+        };
+        report.filesystem_available_after_bytes = available_after;
+        if post_inspection.error_count > 0 {
+            report.error_count = report
+                .error_count
+                .saturating_add(post_inspection.error_count);
+            report.errors.extend(post_inspection.errors);
+        }
+    } else {
+        let post_audited = arena::audit(first, &others, settings.ceiling_bytes)?;
+        report.filesystem_available_after_bytes = Some(post_audited.available_bytes);
+        if tracker.is_stopped() {
+            report.outcome = tracker.outcome(report.error_count > 0);
+        }
     }
+    report.entries_visited = tracker.entries_visited();
+    report.directories_deferred = tracker.directories_deferred();
+    report.draining_workers = tracker.draining_workers();
     Ok(report)
 }
 

@@ -96,6 +96,22 @@ impl Budget {
         }
     }
 
+    /// The bounded budget used by `suds seed` across sibling selection,
+    /// verification, and copy-on-write cloning.
+    pub fn for_seeding() -> Self {
+        Budget {
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
+            max_total_readers: 1,
+            max_entries: Some(1_000_000),
+            max_dir_entries: Some(DEFAULT_MAX_DIR_ENTRIES),
+            max_seed_candidates: DEFAULT_MAX_SEED_CANDIDATES,
+            pace_every: 2_048,
+            pace_delay: Duration::from_millis(1),
+            background_priority: false,
+        }
+    }
+
     /// Background read-ahead worker slots allowed alongside the caller thread.
     pub fn helper_readers(&self) -> usize {
         self.max_total_readers.saturating_sub(1)
@@ -109,6 +125,11 @@ pub struct BudgetTracker {
     budget: Budget,
     entries_visited: AtomicU64,
     directories_deferred: AtomicU64,
+    /// Optional softer entry cap for the current phase (0 = unlimited), so a
+    /// scan slice can stop cleanly while leaving remaining unified `max_entries`
+    /// headroom for verification and reclamation in the same run.
+    phase_entry_cap: AtomicU64,
+    phase_capped: AtomicBool,
     exhausted: AtomicBool,
     cancelled: AtomicBool,
     draining_workers: AtomicUsize,
@@ -129,10 +150,26 @@ impl BudgetTracker {
             budget,
             entries_visited: AtomicU64::new(0),
             directories_deferred: AtomicU64::new(0),
+            phase_entry_cap: AtomicU64::new(0),
+            phase_capped: AtomicBool::new(false),
             exhausted: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             draining_workers: AtomicUsize::new(0),
         })
+    }
+
+    /// Sets or clears a phase-local entry cap within this tracker's unified
+    /// `max_entries` budget. Clearing it reopens the remaining unified budget
+    /// for subsequent phases without resetting `entries_visited`.
+    pub fn set_phase_entry_cap(&self, cap: Option<u64>) {
+        self.phase_capped.store(false, Ordering::Release);
+        self.phase_entry_cap
+            .store(cap.unwrap_or(0), Ordering::Release);
+    }
+
+    /// Whether the active phase hit its soft entry cap.
+    pub fn is_phase_capped(&self) -> bool {
+        self.phase_capped.load(Ordering::Acquire)
     }
 
     pub fn budget(&self) -> &Budget {
@@ -151,11 +188,14 @@ impl BudgetTracker {
 
     /// Returns why the operation stopped, or `None` while work may continue.
     pub fn stop_reason(&self) -> Option<ExecutionOutcome> {
-        if self.budget.cancel.load(Ordering::Acquire) || self.cancelled.load(Ordering::Acquire) {
+        if self.budget.cancel.load(Ordering::Acquire)
+            || self.cancelled.load(Ordering::Acquire)
+            || crate::helper::is_globally_cancelled()
+        {
             self.cancelled.store(true, Ordering::Release);
             return Some(ExecutionOutcome::Cancelled);
         }
-        if self.exhausted.load(Ordering::Acquire) {
+        if self.exhausted.load(Ordering::Acquire) || self.phase_capped.load(Ordering::Acquire) {
             return Some(ExecutionOutcome::Exhausted);
         }
         if self
@@ -186,6 +226,12 @@ impl BudgetTracker {
         {
             self.entries_visited.fetch_sub(1, Ordering::AcqRel);
             self.exhausted.store(true, Ordering::Release);
+            return false;
+        }
+        let phase_cap = self.phase_entry_cap.load(Ordering::Acquire);
+        if phase_cap > 0 && next > phase_cap {
+            self.entries_visited.fetch_sub(1, Ordering::AcqRel);
+            self.phase_capped.store(true, Ordering::Release);
             return false;
         }
         if self.budget.pace_every > 0
@@ -226,7 +272,10 @@ impl BudgetTracker {
 
     /// Resolves the final outcome given whether traversal errors occurred.
     pub fn outcome(&self, had_errors: bool) -> ExecutionOutcome {
-        if self.cancelled.load(Ordering::Acquire) || self.budget.cancel.load(Ordering::Acquire) {
+        if self.cancelled.load(Ordering::Acquire)
+            || self.budget.cancel.load(Ordering::Acquire)
+            || crate::helper::is_globally_cancelled()
+        {
             ExecutionOutcome::Cancelled
         } else if self.exhausted.load(Ordering::Acquire) {
             ExecutionOutcome::Exhausted

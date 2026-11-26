@@ -272,9 +272,40 @@ impl Git {
     }
 
     /// Queries every per-worktree pseudoreference in a single bounded
-    /// `git cat-file --batch-check` call so timeout, failure, or non-commit
-    /// objects never read as absent.
+    /// `git cat-file --batch-check` call and cross-checks any `missing` reply
+    /// against the worktree's `git_dir` so unreadable, malformed, or unresolved
+    /// pseudoreferences never classify as absent.
     pub fn probe_pseudorefs(&self, checkout: &Path) -> Result<Vec<PseudoRefState>, String> {
+        let raw_git_dir = self.run(checkout, &["rev-parse", "--git-dir"], None)?;
+        let git_dir_trimmed = raw_git_dir.trim();
+        if git_dir_trimmed.is_empty() {
+            return Err(format!(
+                "git rev-parse --git-dir returned empty output for {}",
+                checkout.display()
+            ));
+        }
+        let git_dir = {
+            let path = PathBuf::from(git_dir_trimmed);
+            if path.is_absolute() {
+                path
+            } else {
+                checkout.join(path)
+            }
+        };
+        let git_dir_meta = std::fs::metadata(&git_dir).map_err(|err| {
+            format!(
+                "could not inspect git directory {} for {}: {err}",
+                git_dir.display(),
+                checkout.display()
+            )
+        })?;
+        if !git_dir_meta.is_dir() {
+            return Err(format!(
+                "git directory {} for {} is not a directory",
+                git_dir.display(),
+                checkout.display()
+            ));
+        }
         let mut stdin = String::new();
         for pseudo in WORKTREE_PSEUDOREFS {
             stdin.push_str(pseudo);
@@ -307,7 +338,28 @@ impl Git {
         for (pseudo, line) in WORKTREE_PSEUDOREFS.iter().zip(lines) {
             let line = line.trim();
             if line == format!("{pseudo} missing") {
-                states.push(PseudoRefState::Absent);
+                // Git returns `exit 0` and `<NAME> missing` with empty stderr
+                // even when `<git-dir>/<NAME>` exists on disk with mode `0000`
+                // or malformed content. Require positive filesystem proof that
+                // the loose pseudoreference file does not exist.
+                let pseudo_path = git_dir.join(pseudo);
+                match std::fs::symlink_metadata(&pseudo_path) {
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        states.push(PseudoRefState::Absent);
+                    }
+                    Ok(_) => {
+                        states.push(PseudoRefState::Unknown(format!(
+                            "pseudoreference {pseudo} exists at {} but Git reported it missing",
+                            pseudo_path.display()
+                        )));
+                    }
+                    Err(err) => {
+                        states.push(PseudoRefState::Unknown(format!(
+                            "could not verify absence of pseudoreference {pseudo} at {}: {err}",
+                            pseudo_path.display()
+                        )));
+                    }
+                }
                 continue;
             }
             let mut parts = line.split_whitespace();

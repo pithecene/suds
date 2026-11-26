@@ -98,6 +98,48 @@ pub fn maintain_with_clock(
     maintain_with_budget(settings, context, &Budget::for_maintenance(), clock)
 }
 
+fn paused_report(
+    settings: &Settings,
+    context: &Context<'_>,
+    pressure_path: &Path,
+) -> Result<Option<MaintenanceReport>, String> {
+    let Some(pause) = state::read_pause(&context.directories.pause())? else {
+        return Ok(None);
+    };
+    if !pause.paused {
+        return Ok(None);
+    }
+    let cached = read_pressure(pressure_path).unwrap_or_else(|| Pressure {
+        schema: pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: timestamp::format_utc(context.now),
+        level: Level::Normal,
+        lower_since: None,
+        usage_bytes: 0,
+        ceiling_bytes: settings.ceiling_bytes.unwrap_or(0),
+        enforced: false,
+        filesystem_available_bytes: None,
+        complete: false,
+    });
+    let available = cached.filesystem_available_bytes;
+    Ok(Some(MaintenanceReport {
+        schema: MAINTENANCE_SCHEMA.to_owned(),
+        pressure: cached,
+        outcome: ExecutionOutcome::Cancelled,
+        paused: true,
+        pause_reason: pause.reason,
+        entries_visited: 0,
+        directories_deferred: 0,
+        draining_workers: 0,
+        error_count: 0,
+        errors: Vec::new(),
+        standing_approval: settings.standing_approval,
+        filesystem_available_before_bytes: available,
+        filesystem_available_after_bytes: available,
+        reclaim: None,
+        stores: None,
+    }))
+}
+
 /// Like [`maintain_with_clock`], governed by an explicit execution `budget`.
 /// Checks durable pause state before taking any lock or traversing storage.
 pub fn maintain_with_budget(
@@ -109,38 +151,8 @@ pub fn maintain_with_budget(
     let path = context.directories.pressure();
     // Check durable pause before acquiring any lock or scanning storage.
     // An unreadable or malformed pause record fails closed.
-    if let Some(pause) = state::read_pause(&context.directories.pause())?
-        && pause.paused
-    {
-        let cached = read_pressure(&path).unwrap_or_else(|| Pressure {
-            schema: pressure::PRESSURE_SCHEMA.to_owned(),
-            observed_at: timestamp::format_utc(context.now),
-            level: Level::Normal,
-            lower_since: None,
-            usage_bytes: 0,
-            ceiling_bytes: settings.ceiling_bytes.unwrap_or(0),
-            enforced: false,
-            filesystem_available_bytes: None,
-            complete: false,
-        });
-        let available = cached.filesystem_available_bytes;
-        return Ok(MaintenanceReport {
-            schema: MAINTENANCE_SCHEMA.to_owned(),
-            pressure: cached,
-            outcome: ExecutionOutcome::Cancelled,
-            paused: true,
-            pause_reason: pause.reason,
-            entries_visited: 0,
-            directories_deferred: 0,
-            draining_workers: 0,
-            error_count: 0,
-            errors: Vec::new(),
-            standing_approval: settings.standing_approval,
-            filesystem_available_before_bytes: available,
-            filesystem_available_after_bytes: available,
-            reclaim: None,
-            stores: None,
-        });
+    if let Some(report) = paused_report(settings, context, &path)? {
+        return Ok(report);
     }
 
     let first = settings
@@ -154,6 +166,11 @@ pub fn maintain_with_budget(
         std::time::Duration::from_secs(5),
         "maintain",
     )?;
+    // Recheck durable pause after acquiring the lock so a pause written during
+    // contention stops queued maintenance from scanning or reclaiming.
+    if let Some(report) = paused_report(settings, context, &path)? {
+        return Ok(report);
+    }
     if budget.background_priority {
         budget::apply_background_thread_policy();
     }

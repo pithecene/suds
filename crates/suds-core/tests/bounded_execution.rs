@@ -287,6 +287,90 @@ fn bounded_seed_shortlist_caps_inspected_siblings() {
         .filter(|p| p.reason.contains("seed candidate limit of 2"))
         .count();
     assert_eq!(deferred, 4);
+
+    // Entry accounting stays shared across inspected siblings so max_entries
+    // bounds the entire seed-selection run instead of resetting per sibling.
+    for i in 0..3 {
+        let wt = base.join(format!("wt-{i}"));
+        for j in 0..8 {
+            fs::write(wt.join(format!("extra-{j}.txt")), b"x").unwrap();
+        }
+    }
+    let tight = Budget {
+        max_seed_candidates: 6,
+        max_entries: Some(12),
+        max_total_readers: 1,
+        pace_delay: Duration::ZERO,
+        ..Budget::default()
+    };
+    let limited = seed::plan_seed_with_budget(&dest, None, &Git::default(), &tight).unwrap();
+    assert!(
+        limited
+            .passed
+            .iter()
+            .any(|p| p.reason.contains("execution budget ended")),
+        "{:?}",
+        limited.passed
+    );
+}
+
+#[test]
+fn queued_maintenance_rechecks_pause_after_acquiring_lock() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("work");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("file.txt"), b"data").unwrap();
+    let dirs = Directories {
+        state: base.join("state"),
+        config: base.join("config"),
+    };
+    fs::create_dir_all(&dirs.state).unwrap();
+
+    // Hold the maintenance lock, start a second maintenance call, write pause.json
+    // while it waits, then release the lock.
+    let lock_target = dirs.pressure().with_extension("maintain.lock");
+    let guard = suds_core::registry::lock(&lock_target).unwrap();
+    let dirs_bg = dirs.clone();
+    let root_bg = root.clone();
+    let handle = std::thread::spawn(move || {
+        let settings = Settings {
+            roots: vec![root_bg],
+            standing_approval: true,
+            ..Settings::default()
+        };
+        let context = Context {
+            directories: &dirs_bg,
+            environment: &Environment::default(),
+            programs: &Programs::default(),
+            git: &Git::default(),
+            now: 1_795_600_000,
+        };
+        maintain::maintain_with_budget(&settings, &context, &Budget::default(), &mut || {
+            1_795_600_001
+        })
+    });
+    std::thread::sleep(Duration::from_millis(80));
+    write_pause(
+        &dirs.pause(),
+        &PauseState {
+            schema: PAUSE_SCHEMA.to_owned(),
+            paused: true,
+            reason: Some("paused-during-lock-wait".to_owned()),
+            updated_at: "2026-11-25T23:50:00Z".to_owned(),
+        },
+    )
+    .unwrap();
+    drop(guard);
+
+    let report = handle.join().unwrap().unwrap();
+    assert!(report.paused);
+    assert_eq!(
+        report.pause_reason.as_deref(),
+        Some("paused-during-lock-wait")
+    );
+    assert_eq!(report.entries_visited, 0);
+    assert!(report.reclaim.is_none());
 }
 
 #[test]

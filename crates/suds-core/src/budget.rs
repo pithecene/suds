@@ -247,38 +247,25 @@ impl BudgetTracker {
     }
 }
 
-/// Applies background CPU QoS and throttled disk I/O policy to the calling
-/// thread on macOS. Foreground UI threads must never call this function.
-#[cfg_attr(target_os = "macos", allow(unsafe_code))]
+/// Applies background CPU priority and, on macOS, background QoS and throttled
+/// disk I/O policy without `unsafe` code. Foreground UI threads must never
+/// call this function.
 pub fn apply_background_thread_policy() {
-    #[cfg(target_os = "macos")]
-    {
-        // Apple defines QOS_CLASS_BACKGROUND = 0x09 in <sys/qos.h> and
-        // IOPOL_TYPE_DISK = 0, IOPOL_SCOPE_THREAD = 1, IOPOL_THROTTLE = 3 in
-        // <sys/resource.h>.
-        const QOS_CLASS_BACKGROUND: libc::c_uint = 0x09;
-        const IOPOL_TYPE_DISK: libc::c_int = 0;
-        const IOPOL_SCOPE_THREAD: libc::c_int = 1;
-        const IOPOL_THROTTLE: libc::c_int = 3;
-
-        unsafe extern "C" {
-            fn pthread_set_qos_class_self_np(
-                qos_class: libc::c_uint,
-                relative_priority: libc::c_int,
-            ) -> libc::c_int;
-            fn setiopolicy_np(
-                kind: libc::c_int,
-                scope: libc::c_int,
-                policy: libc::c_int,
-            ) -> libc::c_int;
+    use std::sync::Once;
+    static APPLIED: Once = Once::new();
+    APPLIED.call_once(|| {
+        let _ = rustix::process::setpriority_process(None, 10);
+        #[cfg(target_os = "macos")]
+        {
+            let pid = std::process::id().to_string();
+            let _ = std::process::Command::new("/usr/sbin/taskpolicy")
+                .args(["-b", "-p", &pid])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
         }
-        // SAFETY: Both functions operate solely on the calling thread's
-        // scheduling attributes and accept scalar integer arguments.
-        unsafe {
-            let _ = pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
-            let _ = setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE);
-        }
-    }
+    });
 }
 
 #[cfg(test)]

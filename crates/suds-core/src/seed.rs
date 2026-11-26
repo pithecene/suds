@@ -13,7 +13,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
@@ -148,23 +148,20 @@ pub fn plan_seed_with_budget(
             &mut passed,
         ),
     };
+    let tracker = crate::budget::BudgetTracker::new(budget.clone());
     let mut offers = Vec::new();
     for checkout in candidates {
         if checkout == destination {
             continue;
         }
-        if budget.cancel.load(std::sync::atomic::Ordering::Acquire)
-            || budget
-                .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+        if tracker.is_stopped() {
             passed.push(Passed {
                 path: NativePath::new(checkout),
                 reason: "seed selection stopped because the execution budget ended".to_owned(),
             });
             continue;
         }
-        let offer = offer_of(&checkout, destination, budget, &mut passed);
+        let offer = offer_of(&checkout, destination, &tracker, &mut passed);
         if !offer.clones.is_empty() {
             offers.push(offer);
         }
@@ -241,7 +238,7 @@ fn shortlist_candidates(
 fn offer_of(
     checkout: &Path,
     destination: &Path,
-    budget: &Budget,
+    tracker: &std::sync::Arc<crate::budget::BudgetTracker>,
     passed: &mut Vec<Passed>,
 ) -> Offer {
     let mut offer = Offer {
@@ -251,7 +248,8 @@ fn offer_of(
         bytes: 0,
         newest: None,
     };
-    let (states, unread, first) = development::build_states_with_budget(checkout, budget.clone());
+    let (states, unread, first) =
+        development::build_states_with_tracker(checkout, std::sync::Arc::clone(tracker));
     if let Some(first) = first {
         // An entry that the scan could not read may hold build state, so
         // the plan names what it could not establish.

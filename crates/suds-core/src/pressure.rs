@@ -135,7 +135,7 @@ pub fn next(
     thresholds: Thresholds,
 ) -> Pressure {
     let share = |percent: u64| measurement.ceiling_bytes / 100 * percent;
-    let measured = if measurement.usage_bytes >= share(thresholds.hard_percent) {
+    let raw_measured = if measurement.usage_bytes >= share(thresholds.hard_percent) {
         Level::Hard
     } else if measurement.usage_bytes >= share(thresholds.soft_percent) {
         Level::Soft
@@ -144,14 +144,15 @@ pub fn next(
     };
     let now = timestamp::format_utc(measurement.now);
     let held = previous.map_or(Level::Normal, |previous| previous.level);
-    // A lower bound can raise the level and never lower it.
-    let measured = if measurement.complete {
-        measured
-    } else {
-        measured.max(held)
-    };
-    let (level, lower_since) = if measured >= held {
-        (measured, None)
+    let (level, lower_since) = if raw_measured >= held {
+        (raw_measured, None)
+    } else if !measurement.complete {
+        // A lower bound below the held level proves neither recovery nor a rise,
+        // so keep the held level and any active recovery window intact.
+        (
+            held,
+            previous.and_then(|previous| previous.lower_since.clone()),
+        )
     } else {
         let since = previous
             .and_then(|previous| previous.lower_since.clone())
@@ -163,7 +164,7 @@ pub fn next(
         );
         // Timestamps in this form sort in the order of their times.
         if since <= waited_until {
-            (measured, None)
+            (raw_measured, None)
         } else {
             (held, Some(since))
         }

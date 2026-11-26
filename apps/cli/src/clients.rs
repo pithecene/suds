@@ -189,7 +189,11 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
         git: &Git::default(),
         now: now_seconds(),
     };
-    let report = maintain::maintain(&settings, &context)?;
+    let report = if args.observe {
+        maintain::maintain_observe(&settings, &context)?
+    } else {
+        maintain::maintain(&settings, &context)?
+    };
     let partial = !report.paused
         && (!report.outcome.is_complete()
             || report.error_count > 0
@@ -219,6 +223,12 @@ fn write_maintenance(out: &mut impl Write, report: &MaintenanceReport) -> io::Re
         return writeln!(
             out,
             "The settings hold no standing approval, so Suds measured and changed nothing."
+        );
+    }
+    if report.reclaim.is_none() && report.stores.is_none() {
+        return writeln!(
+            out,
+            "Suds observed development storage and changed nothing."
         );
     }
     let reclaimed = report.reclaim.as_ref().map_or(0, |run| run.freed_bytes);

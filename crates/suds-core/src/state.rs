@@ -202,6 +202,14 @@ pub struct MaintainCursor {
     pub completed_checkouts: Vec<PathBuf>,
     #[serde(default)]
     pub pending_checkouts: Vec<PathBuf>,
+    #[serde(default)]
+    pub completed_stores: Vec<String>,
+    #[serde(default)]
+    pub accumulated_usage_bytes: u64,
+    #[serde(default)]
+    pub workspaces_counted: bool,
+    #[serde(default)]
+    pub had_errors: bool,
     pub updated_at: String,
 }
 

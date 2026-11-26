@@ -506,15 +506,13 @@ pub(crate) fn is_checkout(dir: &Path) -> bool {
     matches!(claim_at(dir, false), Some(Claim::Checkout(..)))
 }
 
-/// Each directory of build state beneath `checkout`, which a scan of its
-/// own measures. The result also counts the entries that the scan could not
-/// read and holds the first one. A checkout beneath it keeps its own build
-/// state.
-pub(crate) fn build_states_with_budget(
+/// Each directory of build state beneath `checkout`, sharing an existing
+/// execution `tracker` so entry budgets apply across multiple sibling scans.
+pub(crate) fn build_states_with_tracker(
     checkout: &Path,
-    budget: Budget,
+    tracker: Arc<crate::budget::BudgetTracker>,
 ) -> (Vec<BuildState>, u64, Option<ScanError>) {
-    let mut scan = SharedScan::with_budget(budget);
+    let mut scan = SharedScan::with_tracker(tracker);
     let claims = Arc::new(|entry: &Entry<'_>| claim_of(entry, true).is_some());
     let Some(bounded) = scan.measure(checkout, claims) else {
         return (

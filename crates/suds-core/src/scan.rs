@@ -238,8 +238,13 @@ impl Default for SharedScan {
 impl SharedScan {
     /// Creates a shared scan governed by `budget`.
     pub fn with_budget(budget: Budget) -> Self {
+        Self::with_tracker(BudgetTracker::new(budget))
+    }
+
+    /// Creates a shared scan sharing an existing `tracker`.
+    pub fn with_tracker(tracker: Arc<BudgetTracker>) -> Self {
         SharedScan {
-            walker: Walker::with_budget(0, BudgetTracker::new(budget)),
+            walker: Walker::with_budget(0, tracker),
         }
     }
 

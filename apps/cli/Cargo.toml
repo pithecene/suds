@@ -12,6 +12,8 @@ repository.workspace = true
 suds-build.workspace = true
 suds-core.workspace = true
 clap.workspace = true
+# Coordinate SIGINT/SIGTERM shutdown with active helper process groups without unsafe code.
+ctrlc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

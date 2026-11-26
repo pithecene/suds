@@ -69,6 +69,13 @@ impl Directories {
         self.state.join("pause.json")
     }
 
+    /// Bounded-progress cursor persisting completed checkouts across partial
+    /// maintenance slices so successive runs advance instead of repeating the
+    /// same prefix.
+    pub fn maintain_cursor(&self) -> PathBuf {
+        self.state.join("maintain-cursor.json")
+    }
+
     /// The last reading that the desktop application showed.
     pub fn reading(&self) -> PathBuf {
         self.state.join("reading.json")
@@ -175,6 +182,46 @@ pub fn write_pause(path: &Path, state: &PauseState) -> Result<(), String> {
 
 /// Clears any pause record at `path`.
 pub fn clear_pause(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("could not remove {}: {err}", path.display())),
+    }
+}
+
+/// Schema tag of the bounded maintenance progress cursor.
+pub const MAINTAIN_CURSOR_SCHEMA: &str = "suds.maintain-cursor/v1";
+
+/// Persisted cursor recording completed and pending checkouts across partial
+/// maintenance slices so subsequent bounded runs reach nested worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintainCursor {
+    pub schema: String,
+    pub roots: Vec<PathBuf>,
+    pub completed_checkouts: Vec<PathBuf>,
+    #[serde(default)]
+    pub pending_checkouts: Vec<PathBuf>,
+    pub updated_at: String,
+}
+
+/// Reads the maintenance progress cursor at `path`, returning `None` if absent
+/// or unreadable so a damaged cursor resets to a fresh pass.
+pub fn read_maintain_cursor(path: &Path) -> Option<MaintainCursor> {
+    let text = fs::read(path).ok()?;
+    let cursor: MaintainCursor = serde_json::from_slice(&text).ok()?;
+    (cursor.schema == MAINTAIN_CURSOR_SCHEMA).then_some(cursor)
+}
+
+/// Atomically writes `cursor` to `path`.
+pub fn write_maintain_cursor(path: &Path, cursor: &MaintainCursor) -> Result<(), String> {
+    let failed = |err: io::Error| format!("could not write {}: {err}", path.display());
+    let text = serde_json::to_vec_pretty(cursor).map_err(|err| failed(err.into()))?;
+    write_staged(path, &text).map_err(failed)
+}
+
+/// Removes any maintenance progress cursor at `path`.
+pub fn clear_maintain_cursor(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),

@@ -15,6 +15,7 @@ pub mod budget;
 mod clones;
 pub mod development;
 pub mod go_cache;
+pub mod helper;
 pub mod inspection;
 pub mod maintain;
 pub mod model;

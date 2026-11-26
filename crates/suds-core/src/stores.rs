@@ -10,15 +10,18 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{Budget, BudgetTracker};
 use crate::development::{self, DevelopmentScan, Environment, Store, StoreClass, StoreStatus};
 use crate::go_cache::{Eviction, USE_PRECISION_SECONDS, inside_checkout};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
 use crate::organize::plan::new_id;
 use crate::reclaim::execute::Authority;
+use crate::scan::SharedScan;
 use crate::timestamp;
 
 /// The schema tag of every stores plan.
@@ -755,6 +758,21 @@ pub fn apply(
     authority: Authority,
     measure: &mut dyn FnMut(&Entry) -> Result<u64, String>,
 ) -> Result<StoresReport, JournalError> {
+    let tracker = BudgetTracker::new(Budget::default());
+    apply_with_tracker(journal, plan, authority, &tracker, true, measure)
+}
+
+/// Like [`apply`], checking `tracker` before each entry and optionally
+/// skipping external subprocess trims so automatic maintenance avoids
+/// unbounded external store adapters.
+pub fn apply_with_tracker(
+    journal: &mut Journal,
+    plan: &StoresPlan,
+    authority: Authority,
+    tracker: &BudgetTracker,
+    allow_external_trims: bool,
+    measure: &mut dyn FnMut(&Entry) -> Result<u64, String>,
+) -> Result<StoresReport, JournalError> {
     let run = new_id("run");
     journal.append(Event::StoresStarted {
         run: run.clone(),
@@ -764,10 +782,27 @@ pub fn apply(
     let mut trims = Vec::new();
     for entry in &plan.entries {
         let command = match &entry.decision {
-            Decision::Trim { trim } => trim.display(),
+            Decision::Trim { trim } if allow_external_trims => trim.display(),
+            Decision::Trim { .. } => continue,
             Decision::Evict { eviction } => eviction.display(),
             _ => continue,
         };
+        if tracker.is_stopped() {
+            let reason = "stopped by execution budget".to_owned();
+            journal.append(Event::StoreTrimFailed {
+                run: run.clone(),
+                store: entry.id.clone(),
+                reason: reason.clone(),
+            })?;
+            trims.push(TrimOutcome {
+                store: entry.id.clone(),
+                command,
+                before_bytes: entry.measured_bytes.unwrap_or(0),
+                after_bytes: None,
+                failure: Some(reason),
+            });
+            continue;
+        }
         journal.append(Event::StoreTrimStarted {
             run: run.clone(),
             store: entry.id.clone(),
@@ -825,8 +860,29 @@ pub fn apply(
 /// A store's size after its trim: a directory's allocated bytes, or the
 /// engine's own figure for one of its stores.
 pub fn measure_after(entry: &Entry, docker: &Path) -> Result<u64, String> {
+    measure_after_with_tracker(
+        entry,
+        docker,
+        Arc::new(BudgetTracker::new(Budget::default())).as_ref(),
+    )
+}
+
+/// Like [`measure_after`], sharing an execution `tracker` for directory re-measurement.
+pub(crate) fn measure_after_with_tracker(
+    entry: &Entry,
+    docker: &Path,
+    tracker: &Arc<BudgetTracker>,
+) -> Result<u64, String> {
     if let Some(path) = &entry.path {
-        let (measure, survey, _) = development::survey_tree(path.as_path());
+        let mut scan = SharedScan::with_tracker(Arc::clone(tracker));
+        let (measure, survey, _) =
+            development::survey_tree_with(path.as_path(), &mut scan, &mut |_, _| {});
+        if scan.is_stopped() {
+            return Err(format!(
+                "stopped measuring {} after trim by execution budget",
+                path.display()
+            ));
+        }
         // A measurement that could not read an entry states no size, so the
         // run records a failure and claims no freed space.
         if !survey.is_clear() {

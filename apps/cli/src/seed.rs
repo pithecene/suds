@@ -2,7 +2,10 @@
 
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use suds_core::budget::{Budget, BudgetTracker};
+use suds_core::helper::{HelperPolicy, HelperRunner};
 use suds_core::organize::journal::Journal;
 use suds_core::reclaim::git::Git;
 use suds_core::seed::{self, SeedPlan, SeedReport};
@@ -23,18 +26,27 @@ fn run(args: &SeedArgs) -> Result<ExitCode, String> {
         .collect();
     let resolved = workspaces_of(&named)?;
     let destination = &resolved[0];
-    let plan = seed::plan_seed(
+    let budget = Budget::for_seeding();
+    let runner = HelperRunner::new(HelperPolicy {
+        cancel: Arc::clone(&budget.cancel),
+        deadline: budget.deadline,
+        ..HelperPolicy::default()
+    });
+    let git = Git::default().with_runner(runner);
+    let tracker = BudgetTracker::new(budget);
+    let plan = seed::plan_seed_with_tracker(
         destination,
         resolved.get(1).map(|from| from.as_path()),
-        &Git::default(),
+        &git,
+        Arc::clone(&tracker),
     )?;
     if !args.apply {
         return planned(emit(args.format, &plan, write_plan));
     }
     let directory = journal_directory(&args.journal)?;
     let mut journal = Journal::open(&directory).map_err(|err| err.to_string())?;
-    let report =
-        seed::apply(&mut journal, &plan, args.client.as_deref()).map_err(|err| err.to_string())?;
+    let report = seed::apply_with_tracker(&mut journal, &plan, args.client.as_deref(), tracker)
+        .map_err(|err| err.to_string())?;
     let refused = report.clones.iter().any(|clone| !clone.cloned);
     ran(emit(args.format, &report, write_report), refused)
 }

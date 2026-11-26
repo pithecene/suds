@@ -35,9 +35,15 @@ pub(crate) const EXIT_PARTIAL: u8 = 1;
 /// for a usage error.
 pub(crate) const EXIT_INVOCATION: u8 = 2;
 
+/// The process received a termination signal (`SIGINT`/`SIGTERM`).
+const EXIT_SIGNALLED: u8 = 143;
+
 fn main() -> ExitCode {
+    let _ = ctrlc::set_handler(|| {
+        suds_core::helper::request_global_cancel();
+    });
     let cli = Cli::parse();
-    match cli.command {
+    let code = match cli.command {
         Command::Inspect(args) => inspect(&args),
         Command::Plan(PlanCommand::Move(args)) => organize::plan_move_command(&args),
         Command::Apply(args) => organize::apply_command(&args),
@@ -52,7 +58,12 @@ fn main() -> ExitCode {
         Command::Maintain(args) => clients::maintain_command(&args),
         Command::Schedule(args) => clients::schedule_command(&args),
         Command::Arena(args) => clients::arena_command(&args),
+    };
+    suds_core::helper::drain_active_helpers();
+    if suds_core::helper::is_globally_cancelled() {
+        return ExitCode::from(EXIT_SIGNALLED);
     }
+    code
 }
 
 fn inspect(args: &InspectArgs) -> ExitCode {

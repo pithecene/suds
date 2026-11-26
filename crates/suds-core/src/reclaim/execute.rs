@@ -10,8 +10,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::budget::BudgetTracker;
 
 use crate::development::{self, Ecosystem};
 use crate::inspection::EntryRevision;
@@ -93,6 +97,13 @@ pub struct ApplyHooks<'a> {
     pub under_lock_before_remove: Option<&'a mut dyn FnMut(&Candidate)>,
 }
 
+/// Bounds applied to candidate verification, coordination lock waits, and removal.
+pub struct ExecutionBounds {
+    pub tracker: Arc<BudgetTracker>,
+    pub lock_timeout: Duration,
+    pub max_entries_per_candidate: Option<u64>,
+}
+
 /// Records `plan` and removes each candidate that it decided to remove. One
 /// refusal leaves the other candidates to proceed, and a journal failure
 /// stops the run.
@@ -101,7 +112,7 @@ pub fn apply(
     plan: &ReclaimPlan,
     conditions: Conditions<'_>,
 ) -> Result<ReclaimReport, JournalError> {
-    apply_with_hooks(journal, plan, conditions, ApplyHooks::default())
+    apply_with_bounds(journal, plan, conditions, ApplyHooks::default(), None)
 }
 
 /// Like [`apply`], invoking optional test hooks around the coordination lock.
@@ -109,7 +120,20 @@ pub fn apply_with_hooks(
     journal: &mut Journal,
     plan: &ReclaimPlan,
     conditions: Conditions<'_>,
+    hooks: ApplyHooks<'_>,
+) -> Result<ReclaimReport, JournalError> {
+    apply_with_bounds(journal, plan, conditions, hooks, None)
+}
+
+/// Like [`apply_with_hooks`], enforcing `bounds` across candidate verification,
+/// coordination lock acquisition, and candidate admission while preserving
+/// registration and removal exclusion.
+pub fn apply_with_bounds(
+    journal: &mut Journal,
+    plan: &ReclaimPlan,
+    conditions: Conditions<'_>,
     mut hooks: ApplyHooks<'_>,
+    bounds: Option<&ExecutionBounds>,
 ) -> Result<ReclaimReport, JournalError> {
     let Conditions {
         authority,
@@ -142,6 +166,22 @@ pub fn apply_with_hooks(
     order.sort_by_key(|(_, candidate)| candidate.subject != Subject::LinkedCheckout);
     let mut gone: Vec<&Path> = Vec::new();
     for (index, candidate) in order {
+        if bounds.is_some_and(|b| b.tracker.is_stopped()) {
+            let reason = "stopped by execution budget".to_owned();
+            journal.append(Event::RemovalRefused {
+                run: run.clone(),
+                index,
+                reason: reason.clone(),
+            })?;
+            removals.push(Removal {
+                index,
+                path: candidate.path.clone(),
+                removed: false,
+                freed_bytes: 0,
+                refusal: Some(reason),
+            });
+            continue;
+        }
         if gone
             .iter()
             .any(|checkout| candidate.path.as_path().starts_with(checkout))
@@ -177,6 +217,7 @@ pub fn apply_with_hooks(
             &judge,
             &plan.created_at,
             &Granted::new(),
+            bounds,
         ) {
             Err(reason) => Err(reason),
             Ok(checked) => {
@@ -210,15 +251,22 @@ pub fn apply_with_hooks(
                         &judge,
                         &plan.created_at,
                         &granted,
+                        bounds,
                     )
                 };
                 checked.and_then(|checked| {
                     if let Some(hook) = hooks.before_lock.as_deref_mut() {
                         hook(candidate);
                     }
-                    let _coord = match registry_path {
-                        Some(path) => Some(registry::lock(path)?),
-                        None => None,
+                    let _coord = match (registry_path, bounds) {
+                        (Some(path), Some(bounds)) => Some(registry::lock_bounded(
+                            path,
+                            bounds.tracker.cancel_flag(),
+                            bounds.lock_timeout,
+                            &run,
+                        )?),
+                        (Some(path), None) => Some(registry::lock(path)?),
+                        (None, _) => None,
                     };
                     // Re-read and verify registry ownership under the shared
                     // coordination lock so a concurrent registration cannot
@@ -268,7 +316,7 @@ pub fn apply_with_hooks(
                     if let Some(hook) = hooks.under_lock_before_remove.as_deref_mut() {
                         hook(candidate);
                     }
-                    remove(candidate, git).map(|()| checked.evidence)
+                    remove(candidate, git, _coord).map(|()| checked.evidence)
                 })
             }
         };
@@ -343,8 +391,9 @@ fn check(
     judge: &Judge<'_>,
     planned_at: &str,
     granted: &Granted,
+    bounds: Option<&ExecutionBounds>,
 ) -> Result<CheckedRemoval, String> {
-    let checked = judged(journal, candidate, authority, judge, planned_at)?;
+    let checked = judged(journal, candidate, authority, judge, planned_at, bounds)?;
     // The plan's approval covers the claims that the plan stated. The build
     // state of a main checkout has no claim.
     let claims = judge.claims(candidate.checkout.as_path(), candidate.path.as_path());
@@ -355,13 +404,46 @@ fn check(
             candidate.path.display()
         ));
     }
-    match changed(candidate.path.as_path(), planned_at, granted)? {
+    match changed_bounded(candidate.path.as_path(), planned_at, granted, bounds)? {
         None => Ok(checked),
         Some(entry) => Err(format!(
             "{} changed after Suds built the plan",
             entry.display()
         )),
     }
+}
+
+struct CandidateCapGuard {
+    tracker: Option<Arc<BudgetTracker>>,
+}
+
+impl Drop for CandidateCapGuard {
+    fn drop(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            tracker.set_phase_entry_cap(None);
+        }
+    }
+}
+
+/// Shares the parent [`BudgetTracker`] during candidate survey while enforcing
+/// any per-candidate sublimit through a scoped phase cap.
+fn candidate_scan(bounds: Option<&ExecutionBounds>) -> (scan::SharedScan, CandidateCapGuard) {
+    let Some(bounds) = bounds else {
+        return (
+            scan::SharedScan::default(),
+            CandidateCapGuard { tracker: None },
+        );
+    };
+    let cap = bounds
+        .max_entries_per_candidate
+        .map(|limit| bounds.tracker.entries_visited().saturating_add(limit));
+    bounds.tracker.set_phase_entry_cap(cap);
+    (
+        scan::SharedScan::with_tracker(Arc::clone(&bounds.tracker)),
+        CandidateCapGuard {
+            tracker: Some(Arc::clone(&bounds.tracker)),
+        },
+    )
 }
 
 /// Judges one removal anew. The directory must be the entry that the plan
@@ -372,6 +454,7 @@ fn judged(
     authority: Authority,
     judge: &Judge<'_>,
     planned_at: &str,
+    bounds: Option<&ExecutionBounds>,
 ) -> Result<CheckedRemoval, String> {
     let path = candidate.path.as_path();
     if journal.starts_with(path) {
@@ -402,6 +485,7 @@ fn judged(
             path.display()
         ));
     }
+    let (mut scan, _cap_guard) = candidate_scan(bounds);
     let (kept, mut evidence) = match candidate.subject {
         Subject::BuildState { ecosystem } => {
             if development::build_state_at(path) != Some(ecosystem) {
@@ -411,7 +495,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_build_state(path, ecosystem);
+            let (measure, survey, repositories) =
+                development::survey_build_state_with(path, ecosystem, &mut scan);
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             judge.build_state(
                 candidate.checkout.as_path(),
                 path,
@@ -431,7 +522,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_tree(path);
+            let (measure, survey, repositories) =
+                development::survey_tree_with(path, &mut scan, &mut |_, _| {});
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             let (kept, mut evidence) = judge.checkout(
                 path,
                 measure.newest_modified.as_deref(),
@@ -458,7 +556,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_tree(path);
+            let (measure, survey, repositories) =
+                development::survey_tree_with(path, &mut scan, &mut |_, _| {});
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             judge.fetched_toolchain(
                 candidate.checkout.as_path(),
                 path,
@@ -543,11 +648,40 @@ fn same_owner(candidate: &Candidate, judge: &Judge<'_>, planned_at: &str) -> Res
 /// The first entry at or beneath `path` whose status changed at `since` or
 /// later. No program sets the time of a status change, so a restore that keeps
 /// a file's modification time shows here.
+#[cfg(test)]
 fn changed(path: &Path, since: &str, granted: &Granted) -> Result<Option<PathBuf>, String> {
+    changed_bounded(path, since, granted, None)
+}
+
+fn changed_bounded(
+    path: &Path,
+    since: &str,
+    granted: &Granted,
+    bounds: Option<&ExecutionBounds>,
+) -> Result<Option<PathBuf>, String> {
     use std::os::unix::fs::MetadataExt;
     let mut device = None;
+    let mut visited: u64 = 0;
     let mut pending = vec![path.to_path_buf()];
     while let Some(entry) = pending.pop() {
+        if let Some(bounds) = bounds {
+            if !bounds.tracker.claim_entry() {
+                return Err(format!(
+                    "stopped verifying {} by execution budget",
+                    path.display()
+                ));
+            }
+            visited = visited.saturating_add(1);
+            if bounds
+                .max_entries_per_candidate
+                .is_some_and(|limit| visited > limit)
+            {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
+        }
         let unread = |err: std::io::Error| format!("could not read {}: {err}", entry.display());
         let meta = fs::symlink_metadata(&entry).map_err(unread)?;
         let crossed = *device.get_or_insert(meta.dev()) != meta.dev();
@@ -621,12 +755,17 @@ fn grant_owner_write(path: &Path, since: &str, granted: &mut Granted) {
     }
 }
 
-fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
+fn remove(
+    candidate: &Candidate,
+    git: &Git,
+    coord: Option<registry::CoordinationLock>,
+) -> Result<(), String> {
     let path = candidate.path.as_path();
     match candidate.subject {
         // The standard library removes a tree without following a symbolic
         // link, so a link inside build state loses only itself.
         Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => {
+            let _coord = coord;
             // Go writes each module beneath directories that no one may
             // write, so the removal first grants the owner that right.
             if matches!(candidate.subject, Subject::BuildState { ecosystem } if ecosystem == Ecosystem::Go)
@@ -641,7 +780,7 @@ fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
                 .repository
                 .as_ref()
                 .ok_or_else(|| format!("the plan names no repository for {}", path.display()))?;
-            git.remove_worktree(repository.as_path(), path)
+            git.remove_worktree_holding(repository.as_path(), path, coord)
         }
     }
 }

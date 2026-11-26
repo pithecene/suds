@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::helper::HelperRunner;
+
 /// The working directory of each process that the observation could read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Liveness {
@@ -83,16 +85,40 @@ impl Liveness {
         Ok(liveness)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn observe_with_runner(_runner: &HelperRunner) -> Result<Self, String> {
+        Self::observe()
+    }
+
     /// Asks `lsof`, which reads the system's process table, for each
-    /// process's working directory. macOS offers no file with that list.
+    /// process's working directory within default helper bounds.
+    #[cfg(target_os = "macos")]
+    pub fn observe() -> Result<Self, String> {
+        let runner = HelperRunner::new(crate::helper::HelperPolicy::default());
+        Self::observe_with_runner(&runner)
+    }
+
+    /// Asks `lsof` through `runner` for each process's working directory.
     /// Same-user processes whose working directory `lsof` could not read
     /// stay recorded as unreadable.
     #[cfg(target_os = "macos")]
-    pub fn observe() -> Result<Self, String> {
+    pub fn observe_with_runner(runner: &HelperRunner) -> Result<Self, String> {
+        use std::ffi::OsString;
+
         let this_user = rustix::process::getuid().as_raw();
-        let output = std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-d", "cwd", "-F", "pcun"])
-            .output()
+        let output = runner
+            .run(crate::helper::HelperSpec {
+                operation: "lsof".to_owned(),
+                program: PathBuf::from("/usr/sbin/lsof"),
+                args: ["-a", "-d", "cwd", "-F", "pcun"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                current_dir: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                stdin: None,
+            })
             .map_err(|err| format!("could not run /usr/sbin/lsof: {err}"))?;
         // The program exits with a failure when it cannot read one process,
         // and it still lists the others.

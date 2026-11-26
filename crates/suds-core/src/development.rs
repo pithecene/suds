@@ -585,6 +585,15 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
     inspect_with_budget(workspaces, environment, Budget::default())
 }
 
+/// Result of a bounded inspection slice, including completed and remaining
+/// pending checkouts so multi-run maintenance reaches nested worktrees.
+pub(crate) struct InspectSlice {
+    pub scan: DevelopmentScan,
+    pub completed_checkouts: Vec<PathBuf>,
+    pub remaining_pending: Vec<PathBuf>,
+    pub slice_capped: bool,
+}
+
 /// Like [`inspect`], governed by `budget`. An exhausted or cancelled budget
 /// stops admitting new work and marks the scan incomplete.
 pub fn inspect_with_budget(
@@ -592,9 +601,34 @@ pub fn inspect_with_budget(
     environment: &Environment,
     budget: Budget,
 ) -> DevelopmentScan {
-    let mut scan = SharedScan::with_budget(budget);
+    let tracker = crate::budget::BudgetTracker::new(budget);
+    inspect_with_tracker(workspaces, environment, tracker, &HashSet::new(), &[], None).scan
+}
+
+/// Inspects workspaces and stores sharing an existing `tracker`, resuming
+/// `seed_pending`, skipping `skip_checkouts`, and stopping at `scan_entry_cap`.
+pub(crate) fn inspect_with_tracker(
+    workspaces: &[PathBuf],
+    environment: &Environment,
+    tracker: Arc<crate::budget::BudgetTracker>,
+    skip_checkouts: &HashSet<PathBuf>,
+    seed_pending: &[PathBuf],
+    scan_entry_cap: Option<u64>,
+) -> InspectSlice {
+    tracker.set_phase_entry_cap(scan_entry_cap);
+    let mut scan = SharedScan::with_tracker(Arc::clone(&tracker));
     let mut found = Found::default();
     let mut results = Vec::new();
+    let mut completed_checkouts = Vec::new();
+    let mut remaining_pending = Vec::new();
+    for path in seed_pending {
+        if skip_checkouts.contains(path) {
+            continue;
+        }
+        if let Some(claimed @ Claim::Checkout(..)) = claim_at(path, false) {
+            found.take(&mut scan, path.clone(), claimed, None);
+        }
+    }
     for path in outermost(workspaces) {
         if scan.is_stopped() {
             results.push(Workspace {
@@ -615,7 +649,9 @@ pub fn inspect_with_budget(
             scan.measure(path, Arc::new(|entry| claim_of(entry, false).is_some()))
         {
             workspace.unclassified = bounded.measure;
-            for dir in bounded.set_aside {
+            let mut set_aside = bounded.set_aside;
+            set_aside.sort();
+            for dir in set_aside {
                 if scan.is_stopped() {
                     break;
                 }
@@ -629,15 +665,23 @@ pub fn inspect_with_budget(
         results.push(workspace);
     }
     while let Some(mut checkout) = found.pending.pop_front() {
+        if skip_checkouts.contains(&checkout.path) {
+            continue;
+        }
         if scan.is_stopped() {
+            remaining_pending.push(checkout.path);
             break;
         }
+        let deferred_before = scan.directories_deferred();
+        let mut checkout_complete = false;
         if let Some(bounded) = scan.measure(
             &checkout.path,
             Arc::new(|entry| claim_of(entry, true).is_some()),
         ) {
             checkout.own = bounded.measure;
-            for dir in bounded.set_aside {
+            let mut set_aside = bounded.set_aside;
+            set_aside.sort();
+            for dir in set_aside {
                 if scan.is_stopped() {
                     break;
                 }
@@ -647,7 +691,9 @@ pub fn inspect_with_budget(
                         // the build. Any other one is a checkout, and the
                         // report lists it as one.
                         let build = measure_build(&mut scan, &dir, ecosystem);
-                        for path in build.unproven {
+                        let mut unproven = build.unproven;
+                        unproven.sort();
+                        for path in unproven {
                             if scan.is_stopped() {
                                 break;
                             }
@@ -669,66 +715,99 @@ pub fn inspect_with_budget(
                     None => {}
                 }
             }
+            checkout_complete =
+                !scan.is_stopped() && deferred_before == scan.directories_deferred();
+        }
+        if checkout_complete {
+            completed_checkouts.push(checkout.path.clone());
+        } else {
+            // Retain unfinished checkouts so the next bounded run resumes them.
+            remaining_pending.push(checkout.path.clone());
         }
         found.checkouts.push(checkout);
-    }
-    for spec in store_specs(environment) {
         if scan.is_stopped() {
             break;
         }
-        let Some(path) = spec.path else {
-            continue;
-        };
-        // A workspace may hold a machines directory, and the walk has then
-        // counted each machine in it already.
-        let counted =
-            |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
-        if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
-            continue;
-        }
-        let examined = examine_store(&path, environment.home.as_deref());
-        if let Err(err) = &examined {
-            scan.record_error(&path, err);
-        }
-        let present = matches!(examined, Ok(true));
-        let status = if examined.is_err() {
-            StoreStatus::Unreadable
-        } else if !present {
-            StoreStatus::Absent
-        } else if spec
-            .marker
-            .is_some_and(|marker| fs::symlink_metadata(path.join(marker)).is_err())
-        {
-            StoreStatus::Unrecognized
-        } else {
-            StoreStatus::Present
-        };
-        let measure = if present {
-            measure_whole(&mut scan, &path)
-        } else {
-            Measure::default()
-        };
-        found.stores.push(Store {
-            id: spec.id.to_owned(),
-            class: spec.class,
-            ecosystem: spec.ecosystem,
-            path,
-            status,
-            measure,
-            owner: None,
-        });
     }
-    DevelopmentScan {
-        workspaces: results,
-        checkouts: found.checkouts,
-        stores: found.stores,
-        outcome: scan.outcome(),
-        entries_visited: scan.entries_visited(),
-        directories_deferred: scan.directories_deferred(),
-        draining_workers: scan.draining_workers(),
-        skipped_mount_count: scan.skipped_mount_count(),
-        error_count: scan.error_count(),
-        errors: scan.errors().to_vec(),
+    for pending in found.pending {
+        if !skip_checkouts.contains(&pending.path) {
+            remaining_pending.push(pending.path);
+        }
+    }
+    remaining_pending.sort();
+    remaining_pending.dedup();
+    remaining_pending.retain(|p| !completed_checkouts.contains(p));
+    if skip_checkouts.is_empty() && seed_pending.is_empty() && !scan.is_stopped() {
+        for spec in store_specs(environment) {
+            if scan.is_stopped() {
+                break;
+            }
+            let Some(path) = spec.path else {
+                continue;
+            };
+            // A workspace may hold a machines directory, and the walk has then
+            // counted each machine in it already.
+            let counted =
+                |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
+            if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
+                continue;
+            }
+            let examined = examine_store(&path, environment.home.as_deref());
+            if let Err(err) = &examined {
+                scan.record_error(&path, err);
+            }
+            let present = matches!(examined, Ok(true));
+            let status = if examined.is_err() {
+                StoreStatus::Unreadable
+            } else if !present {
+                StoreStatus::Absent
+            } else if spec
+                .marker
+                .is_some_and(|marker| fs::symlink_metadata(path.join(marker)).is_err())
+            {
+                StoreStatus::Unrecognized
+            } else {
+                StoreStatus::Present
+            };
+            let measure = if present {
+                measure_whole(&mut scan, &path)
+            } else {
+                Measure::default()
+            };
+            found.stores.push(Store {
+                id: spec.id.to_owned(),
+                class: spec.class,
+                ecosystem: spec.ecosystem,
+                path,
+                status,
+                measure,
+                owner: None,
+            });
+        }
+    }
+    let slice_capped = tracker.is_phase_capped();
+    let outcome = if slice_capped && scan.outcome().is_complete() {
+        ExecutionOutcome::Exhausted
+    } else {
+        scan.outcome()
+    };
+    tracker.set_phase_entry_cap(None);
+    InspectSlice {
+        scan: DevelopmentScan {
+            workspaces: results,
+            checkouts: found.checkouts,
+            stores: found.stores,
+            outcome,
+            entries_visited: scan.entries_visited(),
+            directories_deferred: scan.directories_deferred(),
+            draining_workers: scan.draining_workers(),
+            skipped_mount_count: scan.skipped_mount_count(),
+            error_count: scan.error_count(),
+            errors: scan.errors().to_vec(),
+        },
+        completed_checkouts,
+        remaining_pending,
+        slice_capped,
     }
 }
 
@@ -846,14 +925,15 @@ fn measure_build(scan: &mut SharedScan, path: &Path, ecosystem: Ecosystem) -> Bu
     }
 }
 
-/// Measures and surveys the build state at `path` in a scan of its own, so
-/// that a removal can verify the directory as it stands. The result names
-/// each repository that the build fetched.
-pub(crate) fn survey_build_state(
+/// Measures and surveys the build state at `path` sharing `scan`, so that a
+/// removal or seed can verify the directory within its execution budget. The
+/// result names each repository that the build fetched.
+pub(crate) fn survey_build_state_with(
     path: &Path,
     ecosystem: Ecosystem,
+    scan: &mut SharedScan,
 ) -> (Measure, Survey, Vec<PathBuf>) {
-    let found = measure_build(&mut SharedScan::default(), path, ecosystem);
+    let found = measure_build(scan, path, ecosystem);
     (found.measure, found.survey, found.fetched)
 }
 

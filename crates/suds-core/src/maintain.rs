@@ -185,8 +185,8 @@ pub fn maintain_with_budget(
         .map(|cursor| cursor.completed_checkouts.into_iter().collect())
         .unwrap_or_default();
     // Reserve 20% of the unified entry budget for verification and bounded
-    // reclamation when standing approval is enabled so partial slices still
-    // reclaim completed checkouts without resetting the run's entry budget.
+    // reclamation under standing approval so partial slices still reclaim
+    // completed checkouts without resetting the run's entry budget.
     let scan_entry_cap = if settings.standing_approval {
         budget
             .max_entries

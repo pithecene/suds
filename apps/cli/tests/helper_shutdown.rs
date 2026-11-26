@@ -52,24 +52,32 @@ fn cli_sigterm_terminates_separate_helper_group_and_preserves_lock_exclusion() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&repo).unwrap();
 
-    run_git(&base, &["init", "--bare", "remote.git"]);
-    run_git(&repo, &["init", "-b", "main"]);
-    run_git(&repo, &["config", "user.email", "test@example.com"]);
-    run_git(&repo, &["config", "user.name", "Test"]);
-    fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+    for (dir, args) in [
+        (&base, &["init", "--bare", "remote.git"][..]),
+        (&repo, &["init", "-b", "main"][..]),
+        (&repo, &["config", "user.email", "cli@example.com"][..]),
+        (&repo, &["config", "user.name", "Cli"][..]),
+    ] {
+        run_git(dir, args);
+    }
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"cli-test\"\n").unwrap();
     fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
-    run_git(&repo, &["add", "."]);
-    run_git(&repo, &["commit", "-m", "initial"]);
-    run_git(
-        &repo,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
-    );
-    run_git(&repo, &["push", "origin", "main"]);
-    run_git(
-        &repo,
-        &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
-    );
-    run_git(&linked, &["push", "origin", "feature"]);
+    for (dir, args) in [
+        (&repo, vec!["add", "."]),
+        (&repo, vec!["commit", "-m", "seed"]),
+        (
+            &repo,
+            vec!["remote", "add", "origin", remote.to_str().unwrap()],
+        ),
+        (&repo, vec!["push", "origin", "main"]),
+        (
+            &repo,
+            vec!["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        ),
+        (&linked, vec!["push", "origin", "feature"]),
+    ] {
+        run_git(dir, &args);
+    }
 
     let env = Environment {
         home: Some(home.clone()),
@@ -190,7 +198,7 @@ fn cli_sigterm_terminates_separate_helper_group_and_preserves_lock_exclusion() {
         .parse()
         .unwrap();
 
-    // While the helper is active, the coordination lock MUST be held.
+    // The active helper holds the coordination lock.
     let contended = registry::lock_bounded(
         &registry_path,
         &AtomicBool::new(false),
@@ -199,7 +207,7 @@ fn cli_sigterm_terminates_separate_helper_group_and_preserves_lock_exclusion() {
     );
     assert!(
         contended.is_err(),
-        "coordination lock must remain held while mutating helper is active"
+        "mutating helper must hold the coordination lock"
     );
 
     // Send SIGTERM to the real `suds` CLI parent process.
@@ -221,7 +229,7 @@ fn cli_sigterm_terminates_separate_helper_group_and_preserves_lock_exclusion() {
     };
     assert!(
         !status.success(),
-        "signalled suds CLI must exit non-zero, got {status}"
+        "signalled suds CLI must exit non-zero, status {status}"
     );
 
     // The separate helper process group must already be dead on CLI exit.

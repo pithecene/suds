@@ -26,7 +26,7 @@ fn draining_handles() -> &'static Mutex<Vec<std::thread::JoinHandle<()>>> {
     DRAINING_HANDLES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Whether process-wide cancellation (`SIGINT`/`SIGTERM`) has been requested.
+/// Whether a signal requested process-wide cancellation (`SIGINT`/`SIGTERM`).
 pub fn is_globally_cancelled() -> bool {
     GLOBAL_CANCEL.load(Ordering::Acquire)
 }
@@ -52,9 +52,8 @@ fn kill_all_active_groups() {
     }
 }
 
-/// Kills any remaining active helper process groups and joins all draining
-/// helper worker threads so process exit never drops exclusion locks before
-/// child process groups are terminated and reaped.
+/// Kills active helper process groups and joins draining worker threads so
+/// process exit drops no exclusion lock before every child exits and reaps.
 pub fn drain_active_helpers() {
     kill_all_active_groups();
     let handles: Vec<std::thread::JoinHandle<()>> = {
@@ -385,11 +384,9 @@ impl HelperRunner {
         self.run_inner(spec, (), false).map(|(output, ())| output)
     }
 
-    /// Executes `spec` while holding `guard` inside the helper worker until
-    /// the child process group finishes or terminates and reaps. On timeout or
-    /// cancellation, sends `SIGKILL` to the helper process group and waits for
-    /// the worker to finish reaping before returning so CLI exit cannot drop
-    /// exclusion locks while a mutating helper still runs.
+    /// Executes `spec` while holding `guard` until the child group exits and
+    /// reaps. On timeout or cancellation, kills the group and joins the worker
+    /// before returning so exclusion holds through shutdown.
     pub fn run_holding<G: Send + 'static>(
         &self,
         spec: HelperSpec,

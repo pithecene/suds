@@ -43,20 +43,46 @@ fn run_git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+fn init_cargo_repo(repo: &Path, gitignore: &str) {
+    fs::create_dir_all(repo).unwrap();
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "test@example.com"]);
+    run_git(repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+    fs::write(repo.join(".gitignore"), gitignore).unwrap();
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "initial"]);
+}
+
+fn populate_cargo_target(repo: &Path, file_count: usize) -> PathBuf {
+    let target = repo.join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
+    for i in 0..file_count {
+        fs::write(target.join("debug").join(format!("obj-{i}")), "bin").unwrap();
+    }
+    target
+}
+
+fn write_unique_orig_head(linked: &Path) -> PathBuf {
+    let pushed_head = run_git(linked, &["rev-parse", "HEAD"]);
+    fs::write(linked.join("unique.txt"), "precious\n").unwrap();
+    run_git(linked, &["add", "unique.txt"]);
+    run_git(linked, &["commit", "-m", "unique unpushed"]);
+    let unique_oid = run_git(linked, &["rev-parse", "HEAD"]);
+    run_git(linked, &["reset", "--hard", &pushed_head]);
+    let orig_head = worktree_git_dir(linked).join("ORIG_HEAD");
+    fs::write(&orig_head, format!("{unique_oid}\n")).unwrap();
+    orig_head
+}
+
 fn setup_repo_with_linked_worktree(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let workspace = base.join("workspace");
     let repo = workspace.join("repo");
     let remote = base.join("remote.git");
     let linked = repo.join(".worktrees/feature");
-    fs::create_dir_all(&repo).unwrap();
     run_git(base, &["init", "--bare", "remote.git"]);
-    run_git(&repo, &["init", "-b", "main"]);
-    run_git(&repo, &["config", "user.email", "test@example.com"]);
-    run_git(&repo, &["config", "user.name", "Test"]);
-    fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
-    fs::write(repo.join(".gitignore"), "target/\n.worktrees/\n").unwrap();
-    run_git(&repo, &["add", "."]);
-    run_git(&repo, &["commit", "-m", "initial"]);
+    init_cargo_repo(&repo, "target/\n.worktrees/\n");
     run_git(
         &repo,
         &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -111,14 +137,7 @@ fn pseudoref_probe_timeout_keeps_worktree_with_unique_orig_head_commit() {
     let (workspace, _repo, linked) = setup_repo_with_linked_worktree(&base);
 
     // Create a unique unpushed commit and record it only in ORIG_HEAD before resetting HEAD back.
-    let pushed_head = run_git(&linked, &["rev-parse", "HEAD"]);
-    fs::write(linked.join("unique.txt"), "precious\n").unwrap();
-    run_git(&linked, &["add", "unique.txt"]);
-    run_git(&linked, &["commit", "-m", "unique unpushed"]);
-    let unique_oid = run_git(&linked, &["rev-parse", "HEAD"]);
-    run_git(&linked, &["reset", "--hard", &pushed_head]);
-    let git_dir = worktree_git_dir(&linked);
-    fs::write(git_dir.join("ORIG_HEAD"), format!("{unique_oid}\n")).unwrap();
+    let _orig_head = write_unique_orig_head(&linked);
 
     // A stub git that sleeps during `cat-file` simulates a stalled pseudoreference probe.
     let stub = base.join("slow-git");
@@ -249,12 +268,7 @@ fn bounded_removal_defers_oversized_candidate_and_stops_on_cancellation() {
     let base = tmp.path().canonicalize().unwrap();
     let (workspace, repo, _linked) = setup_repo_with_linked_worktree(&base);
 
-    let target = repo.join("target");
-    fs::create_dir_all(target.join("debug")).unwrap();
-    fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
-    for i in 0..25 {
-        fs::write(target.join("debug").join(format!("obj-{i}")), "bin").unwrap();
-    }
+    let target = populate_cargo_target(&repo, 25);
 
     let registry_path = base.join("registry.jsonl");
     let scan = inspect(&[workspace], &Environment::default());
@@ -380,15 +394,7 @@ fn unreadable_orig_head_with_unique_commit_keeps_worktree() {
     let (workspace, _repo, linked) = setup_repo_with_linked_worktree(&base);
 
     // Create a unique unpushed commit retained only in ORIG_HEAD.
-    let pushed_head = run_git(&linked, &["rev-parse", "HEAD"]);
-    fs::write(linked.join("unique.txt"), "precious\n").unwrap();
-    run_git(&linked, &["add", "unique.txt"]);
-    run_git(&linked, &["commit", "-m", "unique unpushed"]);
-    let unique_oid = run_git(&linked, &["rev-parse", "HEAD"]);
-    run_git(&linked, &["reset", "--hard", &pushed_head]);
-    let git_dir = worktree_git_dir(&linked);
-    let orig_head = git_dir.join("ORIG_HEAD");
-    fs::write(&orig_head, format!("{unique_oid}\n")).unwrap();
+    let orig_head = write_unique_orig_head(&linked);
 
     // Make ORIG_HEAD unreadable: Git's `cat-file --batch-check` exits 0 with
     // `ORIG_HEAD missing` and empty stderr, yet `git status` stays clean.
@@ -426,12 +432,7 @@ fn bounded_seeding_stops_cleanly_and_cleans_staged_directory() {
     let base = tmp.path().canonicalize().unwrap();
     let (_workspace, repo, linked) = setup_repo_with_linked_worktree(&base);
 
-    let target = repo.join("target");
-    fs::create_dir_all(target.join("debug")).unwrap();
-    fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
-    for i in 0..40 {
-        fs::write(target.join("debug").join(format!("obj-{i}")), "bin").unwrap();
-    }
+    let _target = populate_cargo_target(&repo, 40);
 
     let git = Git::default();
     let plan = suds_core::seed::plan_seed(&linked, Some(&repo), &git).unwrap();
@@ -470,22 +471,8 @@ fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget(
     let mut targets = Vec::new();
     for name in ["repo-a", "repo-b", "repo-c"] {
         let repo = workspace.join(name);
-        fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "test@example.com"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-        fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
-        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
-        run_git(&repo, &["add", "."]);
-        run_git(&repo, &["commit", "-m", "initial"]);
-
-        let target = repo.join("target");
-        fs::create_dir_all(target.join("debug")).unwrap();
-        fs::write(target.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
-        for i in 0..20 {
-            fs::write(target.join("debug").join(format!("artifact-{i}")), "data").unwrap();
-        }
-        targets.push(target);
+        init_cargo_repo(&repo, "target/\n");
+        targets.push(populate_cargo_target(&repo, 20));
     }
 
     let dirs = suds_core::state::Directories {
@@ -511,10 +498,9 @@ fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget(
         now: FUTURE_NOW,
     };
 
-    // Budget is smaller than the full 3-repo workspace (~180+ entries) yet large
-    // enough for 1+ repo plus verification/reclamation (~90 entries), so no
-    // single run finishes everything while each run advances via the cursor
-    // and reclaims completed checkouts without exceeding max_entries.
+    // Cap each run below the full 3-repo workspace (~180 entries) while
+    // leaving room for at least one repo and its reclamation (~90 entries).
+    // Successive runs advance via the cursor without exceeding max_entries.
     let per_run_cap = 150;
     let mut clock_now = FUTURE_NOW;
     let mut saw_partial_cursor = false;

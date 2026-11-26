@@ -604,9 +604,9 @@ pub fn inspect_with_budget(
     inspect_with_tracker(workspaces, environment, tracker, &HashSet::new(), None).scan
 }
 
-/// Inspects workspaces and stores sharing an existing `tracker`, skipping any
-/// checkout already listed in `skip_checkouts`, and stopping checkout admission
-/// once `scan_entry_cap` is reached so maintenance preserves verification budget.
+/// Inspects workspaces and stores sharing an existing `tracker`, skipping
+/// checkouts listed in `skip_checkouts` and stopping checkout admission at
+/// `scan_entry_cap` so maintenance preserves verification budget.
 pub(crate) fn inspect_with_tracker(
     workspaces: &[PathBuf],
     environment: &Environment,

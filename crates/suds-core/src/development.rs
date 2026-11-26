@@ -18,6 +18,7 @@ use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::ahead::{Entry, Layout};
+use crate::budget::{Budget, ExecutionOutcome};
 use crate::inspection::ScanError;
 use crate::model::{EntryKind, Measure, Platform, ReportStatus, TraversalError};
 use crate::roots::normalize;
@@ -187,6 +188,10 @@ pub struct DevelopmentScan {
     pub workspaces: Vec<Workspace>,
     pub checkouts: Vec<Checkout>,
     pub stores: Vec<Store>,
+    pub outcome: ExecutionOutcome,
+    pub entries_visited: u64,
+    pub directories_deferred: u64,
+    pub draining_workers: usize,
     pub skipped_mount_count: u64,
     pub error_count: u64,
     /// The first traversal errors, in traversal order.
@@ -505,8 +510,11 @@ pub(crate) fn is_checkout(dir: &Path) -> bool {
 /// own measures. The result also counts the entries that the scan could not
 /// read and holds the first one. A checkout beneath it keeps its own build
 /// state.
-pub(crate) fn build_states(checkout: &Path) -> (Vec<BuildState>, u64, Option<ScanError>) {
-    let mut scan = SharedScan::default();
+pub(crate) fn build_states_with_budget(
+    checkout: &Path,
+    budget: Budget,
+) -> (Vec<BuildState>, u64, Option<ScanError>) {
+    let mut scan = SharedScan::with_budget(budget);
     let claims = Arc::new(|entry: &Entry<'_>| claim_of(entry, true).is_some());
     let Some(bounded) = scan.measure(checkout, claims) else {
         return (
@@ -517,6 +525,9 @@ pub(crate) fn build_states(checkout: &Path) -> (Vec<BuildState>, u64, Option<Sca
     };
     let mut states = Vec::new();
     for dir in bounded.set_aside {
+        if scan.is_stopped() {
+            break;
+        }
         if let Some(Claim::Build(ecosystem)) = claim_at(&dir, true) {
             let build = measure_build(&mut scan, &dir, ecosystem);
             states.push(BuildState {
@@ -573,10 +584,28 @@ pub(crate) fn linked_repository(dir: &Path, git: &Path) -> Option<PathBuf> {
 /// come first, so a file that a checkout shares with a store through a hard
 /// link counts toward the checkout, as `du` counts it there.
 pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> DevelopmentScan {
-    let mut scan = SharedScan::default();
+    inspect_with_budget(workspaces, environment, Budget::default())
+}
+
+/// Like [`inspect`], governed by `budget`. An exhausted or cancelled budget
+/// stops admitting new work and marks the scan incomplete.
+pub fn inspect_with_budget(
+    workspaces: &[PathBuf],
+    environment: &Environment,
+    budget: Budget,
+) -> DevelopmentScan {
+    let mut scan = SharedScan::with_budget(budget);
     let mut found = Found::default();
     let mut results = Vec::new();
     for path in outermost(workspaces) {
+        if scan.is_stopped() {
+            results.push(Workspace {
+                path: path.clone(),
+                measured: false,
+                unclassified: Measure::default(),
+            });
+            continue;
+        }
         let mut workspace = Workspace {
             path: path.clone(),
             measured: true,
@@ -589,6 +618,9 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         {
             workspace.unclassified = bounded.measure;
             for dir in bounded.set_aside {
+                if scan.is_stopped() {
+                    break;
+                }
                 if let Some(claimed) = claim_at(&dir, false) {
                     found.take(&mut scan, dir, claimed, None);
                 }
@@ -599,12 +631,18 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         results.push(workspace);
     }
     while let Some(mut checkout) = found.pending.pop_front() {
+        if scan.is_stopped() {
+            break;
+        }
         if let Some(bounded) = scan.measure(
             &checkout.path,
             Arc::new(|entry| claim_of(entry, true).is_some()),
         ) {
             checkout.own = bounded.measure;
             for dir in bounded.set_aside {
+                if scan.is_stopped() {
+                    break;
+                }
                 match claim_at(&dir, true) {
                     Some(Claim::Build(ecosystem)) => {
                         // A repository that the build fetched belongs to
@@ -612,6 +650,9 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
                         // report lists it as one.
                         let build = measure_build(&mut scan, &dir, ecosystem);
                         for path in build.unproven {
+                            if scan.is_stopped() {
+                                break;
+                            }
                             if let Some(claimed) = claim_at(&path, false) {
                                 found.take(&mut scan, path, claimed, Some(&checkout.path));
                             }
@@ -634,6 +675,9 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         found.checkouts.push(checkout);
     }
     for spec in store_specs(environment) {
+        if scan.is_stopped() {
+            break;
+        }
         let Some(path) = spec.path else {
             continue;
         };
@@ -680,6 +724,10 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
         workspaces: results,
         checkouts: found.checkouts,
         stores: found.stores,
+        outcome: scan.outcome(),
+        entries_visited: scan.entries_visited(),
+        directories_deferred: scan.directories_deferred(),
+        draining_workers: scan.draining_workers(),
         skipped_mount_count: scan.skipped_mount_count(),
         error_count: scan.error_count(),
         errors: scan.errors().to_vec(),
@@ -1020,7 +1068,9 @@ pub fn build_report(scan: &DevelopmentScan, observed_at: i64) -> DevelopmentRepo
             StoreClass::Machine => totals.machines.add(&store.measure),
         }
     }
-    let complete = scan.error_count == 0 && scan.workspaces.iter().all(|w| w.measured);
+    let complete = scan.outcome.is_complete()
+        && scan.error_count == 0
+        && scan.workspaces.iter().all(|w| w.measured);
     DevelopmentReport {
         schema: DEVELOPMENT_SCHEMA.to_owned(),
         platform: Platform {

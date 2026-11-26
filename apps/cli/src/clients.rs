@@ -14,8 +14,11 @@ use suds_core::reclaim::git::Git;
 use suds_core::registry::{self, Event, Record};
 use suds_core::roots;
 use suds_core::schedule::{self, Change, InstallPlan, Standing, Unit, UnitFile};
-use suds_core::state::{Directories, load_settings};
+use suds_core::state::{
+    self, Directories, PAUSE_SCHEMA, PauseState, clear_pause, load_settings, write_pause,
+};
 use suds_core::stores::Programs;
+use suds_core::timestamp;
 
 use crate::cli::{
     ArenaArgs, Format, HoldArgs, MaintainArgs, PressureArgs, ScheduleArgs, Scheduler,
@@ -131,6 +134,53 @@ pub fn maintain_command(args: &MaintainArgs) -> ExitCode {
 
 fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
     let directories = directories()?;
+    let pause_path = directories.pause();
+    if args.pause {
+        let state = PauseState {
+            schema: PAUSE_SCHEMA.to_owned(),
+            paused: true,
+            reason: args.reason.clone(),
+            updated_at: timestamp::format_utc(now_seconds()),
+        };
+        write_pause(&pause_path, &state)?;
+        return planned(emit(args.format, &state, |out, state| {
+            writeln!(out, "paused: {} ({})", state.paused, state.updated_at)
+        }));
+    }
+    if args.resume {
+        clear_pause(&pause_path)?;
+        let state = PauseState {
+            schema: PAUSE_SCHEMA.to_owned(),
+            paused: false,
+            reason: None,
+            updated_at: timestamp::format_utc(now_seconds()),
+        };
+        return planned(emit(args.format, &state, |out, state| {
+            writeln!(out, "paused: {} ({})", state.paused, state.updated_at)
+        }));
+    }
+    if args.status {
+        let pause = state::read_pause(&pause_path)?;
+        let pressure = maintain::read_pressure(&directories.pressure());
+        let snapshot = serde_json::json!({
+            "paused": pause.as_ref().is_some_and(|p| p.paused),
+            "pause": pause,
+            "pressure": pressure,
+        });
+        return planned(emit(args.format, &snapshot, |out, snap| {
+            let paused = snap["paused"].as_bool().unwrap_or(false);
+            writeln!(
+                out,
+                "maintenance: {}",
+                if paused { "paused" } else { "active" }
+            )?;
+            if let Some(p) = &pressure {
+                write_pressure(out, p)?;
+            }
+            Ok(())
+        }));
+    }
+
     let settings = load_settings(&directories.settings())?;
     let context = Context {
         directories: &directories,
@@ -140,21 +190,30 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
         now: now_seconds(),
     };
     let report = maintain::maintain(&settings, &context)?;
-    let partial = report.error_count > 0
-        || report
-            .reclaim
-            .iter()
-            .flat_map(|reclaim| &reclaim.removals)
-            .any(|removal| !removal.removed)
-        || report
-            .stores
-            .iter()
-            .flat_map(|stores| &stores.trims)
-            .any(|trim| trim.failure.is_some());
+    let partial = !report.paused
+        && (!report.outcome.is_complete()
+            || report.error_count > 0
+            || report
+                .reclaim
+                .iter()
+                .flat_map(|reclaim| &reclaim.removals)
+                .any(|removal| !removal.removed)
+            || report
+                .stores
+                .iter()
+                .flat_map(|stores| &stores.trims)
+                .any(|trim| trim.failure.is_some()));
     ran(emit(args.format, &report, write_maintenance), partial)
 }
 
 fn write_maintenance(out: &mut impl Write, report: &MaintenanceReport) -> io::Result<()> {
+    if report.paused {
+        match &report.pause_reason {
+            Some(reason) => writeln!(out, "Suds paused maintenance: {reason}")?,
+            None => writeln!(out, "Suds paused maintenance.")?,
+        }
+        return write_pressure(out, &report.pressure);
+    }
     write_pressure(out, &report.pressure)?;
     if !report.standing_approval {
         return writeln!(

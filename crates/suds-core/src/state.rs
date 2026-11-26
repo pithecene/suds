@@ -63,6 +63,12 @@ impl Directories {
         self.state.join("pressure.json")
     }
 
+    /// Durable pause state preserved across schedule reinstalls, logins, and
+    /// reboots. Reading or writing pause never requires the mutation lock.
+    pub fn pause(&self) -> PathBuf {
+        self.state.join("pause.json")
+    }
+
     /// The last reading that the desktop application showed.
     pub fn reading(&self) -> PathBuf {
         self.state.join("reading.json")
@@ -124,6 +130,55 @@ impl Default for Settings {
             tolerate_unreadable_processes: false,
             budgets: HashMap::new(),
         }
+    }
+}
+
+/// Schema tag of the durable maintenance pause record.
+pub const PAUSE_SCHEMA: &str = "suds.pause/v1";
+
+/// Operational pause state persisted outside the generated scheduler unit so
+/// installing, reloading, or restarting a schedule never silently resumes
+/// unattended maintenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseState {
+    pub schema: String,
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub updated_at: String,
+}
+
+/// Reads the pause record at `path`. Missing means not paused (`Ok(None)`).
+/// Unreadable or malformed files return `Err` so automatic entries fail closed.
+pub fn read_pause(path: &Path) -> Result<Option<PauseState>, String> {
+    let text = match fs::read(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("could not read {}: {err}", path.display())),
+    };
+    let parsed: PauseState = serde_json::from_slice(&text).map_err(|err| {
+        format!(
+            "{} holds no pause record that Suds reads: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(parsed))
+}
+
+/// Persists `state` atomically at `path` without taking any mutation lock.
+pub fn write_pause(path: &Path, state: &PauseState) -> Result<(), String> {
+    let failed = |err: io::Error| format!("could not write {}: {err}", path.display());
+    let text = serde_json::to_vec_pretty(state).map_err(|err| failed(err.into()))?;
+    write_staged(path, &text).map_err(failed)
+}
+
+/// Clears any pause record at `path`.
+pub fn clear_pause(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("could not remove {}: {err}", path.display())),
     }
 }
 

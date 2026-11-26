@@ -294,6 +294,16 @@ impl HelperRunner {
     /// Executes `spec` within this runner's concurrency, rate, output, and
     /// deadline bounds. The deadline covers both `spawn` and process wait.
     pub fn run(&self, spec: HelperSpec) -> Result<HelperOutput, HelperError> {
+        self.run_holding(spec, ()).map(|(output, ())| output)
+    }
+
+    /// Executes `spec` while holding `guard` inside the helper worker until
+    /// the child process group finishes or terminates.
+    pub fn run_holding<G: Send + 'static>(
+        &self,
+        spec: HelperSpec,
+        guard: G,
+    ) -> Result<(HelperOutput, G), HelperError> {
         if self.policy.cancel.load(Ordering::Acquire) {
             return Err(HelperError::Cancelled {
                 operation: spec.operation,
@@ -308,7 +318,7 @@ impl HelperRunner {
             });
         }
         let deadline = self.effective_deadline();
-        let guard = self.acquire_slot(&spec.operation, &spec.program, deadline)?;
+        let slot_guard = self.acquire_slot(&spec.operation, &spec.program, deadline)?;
         if let Some(limit) = self.policy.max_launches {
             let next = self.launches.fetch_add(1, Ordering::AcqRel) + 1;
             if next > limit {
@@ -326,7 +336,7 @@ impl HelperRunner {
         let slot_cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&slot_cancel);
         let shared_cancel = Arc::clone(&self.policy.cancel);
-        let marked_draining = Arc::clone(&guard.marked_draining);
+        let marked_draining = Arc::clone(&slot_guard.marked_draining);
         let max_output = self.policy.max_output_bytes;
         let background = self.policy.background_priority;
         let operation = spec.operation.clone();
@@ -336,12 +346,12 @@ impl HelperRunner {
         let spawn_result = std::thread::Builder::new()
             .name("suds-helper".to_owned())
             .spawn(move || {
-                let _guard = guard;
+                let _slot_guard = slot_guard;
                 if background {
                     budget::apply_background_thread_policy();
                 }
                 let result = run_worker(spec, max_output, deadline, &worker_cancel, &shared_cancel);
-                let _ = tx.send(result);
+                let _ = tx.send(result.map(|output| (output, guard)));
             });
         if let Err(err) = spawn_result {
             return Err(HelperError::SpawnFailed {
@@ -387,6 +397,16 @@ impl HelperRunner {
     }
 }
 
+fn terminate_group(child: &mut std::process::Child) {
+    if let Ok(raw) = i32::try_from(child.id())
+        && let Some(pgid) = rustix::process::Pid::from_raw(raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn read_bounded(mut stream: impl Read, limit: usize) -> Result<Vec<u8>, io::Error> {
     let mut out = Vec::new();
     let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
@@ -429,8 +449,7 @@ fn run_worker(
     })?;
 
     if slot_cancel.load(Ordering::Acquire) || shared_cancel.load(Ordering::Acquire) {
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_group(&mut child);
         return Err(HelperError::Cancelled {
             operation: spec.operation,
         });
@@ -450,36 +469,44 @@ fn run_worker(
     let stderr_pipe = child.stderr.take();
     let (out_tx, out_rx) = mpsc::channel();
     let (err_tx, err_rx) = mpsc::channel();
-    if let Some(pipe) = stdout_pipe {
-        let _ = std::thread::Builder::new()
+    let out_handle = stdout_pipe.and_then(|pipe| {
+        std::thread::Builder::new()
             .name("suds-helper-out".to_owned())
             .spawn(move || {
                 let _ = out_tx.send(read_bounded(pipe, max_output));
-            });
-    } else {
-        let _ = out_tx.send(Ok(Vec::new()));
-    }
-    if let Some(pipe) = stderr_pipe {
-        let _ = std::thread::Builder::new()
+            })
+            .ok()
+    });
+    let err_handle = stderr_pipe.and_then(|pipe| {
+        std::thread::Builder::new()
             .name("suds-helper-err".to_owned())
             .spawn(move || {
                 let _ = err_tx.send(read_bounded(pipe, max_output));
-            });
-    } else {
-        let _ = err_tx.send(Ok(Vec::new()));
-    }
+            })
+            .ok()
+    });
+
+    let join_readers = |out_handle: Option<std::thread::JoinHandle<()>>,
+                        err_handle: Option<std::thread::JoinHandle<()>>| {
+        if let Some(handle) = out_handle {
+            let _ = handle.join();
+        }
+        if let Some(handle) = err_handle {
+            let _ = handle.join();
+        }
+    };
 
     let status = loop {
         if slot_cancel.load(Ordering::Acquire) || shared_cancel.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_group(&mut child);
+            join_readers(out_handle, err_handle);
             return Err(HelperError::Cancelled {
                 operation: spec.operation,
             });
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_group(&mut child);
+            join_readers(out_handle, err_handle);
             return Err(HelperError::TimedOut {
                 operation: spec.operation,
                 program: spec.program,
@@ -490,8 +517,8 @@ fn run_worker(
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_group(&mut child);
+                join_readers(out_handle, err_handle);
                 return Err(HelperError::SpawnFailed {
                     operation: spec.operation,
                     program: spec.program,
@@ -504,30 +531,39 @@ fn run_worker(
     let drain_budget = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_millis(50));
-    let stdout = out_rx
-        .recv_timeout(drain_budget)
-        .map_err(|_| HelperError::TimedOut {
-            operation: spec.operation.clone(),
-            program: spec.program.clone(),
-            draining: 0,
-        })?
-        .map_err(|err| HelperError::SpawnFailed {
+    let stdout = match out_rx.recv_timeout(drain_budget) {
+        Ok(res) => res.map_err(|err| HelperError::SpawnFailed {
             operation: spec.operation.clone(),
             program: spec.program.clone(),
             reason: err.to_string(),
-        })?;
-    let stderr = err_rx
-        .recv_timeout(drain_budget)
-        .map_err(|_| HelperError::TimedOut {
-            operation: spec.operation.clone(),
-            program: spec.program.clone(),
-            draining: 0,
-        })?
-        .map_err(|err| HelperError::SpawnFailed {
+        })?,
+        Err(_) => {
+            terminate_group(&mut child);
+            join_readers(out_handle, err_handle);
+            return Err(HelperError::TimedOut {
+                operation: spec.operation,
+                program: spec.program,
+                draining: 0,
+            });
+        }
+    };
+    let stderr = match err_rx.recv_timeout(drain_budget) {
+        Ok(res) => res.map_err(|err| HelperError::SpawnFailed {
             operation: spec.operation.clone(),
             program: spec.program.clone(),
             reason: err.to_string(),
-        })?;
+        })?,
+        Err(_) => {
+            terminate_group(&mut child);
+            join_readers(out_handle, err_handle);
+            return Err(HelperError::TimedOut {
+                operation: spec.operation,
+                program: spec.program,
+                draining: 0,
+            });
+        }
+    };
+    join_readers(out_handle, err_handle);
 
     if stdout.len() > max_output || stderr.len() > max_output {
         return Err(HelperError::OutputExceeded {

@@ -853,7 +853,15 @@ pub(crate) fn survey_build_state(
     path: &Path,
     ecosystem: Ecosystem,
 ) -> (Measure, Survey, Vec<PathBuf>) {
-    let found = measure_build(&mut SharedScan::default(), path, ecosystem);
+    survey_build_state_with(path, ecosystem, &mut SharedScan::default())
+}
+
+pub(crate) fn survey_build_state_with(
+    path: &Path,
+    ecosystem: Ecosystem,
+    scan: &mut SharedScan,
+) -> (Measure, Survey, Vec<PathBuf>) {
+    let found = measure_build(scan, path, ecosystem);
     (found.measure, found.survey, found.fetched)
 }
 

@@ -316,7 +316,7 @@ pub fn apply_with_bounds(
                     if let Some(hook) = hooks.under_lock_before_remove.as_deref_mut() {
                         hook(candidate);
                     }
-                    remove(candidate, git).map(|()| checked.evidence)
+                    remove(candidate, git, _coord).map(|()| checked.evidence)
                 })
             }
         };
@@ -393,7 +393,7 @@ fn check(
     granted: &Granted,
     bounds: Option<&ExecutionBounds>,
 ) -> Result<CheckedRemoval, String> {
-    let checked = judged(journal, candidate, authority, judge, planned_at)?;
+    let checked = judged(journal, candidate, authority, judge, planned_at, bounds)?;
     // The plan's approval covers the claims that the plan stated. The build
     // state of a main checkout has no claim.
     let claims = judge.claims(candidate.checkout.as_path(), candidate.path.as_path());
@@ -413,6 +413,25 @@ fn check(
     }
 }
 
+fn candidate_scan(bounds: Option<&ExecutionBounds>) -> scan::SharedScan {
+    let Some(bounds) = bounds else {
+        return scan::SharedScan::default();
+    };
+    let parent = bounds.tracker.budget();
+    let budget = crate::budget::Budget {
+        cancel: Arc::clone(&parent.cancel),
+        deadline: parent.deadline,
+        max_total_readers: 1,
+        max_entries: bounds.max_entries_per_candidate,
+        max_dir_entries: parent.max_dir_entries,
+        max_seed_candidates: parent.max_seed_candidates,
+        pace_every: parent.pace_every,
+        pace_delay: parent.pace_delay,
+        background_priority: false,
+    };
+    scan::SharedScan::with_budget(budget)
+}
+
 /// Judges one removal anew. The directory must be the entry that the plan
 /// measured, and the plan's own rules must still decide to remove it.
 fn judged(
@@ -421,6 +440,7 @@ fn judged(
     authority: Authority,
     judge: &Judge<'_>,
     planned_at: &str,
+    bounds: Option<&ExecutionBounds>,
 ) -> Result<CheckedRemoval, String> {
     let path = candidate.path.as_path();
     if journal.starts_with(path) {
@@ -451,6 +471,7 @@ fn judged(
             path.display()
         ));
     }
+    let mut scan = candidate_scan(bounds);
     let (kept, mut evidence) = match candidate.subject {
         Subject::BuildState { ecosystem } => {
             if development::build_state_at(path) != Some(ecosystem) {
@@ -460,7 +481,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_build_state(path, ecosystem);
+            let (measure, survey, repositories) =
+                development::survey_build_state_with(path, ecosystem, &mut scan);
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             judge.build_state(
                 candidate.checkout.as_path(),
                 path,
@@ -480,7 +508,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_tree(path);
+            let (measure, survey, repositories) =
+                development::survey_tree_with(path, &mut scan, &mut |_, _| {});
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             let (kept, mut evidence) = judge.checkout(
                 path,
                 measure.newest_modified.as_deref(),
@@ -507,7 +542,14 @@ fn judged(
                     path.display()
                 ));
             }
-            let (measure, survey, repositories) = development::survey_tree(path);
+            let (measure, survey, repositories) =
+                development::survey_tree_with(path, &mut scan, &mut |_, _| {});
+            if scan.is_stopped() {
+                return Err(format!(
+                    "{} exceeded removal verification entry budget",
+                    path.display()
+                ));
+            }
             judge.fetched_toolchain(
                 candidate.checkout.as_path(),
                 path,
@@ -699,12 +741,17 @@ fn grant_owner_write(path: &Path, since: &str, granted: &mut Granted) {
     }
 }
 
-fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
+fn remove(
+    candidate: &Candidate,
+    git: &Git,
+    coord: Option<registry::CoordinationLock>,
+) -> Result<(), String> {
     let path = candidate.path.as_path();
     match candidate.subject {
         // The standard library removes a tree without following a symbolic
         // link, so a link inside build state loses only itself.
         Subject::BuildState { .. } | Subject::FetchedToolchain { .. } => {
+            let _coord = coord;
             // Go writes each module beneath directories that no one may
             // write, so the removal first grants the owner that right.
             if matches!(candidate.subject, Subject::BuildState { ecosystem } if ecosystem == Ecosystem::Go)
@@ -719,7 +766,7 @@ fn remove(candidate: &Candidate, git: &Git) -> Result<(), String> {
                 .repository
                 .as_ref()
                 .ok_or_else(|| format!("the plan names no repository for {}", path.display()))?;
-            git.remove_worktree(repository.as_path(), path)
+            git.remove_worktree_holding(repository.as_path(), path, coord)
         }
     }
 }

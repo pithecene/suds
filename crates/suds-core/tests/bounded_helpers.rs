@@ -317,3 +317,58 @@ fn bounded_removal_defers_oversized_candidate_and_stops_on_cancellation() {
     assert!(target.exists());
     assert!(report2.removals.iter().all(|r| !r.removed));
 }
+
+#[test]
+fn timeout_kills_process_group_and_holds_guard_until_reaped() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("descendant-ran");
+    let registry_path = tmp.path().join("registry.jsonl");
+    let coord = registry::lock(&registry_path).unwrap();
+
+    let runner = HelperRunner::new(HelperPolicy {
+        max_concurrent: 1,
+        per_call_timeout: Duration::from_millis(120),
+        ..HelperPolicy::default()
+    });
+    let result = runner.run_holding(
+        HelperSpec {
+            operation: "descendant-timeout".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                OsString::from("-c"),
+                OsString::from("(sleep 0.4 && touch \"$1\") &\nwait"),
+                OsString::from("sh"),
+                marker.as_os_str().to_os_string(),
+            ],
+            current_dir: None,
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            stdin: None,
+        },
+        coord,
+    );
+    assert!(matches!(result, Err(HelperError::TimedOut { .. })));
+
+    // Wait for the draining worker to kill the process group, reap the child,
+    // and release the held coordination lock.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while runner.in_flight() > 0 || runner.draining() > 0 {
+        assert!(Instant::now() < deadline, "helper slot stayed busy");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Coordination lock becomes available again only after reaping finishes.
+    let _reacquired = registry::lock_bounded(
+        &registry_path,
+        &AtomicBool::new(false),
+        Duration::from_millis(200),
+        "reacquire-after-reap",
+    )
+    .expect("helper must release the coordination lock after terminating");
+
+    // Confirm the descendant process group died instead of writing the marker.
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(
+        !marker.exists(),
+        "descendant process survived helper timeout"
+    );
+}

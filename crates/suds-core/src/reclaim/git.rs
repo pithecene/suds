@@ -97,13 +97,13 @@ impl Git {
             .map(|output| String::from_utf8_lossy(&output).into_owned())
     }
 
-    fn run_raw(
+    fn build_spec(
         &self,
         directory: &Path,
         arguments: &[&str],
         path: Option<&Path>,
         stdin: Option<Vec<u8>>,
-    ) -> Result<HelperOutput, String> {
+    ) -> HelperSpec {
         let mut args: Vec<OsString> = Vec::with_capacity(arguments.len() + 5);
         args.push(OsString::from("--no-optional-locks"));
         args.push(OsString::from("-C"));
@@ -113,7 +113,7 @@ impl Git {
             args.push(OsString::from("--"));
             args.push(path.as_os_str().to_os_string());
         }
-        let spec = HelperSpec {
+        HelperSpec {
             operation: format!("git {}", arguments.first().copied().unwrap_or("")),
             program: self.program.clone(),
             args,
@@ -132,7 +132,17 @@ impl Git {
                 OsString::from("GIT_COMMON_DIR"),
             ],
             stdin,
-        };
+        }
+    }
+
+    fn run_raw(
+        &self,
+        directory: &Path,
+        arguments: &[&str],
+        path: Option<&Path>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<HelperOutput, String> {
+        let spec = self.build_spec(directory, arguments, path, stdin);
         self.runner.run(spec).map_err(|err| err.to_string())
     }
 
@@ -534,7 +544,30 @@ impl Git {
     /// Has Git remove the linked checkout at `checkout` from `repository`.
     /// Git itself refuses a checkout that holds a changed or untracked file.
     pub fn remove_worktree(&self, repository: &Path, checkout: &Path) -> Result<(), String> {
-        self.run(repository, &["worktree", "remove"], Some(checkout))
-            .map(|_| ())
+        self.remove_worktree_holding(repository, checkout, ())
+    }
+
+    /// Like [`remove_worktree`], keeping `guard` held inside the helper worker
+    /// until Git exits or terminates and reaps, preserving removal exclusion
+    /// even when the call times out or cancels.
+    pub(crate) fn remove_worktree_holding<G: Send + 'static>(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        guard: G,
+    ) -> Result<(), String> {
+        let spec = self.build_spec(repository, &["worktree", "remove"], Some(checkout), None);
+        let (output, _guard) = self
+            .runner
+            .run_holding(spec, guard)
+            .map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "git worktree remove failed in {}: {}",
+                repository.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
     }
 }

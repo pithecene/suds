@@ -192,14 +192,16 @@ pub fn clear_pause(path: &Path) -> Result<(), String> {
 /// Schema tag of the bounded maintenance progress cursor.
 pub const MAINTAIN_CURSOR_SCHEMA: &str = "suds.maintain-cursor/v1";
 
-/// Persisted cursor recording checkouts completed during a partial maintenance
-/// slice so subsequent bounded runs continue from remaining checkouts.
+/// Persisted cursor recording completed and pending checkouts across partial
+/// maintenance slices so subsequent bounded runs reach nested worktrees.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintainCursor {
     pub schema: String,
     pub roots: Vec<PathBuf>,
     pub completed_checkouts: Vec<PathBuf>,
+    #[serde(default)]
+    pub pending_checkouts: Vec<PathBuf>,
     pub updated_at: String,
 }
 

@@ -180,18 +180,23 @@ pub fn maintain_with_budget(
     }
     let tracker = BudgetTracker::new(budget.clone());
     let cursor_path = context.directories.maintain_cursor();
-    let skip_set: HashSet<PathBuf> = state::read_maintain_cursor(&cursor_path)
-        .filter(|cursor| cursor.roots == settings.roots)
-        .map(|cursor| cursor.completed_checkouts.into_iter().collect())
+    let existing_cursor =
+        state::read_maintain_cursor(&cursor_path).filter(|cursor| cursor.roots == settings.roots);
+    let skip_set: HashSet<PathBuf> = existing_cursor
+        .as_ref()
+        .map(|cursor| cursor.completed_checkouts.iter().cloned().collect())
         .unwrap_or_default();
-    // Reserve 20% of the unified entry budget for verification and bounded
-    // reclamation under standing approval so partial slices still reclaim
-    // completed checkouts without resetting the run's entry budget.
+    let seed_pending: Vec<PathBuf> = existing_cursor
+        .map(|cursor| cursor.pending_checkouts)
+        .unwrap_or_default();
+    // Reserve 40% of the unified entry budget for verification and bounded
+    // reclamation under standing approval (survey and status checks visit each
+    // candidate twice) without resetting the run's entry budget.
     let scan_entry_cap = if settings.standing_approval {
         budget
             .max_entries
             .filter(|limit| *limit >= 5)
-            .map(|limit| limit.saturating_sub(limit / 5).max(1))
+            .map(|limit| (limit.saturating_mul(3) / 5).max(1))
     } else {
         None
     };
@@ -200,36 +205,51 @@ pub fn maintain_with_budget(
         context.environment,
         Arc::clone(&tracker),
         &skip_set,
+        &seed_pending,
         scan_entry_cap,
     );
     let scan = slice.scan;
     let initial_now = clock();
     let inspection = development::build_report(&scan, initial_now);
-    let slice_incomplete = slice.slice_capped || !scan.outcome.is_complete();
-    let full_scan_complete =
-        skip_set.is_empty() && !slice_incomplete && inspection.status == ReportStatus::Complete;
-    if !slice_incomplete {
-        // Either a single full pass completed or the final slice of a multi-run
-        // sweep finished all remaining checkouts.
-        state::clear_maintain_cursor(&cursor_path)?;
-    } else if !slice.completed_checkouts.is_empty() {
-        let mut completed: Vec<PathBuf> = skip_set
-            .iter()
-            .cloned()
-            .chain(slice.completed_checkouts.iter().cloned())
-            .collect();
-        completed.sort();
-        completed.dedup();
-        state::write_maintain_cursor(
-            &cursor_path,
-            &MaintainCursor {
-                schema: MAINTAIN_CURSOR_SCHEMA.to_owned(),
-                roots: settings.roots.clone(),
-                completed_checkouts: completed,
-                updated_at: timestamp::format_utc(initial_now),
-            },
-        )?;
-    }
+    let mut completed_this_run = slice.completed_checkouts;
+    let mut remaining_pending = slice.remaining_pending;
+    let has_remaining = !remaining_pending.is_empty();
+    let slice_incomplete = slice.slice_capped || !scan.outcome.is_complete() || has_remaining;
+    let full_scan_complete = skip_set.is_empty()
+        && seed_pending.is_empty()
+        && !slice_incomplete
+        && inspection.status == ReportStatus::Complete;
+    let persist_cursor = |completed_now: &[PathBuf],
+                          pending_now: &[PathBuf],
+                          incomplete: bool|
+     -> Result<(), String> {
+        if !incomplete && pending_now.is_empty() {
+            state::clear_maintain_cursor(&cursor_path)?;
+        } else if !completed_now.is_empty() || !pending_now.is_empty() {
+            let mut completed: Vec<PathBuf> = skip_set
+                .iter()
+                .cloned()
+                .chain(completed_now.iter().cloned())
+                .collect();
+            completed.sort();
+            completed.dedup();
+            let mut pending: Vec<PathBuf> = pending_now.to_vec();
+            pending.sort();
+            pending.dedup();
+            pending.retain(|p| !completed.contains(p));
+            state::write_maintain_cursor(
+                &cursor_path,
+                &MaintainCursor {
+                    schema: MAINTAIN_CURSOR_SCHEMA.to_owned(),
+                    roots: settings.roots.clone(),
+                    completed_checkouts: completed,
+                    pending_checkouts: pending,
+                    updated_at: timestamp::format_utc(initial_now),
+                },
+            )?;
+        }
+        Ok(())
+    };
     // The pressure counts every root and every store, so the audit covers
     // each of them.
     let others: Vec<_> = settings
@@ -261,7 +281,7 @@ pub fn maintain_with_budget(
         tracker.outcome(inspection.error_count > 0)
     } else if slice.slice_capped {
         ExecutionOutcome::Exhausted
-    } else if !skip_set.is_empty() {
+    } else if !skip_set.is_empty() || !seed_pending.is_empty() {
         ExecutionOutcome::Partial
     } else {
         scan.outcome
@@ -284,9 +304,10 @@ pub fn maintain_with_budget(
         stores: None,
     };
     if !settings.standing_approval {
+        persist_cursor(&completed_this_run, &remaining_pending, slice_incomplete)?;
         return Ok(report);
     }
-    let completed_set: HashSet<PathBuf> = slice.completed_checkouts.iter().cloned().collect();
+    let completed_set: HashSet<PathBuf> = completed_this_run.iter().cloned().collect();
     let reclaim_scan: DevelopmentScan = if full_scan_complete {
         scan.clone()
     } else {
@@ -299,6 +320,7 @@ pub fn maintain_with_budget(
         partial
     };
     if reclaim_scan.checkouts.is_empty() && !full_scan_complete {
+        persist_cursor(&completed_this_run, &remaining_pending, slice_incomplete)?;
         return Ok(report);
     }
 
@@ -336,32 +358,55 @@ pub fn maintain_with_budget(
         lock_timeout: std::time::Duration::from_secs(5),
         max_entries_per_candidate: Some(500_000),
     };
-    report.reclaim = Some(
-        execute::apply_with_bounds(
-            &mut journal,
-            &plan,
-            conditions,
-            execute::ApplyHooks::default(),
-            Some(&exec_bounds),
-        )
-        .map_err(|err| err.to_string())?,
-    );
+    let reclaim_report = execute::apply_with_bounds(
+        &mut journal,
+        &plan,
+        conditions,
+        execute::ApplyHooks::default(),
+        Some(&exec_bounds),
+    )
+    .map_err(|err| err.to_string())?;
+    // Move any checkout whose verification stopped on budget back to pending so
+    // the next bounded run retries its reclamation instead of skipping it.
+    let mut budget_deferred: HashSet<PathBuf> = HashSet::new();
+    for removal in &reclaim_report.removals {
+        if !removal.removed
+            && removal
+                .refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("budget"))
+            && let Some(candidate) = plan.candidates.get(removal.index)
+        {
+            budget_deferred.insert(candidate.checkout.as_path().to_path_buf());
+        }
+    }
+    if !budget_deferred.is_empty() {
+        completed_this_run.retain(|path| !budget_deferred.contains(path));
+        remaining_pending.extend(budget_deferred);
+    }
+    let run_incomplete = slice_incomplete || !remaining_pending.is_empty() || tracker.is_stopped();
+    persist_cursor(&completed_this_run, &remaining_pending, run_incomplete)?;
+    report.reclaim = Some(reclaim_report);
     report.entries_visited = tracker.entries_visited();
     report.directories_deferred = tracker.directories_deferred();
     report.draining_workers = tracker.draining_workers();
 
-    // Only run store trims on a complete initial pass that still has budget.
+    // Automatic maintenance skips unbounded external store adapters (such as
+    // `docker system df` and blocking CLI trims) and runs only in-process
+    // eviction on a complete initial pass with remaining budget.
     if full_scan_complete && !tracker.is_stopped() {
         let mut budgets = Budgets::default();
         for (id, bytes) in &settings.budgets {
             budgets.set(id, *bytes);
         }
-        let engine = stores::engine_usage(&context.programs.docker);
+        let engine = Err(
+            "external container engine telemetry skipped during automatic maintenance".to_owned(),
+        );
         let inputs = Inputs {
             budgets: &budgets,
             programs: context.programs,
             engine: &engine,
-            builder_budget_option: stores::builder_budget_option(&context.programs.docker),
+            builder_budget_option: "",
             idle_seconds,
             now: context.now,
         };
@@ -373,6 +418,7 @@ pub fn maintain_with_budget(
                 &stores_plan,
                 Authority::StandingApproval,
                 &tracker,
+                false,
                 &mut |entry| stores::measure_after_with_tracker(entry, docker, &tracker),
             )
             .map_err(|err| err.to_string())?,
@@ -380,13 +426,16 @@ pub fn maintain_with_budget(
     }
 
     // Publish a post-maintenance observation sharing the same tracker when the
-    // pass finished all checkouts and remaining budget permits.
-    if !slice_incomplete && !tracker.is_stopped() {
+    // pass finished all checkouts and remaining budget permits. An incomplete
+    // post-observation never erases an active `lower_since` window established
+    // by a complete initial observation unless its lower bound raises pressure.
+    if !run_incomplete && !tracker.is_stopped() {
         let post_slice = development::inspect_with_tracker(
             &settings.roots,
             context.environment,
             Arc::clone(&tracker),
             &HashSet::new(),
+            &[],
             None,
         );
         let post_scan = post_slice.scan;
@@ -405,8 +454,10 @@ pub fn maintain_with_budget(
             now: post_now,
         };
         let post_reading = pressure::next(Some(&reading), post_measurement, Thresholds::default());
-        write_pressure(&path, &post_reading)?;
-        report.pressure = post_reading;
+        if post_complete || post_reading.level > reading.level {
+            write_pressure(&path, &post_reading)?;
+            report.pressure = post_reading;
+        }
         report.outcome = if post_complete {
             ExecutionOutcome::Complete
         } else {

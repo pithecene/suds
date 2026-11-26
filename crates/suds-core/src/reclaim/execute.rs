@@ -413,23 +413,37 @@ fn check(
     }
 }
 
-fn candidate_scan(bounds: Option<&ExecutionBounds>) -> scan::SharedScan {
+struct CandidateCapGuard {
+    tracker: Option<Arc<BudgetTracker>>,
+}
+
+impl Drop for CandidateCapGuard {
+    fn drop(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            tracker.set_phase_entry_cap(None);
+        }
+    }
+}
+
+/// Shares the parent [`BudgetTracker`] during candidate survey while enforcing
+/// any per-candidate sublimit through a scoped phase cap.
+fn candidate_scan(bounds: Option<&ExecutionBounds>) -> (scan::SharedScan, CandidateCapGuard) {
     let Some(bounds) = bounds else {
-        return scan::SharedScan::default();
+        return (
+            scan::SharedScan::default(),
+            CandidateCapGuard { tracker: None },
+        );
     };
-    let parent = bounds.tracker.budget();
-    let budget = crate::budget::Budget {
-        cancel: Arc::clone(&parent.cancel),
-        deadline: parent.deadline,
-        max_total_readers: 1,
-        max_entries: bounds.max_entries_per_candidate,
-        max_dir_entries: parent.max_dir_entries,
-        max_seed_candidates: parent.max_seed_candidates,
-        pace_every: parent.pace_every,
-        pace_delay: parent.pace_delay,
-        background_priority: false,
-    };
-    scan::SharedScan::with_budget(budget)
+    let cap = bounds
+        .max_entries_per_candidate
+        .map(|limit| bounds.tracker.entries_visited().saturating_add(limit));
+    bounds.tracker.set_phase_entry_cap(cap);
+    (
+        scan::SharedScan::with_tracker(Arc::clone(&bounds.tracker)),
+        CandidateCapGuard {
+            tracker: Some(Arc::clone(&bounds.tracker)),
+        },
+    )
 }
 
 /// Judges one removal anew. The directory must be the entry that the plan
@@ -471,7 +485,7 @@ fn judged(
             path.display()
         ));
     }
-    let mut scan = candidate_scan(bounds);
+    let (mut scan, _cap_guard) = candidate_scan(bounds);
     let (kept, mut evidence) = match candidate.subject {
         Subject::BuildState { ecosystem } => {
             if development::build_state_at(path) != Some(ecosystem) {
@@ -651,7 +665,7 @@ fn changed_bounded(
     let mut pending = vec![path.to_path_buf()];
     while let Some(entry) = pending.pop() {
         if let Some(bounds) = bounds {
-            if bounds.tracker.is_stopped() {
+            if !bounds.tracker.claim_entry() {
                 return Err(format!(
                     "stopped verifying {} by execution budget",
                     path.display()

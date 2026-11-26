@@ -759,16 +759,18 @@ pub fn apply(
     measure: &mut dyn FnMut(&Entry) -> Result<u64, String>,
 ) -> Result<StoresReport, JournalError> {
     let tracker = BudgetTracker::new(Budget::default());
-    apply_with_tracker(journal, plan, authority, &tracker, measure)
+    apply_with_tracker(journal, plan, authority, &tracker, true, measure)
 }
 
-/// Like [`apply`], checking `tracker` before each store trim so exhausted or
-/// cancelled maintenance never starts additional unbounded store trims.
+/// Like [`apply`], checking `tracker` before each entry and optionally
+/// skipping external subprocess trims so automatic maintenance avoids
+/// unbounded external store adapters.
 pub fn apply_with_tracker(
     journal: &mut Journal,
     plan: &StoresPlan,
     authority: Authority,
     tracker: &BudgetTracker,
+    allow_external_trims: bool,
     measure: &mut dyn FnMut(&Entry) -> Result<u64, String>,
 ) -> Result<StoresReport, JournalError> {
     let run = new_id("run");
@@ -780,7 +782,8 @@ pub fn apply_with_tracker(
     let mut trims = Vec::new();
     for entry in &plan.entries {
         let command = match &entry.decision {
-            Decision::Trim { trim } => trim.display(),
+            Decision::Trim { trim } if allow_external_trims => trim.display(),
+            Decision::Trim { .. } => continue,
             Decision::Evict { eviction } => eviction.display(),
             _ => continue,
         };

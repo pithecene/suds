@@ -461,6 +461,41 @@ fn bounded_seeding_stops_cleanly_and_cleans_staged_directory() {
     );
 }
 
+fn maintain_fixture(
+    base: &Path,
+    workspace: PathBuf,
+    ceiling_bytes: u64,
+) -> (suds_core::state::Directories, suds_core::state::Settings) {
+    let dirs = suds_core::state::Directories {
+        state: base.join("state"),
+        config: base.join("config"),
+    };
+    let settings = suds_core::state::Settings {
+        roots: vec![workspace],
+        ceiling_bytes: Some(ceiling_bytes),
+        idle_minutes: 1,
+        standing_approval: true,
+        tolerate_unreadable_processes: true,
+        budgets: Default::default(),
+    };
+    (dirs, settings)
+}
+
+fn run_maintain_step(
+    settings: &suds_core::state::Settings,
+    context: &suds_core::maintain::Context<'_>,
+    max_entries: u64,
+    clock: &mut dyn FnMut() -> i64,
+) -> suds_core::maintain::MaintenanceReport {
+    let budget = Budget {
+        max_entries: Some(max_entries),
+        pace_every: 0,
+        background_priority: false,
+        ..Budget::for_maintenance()
+    };
+    suds_core::maintain::maintain_with_budget(settings, context, &budget, clock).unwrap()
+}
+
 #[test]
 fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget() {
     let tmp = TempDir::new().unwrap();
@@ -475,18 +510,7 @@ fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget(
         targets.push(populate_cargo_target(&repo, 20));
     }
 
-    let dirs = suds_core::state::Directories {
-        state: base.join("state"),
-        config: base.join("config"),
-    };
-    let settings = suds_core::state::Settings {
-        roots: vec![workspace],
-        ceiling_bytes: Some(1024 * 1024 * 1024),
-        idle_minutes: 1,
-        standing_approval: true,
-        tolerate_unreadable_processes: true,
-        budgets: Default::default(),
-    };
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
     let env = Environment::default();
     let programs = suds_core::stores::Programs::default();
     let git = Git::default();
@@ -498,27 +522,19 @@ fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget(
         now: FUTURE_NOW,
     };
 
-    // Cap each run below the full 3-repo workspace (~180 entries) while
-    // leaving room for at least one repo and its reclamation (~90 entries).
+    // Cap each run below the full 3-repo workspace while leaving room for one
+    // repo scan plus its shared-budget verification and reclamation.
     // Successive runs advance via the cursor without exceeding max_entries.
-    let per_run_cap = 150;
+    let per_run_cap = 165;
     let mut clock_now = FUTURE_NOW;
     let mut saw_partial_cursor = false;
     let mut total_reclaimed = 0usize;
     for _ in 0..8 {
-        let budget = Budget {
-            max_entries: Some(per_run_cap),
-            pace_every: 0,
-            background_priority: false,
-            ..Budget::for_maintenance()
-        };
         let mut clock = || {
             clock_now += 1;
             clock_now
         };
-        let report =
-            suds_core::maintain::maintain_with_budget(&settings, &context, &budget, &mut clock)
-                .unwrap();
+        let report = run_maintain_step(&settings, &context, per_run_cap, &mut clock);
         assert!(
             report.entries_visited <= per_run_cap,
             "run exceeded unified entry budget: {} > {per_run_cap}",
@@ -554,5 +570,295 @@ fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget(
     assert!(
         !dirs.maintain_cursor().exists(),
         "cursor must clear once final slice completes"
+    );
+}
+
+#[test]
+fn nested_worktree_cursor_reaches_eligible_child_after_retained_sibling() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let repo = workspace.join("repo");
+    init_cargo_repo(&repo, "target/\n.claude/\n");
+
+    let active_wt = repo.join(".claude/worktrees/a-active");
+    let eligible_wt = repo.join(".claude/worktrees/b-eligible");
+    fs::create_dir_all(active_wt.parent().unwrap()).unwrap();
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "active",
+            active_wt.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "eligible",
+            eligible_wt.to_str().unwrap(),
+        ],
+    );
+    let active_target = populate_cargo_target(&active_wt, 25);
+    let eligible_target = populate_cargo_target(&eligible_wt, 25);
+
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    // Hold the first nested worktree so it stays retained while the later
+    // nested worktree has an ended claim and remains eligible for relief.
+    registry::register(
+        &dirs.registry(),
+        &active_wt,
+        "bosun",
+        Some("wf-active"),
+        None,
+        0,
+    )
+    .unwrap();
+    registry::append_ended(
+        &dirs.registry(),
+        &eligible_wt,
+        "bosun",
+        Some("wf-eligible"),
+        None,
+        0,
+    )
+    .unwrap();
+
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+
+    // Cap each run so run 1 completes the repo root and `a-active` but stops
+    // before finishing `b-eligible`, persisting `b-eligible` in pending state.
+    let per_run_cap = 175;
+    let mut clock_now = FUTURE_NOW;
+    let mut saw_pending = false;
+    let mut trace = Vec::new();
+    for step in 0..6 {
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report = run_maintain_step(&settings, &context, per_run_cap, &mut clock);
+        assert!(
+            report.entries_visited <= per_run_cap,
+            "nested worktree run exceeded cap: {} > {per_run_cap}",
+            report.entries_visited
+        );
+        let cursor = suds_core::state::read_maintain_cursor(&dirs.maintain_cursor());
+        if cursor
+            .as_ref()
+            .is_some_and(|c| c.pending_checkouts.contains(&eligible_wt))
+        {
+            saw_pending = true;
+        }
+        trace.push(format!(
+            "step={step} outcome={:?} entries={} reclaim={:?} cursor={:?}",
+            report.outcome, report.entries_visited, report.reclaim, cursor
+        ));
+        if !eligible_target.exists() && !dirs.maintain_cursor().exists() {
+            break;
+        }
+    }
+    assert!(
+        saw_pending,
+        "cursor must persist unfinished nested worktree `b-eligible`: {trace:#?}"
+    );
+    assert!(
+        active_target.exists(),
+        "held nested worktree target must stay intact: {trace:#?}"
+    );
+    assert!(
+        !eligible_target.exists(),
+        "subsequent bounded run must reach and reclaim `b-eligible/target`: {trace:#?}"
+    );
+    assert!(
+        !dirs.maintain_cursor().exists(),
+        "cursor must clear after finishing remaining nested worktrees: {trace:#?}"
+    );
+}
+
+#[test]
+fn exhausted_post_observation_preserves_lower_since_and_recovers() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let repo = workspace.join("repo");
+    init_cargo_repo(&repo, "target/\n");
+    for i in 0..35 {
+        fs::write(repo.join(format!("src-{i}.rs")), "fn f() {}\n").unwrap();
+    }
+
+    let (dirs, settings) = maintain_fixture(&base, workspace, 100 * 1024 * 1024);
+    fs::create_dir_all(&dirs.state).unwrap();
+    // Seed an existing Hard reading at t=1000 while current usage stays well below the ceiling.
+    let seeded = suds_core::pressure::Pressure {
+        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: suds_core::timestamp::format_utc(1000),
+        level: suds_core::pressure::Level::Hard,
+        lower_since: None,
+        usage_bytes: 100 * 1024 * 1024,
+        ceiling_bytes: 100 * 1024 * 1024,
+        enforced: false,
+        filesystem_available_bytes: Some(1024 * 1024 * 1024),
+        complete: true,
+    };
+    fs::write(dirs.pressure(), serde_json::to_vec(&seeded).unwrap()).unwrap();
+
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+
+    // Measure exact single-pass entry count so 1 complete initial scan fits in
+    // scan_entry_cap (60%), while 2 full scans exceed max_entries.
+    let baseline = inspect(&settings.roots, &env);
+    let one_pass = baseline.entries_visited;
+    let cap = (one_pass * 175) / 100;
+    assert!(cap * 3 / 5 >= one_pass && cap < one_pass * 2);
+
+    let run_at = |ts: i64| {
+        let context = suds_core::maintain::Context {
+            directories: &dirs,
+            environment: &env,
+            programs: &programs,
+            git: &git,
+            now: ts,
+        };
+        let mut clock = || ts;
+        run_maintain_step(&settings, &context, cap, &mut clock)
+    };
+
+    // Run 1 at t=1100: initial scan completes and starts lower_since, and
+    // post-scan exhausts the remaining budget without erasing lower_since.
+    let r1 = run_at(1100);
+    assert_eq!(r1.outcome, suds_core::budget::ExecutionOutcome::Exhausted);
+    assert_eq!(r1.pressure.level, suds_core::pressure::Level::Hard);
+    assert_eq!(
+        r1.pressure.lower_since.as_deref(),
+        Some(suds_core::timestamp::format_utc(1100).as_str()),
+        "exhausted post-scan must preserve lower_since from complete initial scan"
+    );
+
+    // Run 2 at t=1405 (past the 300s transition window): initial scan completes
+    // and transitions Hard -> Normal even though post-scan exhausts again.
+    let r2 = run_at(1405);
+    assert_eq!(r2.outcome, suds_core::budget::ExecutionOutcome::Exhausted);
+    assert_eq!(r2.pressure.level, suds_core::pressure::Level::Normal);
+    assert_eq!(r2.pressure.lower_since, None);
+    let persisted = suds_core::maintain::read_pressure(&dirs.pressure()).unwrap();
+    assert_eq!(persisted.level, suds_core::pressure::Level::Normal);
+}
+
+#[test]
+fn verification_debits_shared_budget_and_maintain_skips_external_store_adapters() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let repo = workspace.join("repo");
+    init_cargo_repo(&repo, "target/\n");
+    let target = populate_cargo_target(&repo, 45);
+
+    // Stub docker and ccache scripts that leave markers if automatic maintain calls them.
+    let docker_marker = base.join("docker-called");
+    let ccache_marker = base.join("ccache-called");
+    let stub_docker = base.join("stub-docker");
+    let stub_ccache = base.join("stub-ccache");
+    fs::write(
+        &stub_docker,
+        format!("#!/bin/sh\ntouch \"{}\"\nexit 0\n", docker_marker.display()),
+    )
+    .unwrap();
+    fs::write(
+        &stub_ccache,
+        format!("#!/bin/sh\ntouch \"{}\"\nexit 0\n", ccache_marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&stub_docker, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stub_ccache, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Create a ccache directory above a 0-byte budget to ensure an external Trim would plan.
+    let ccache_dir = base.join("ccache");
+    fs::create_dir_all(ccache_dir.join("0")).unwrap();
+    fs::write(ccache_dir.join("0/CACHEDIR.TAG"), "Signature: ccache").unwrap();
+    fs::write(ccache_dir.join("0/stats"), "0\n").unwrap();
+    fs::write(ccache_dir.join("0/entry"), vec![b'a'; 8192]).unwrap();
+
+    let mut env = Environment::default();
+    env.variables
+        .insert("CCACHE_DIR".to_owned(), ccache_dir.into());
+    let programs = suds_core::stores::Programs {
+        docker: stub_docker,
+        ccache: stub_ccache,
+        ..Default::default()
+    };
+
+    let (dirs, mut settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    settings.budgets.insert("ccache.cache".to_owned(), 0);
+
+    // Give enough entries for the initial scan to complete under the 60% scan
+    // cap while leaving fewer entries than verification of the 45-file target
+    // requires (~96), so verification itself debits and exhausts the shared tracker.
+    let baseline = inspect(&settings.roots, &env);
+    let tight_cap = (baseline.entries_visited * 100 / 59).max(baseline.entries_visited + 10);
+    assert!(
+        tight_cap * 3 / 5 >= baseline.entries_visited && tight_cap < baseline.entries_visited + 90,
+        "tight cap must admit initial scan and exhaust during verification: cap={tight_cap} scan={}",
+        baseline.entries_visited
+    );
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+    let mut now = FUTURE_NOW;
+    let report = run_maintain_step(&settings, &context, tight_cap, &mut || {
+        now += 1;
+        now
+    });
+    assert_eq!(
+        report.entries_visited, tight_cap,
+        "verification must debit and exhaust the shared budget"
+    );
+    assert!(
+        report
+            .reclaim
+            .as_ref()
+            .is_some_and(|r| r.removals.iter().any(|x| !x.removed)),
+        "expected budget refusal during verification: {:?}",
+        report.reclaim
+    );
+    assert!(
+        target.exists(),
+        "candidate whose verification exhausts shared budget must stay intact"
+    );
+
+    // Clear cursor so the ample pass starts a fresh full pass and confirms
+    // automatic maintenance never invokes docker or external store trims.
+    let _ = suds_core::state::clear_maintain_cursor(&dirs.maintain_cursor());
+    let full = run_maintain_step(&settings, &context, 10_000, &mut || {
+        now += 1;
+        now
+    });
+    assert!(!target.exists());
+    assert!(full.stores.as_ref().is_some_and(|s| s.trims.is_empty()));
+    assert!(!docker_marker.exists(), "maintain must not run docker");
+    assert!(
+        !ccache_marker.exists(),
+        "maintain must not run external store trim subprocesses"
     );
 }

@@ -585,11 +585,12 @@ pub fn inspect(workspaces: &[PathBuf], environment: &Environment) -> Development
     inspect_with_budget(workspaces, environment, Budget::default())
 }
 
-/// Result of a bounded inspection slice, including which checkouts finished
-/// completely so multi-run maintenance can advance deterministically.
+/// Result of a bounded inspection slice, including completed and remaining
+/// pending checkouts so multi-run maintenance reaches nested worktrees.
 pub(crate) struct InspectSlice {
     pub scan: DevelopmentScan,
     pub completed_checkouts: Vec<PathBuf>,
+    pub remaining_pending: Vec<PathBuf>,
     pub slice_capped: bool,
 }
 
@@ -601,17 +602,17 @@ pub fn inspect_with_budget(
     budget: Budget,
 ) -> DevelopmentScan {
     let tracker = crate::budget::BudgetTracker::new(budget);
-    inspect_with_tracker(workspaces, environment, tracker, &HashSet::new(), None).scan
+    inspect_with_tracker(workspaces, environment, tracker, &HashSet::new(), &[], None).scan
 }
 
-/// Inspects workspaces and stores sharing an existing `tracker`, skipping
-/// checkouts listed in `skip_checkouts` and stopping checkout admission at
-/// `scan_entry_cap` so maintenance preserves verification budget.
+/// Inspects workspaces and stores sharing an existing `tracker`, resuming
+/// `seed_pending`, skipping `skip_checkouts`, and stopping at `scan_entry_cap`.
 pub(crate) fn inspect_with_tracker(
     workspaces: &[PathBuf],
     environment: &Environment,
     tracker: Arc<crate::budget::BudgetTracker>,
     skip_checkouts: &HashSet<PathBuf>,
+    seed_pending: &[PathBuf],
     scan_entry_cap: Option<u64>,
 ) -> InspectSlice {
     tracker.set_phase_entry_cap(scan_entry_cap);
@@ -619,6 +620,15 @@ pub(crate) fn inspect_with_tracker(
     let mut found = Found::default();
     let mut results = Vec::new();
     let mut completed_checkouts = Vec::new();
+    let mut remaining_pending = Vec::new();
+    for path in seed_pending {
+        if skip_checkouts.contains(path) {
+            continue;
+        }
+        if let Some(claimed @ Claim::Checkout(..)) = claim_at(path, false) {
+            found.take(&mut scan, path.clone(), claimed, None);
+        }
+    }
     for path in outermost(workspaces) {
         if scan.is_stopped() {
             results.push(Workspace {
@@ -659,6 +669,7 @@ pub(crate) fn inspect_with_tracker(
             continue;
         }
         if scan.is_stopped() {
+            remaining_pending.push(checkout.path);
             break;
         }
         let deferred_before = scan.directories_deferred();
@@ -709,10 +720,24 @@ pub(crate) fn inspect_with_tracker(
         }
         if checkout_complete {
             completed_checkouts.push(checkout.path.clone());
+        } else {
+            // Retain unfinished checkouts so the next bounded run resumes them.
+            remaining_pending.push(checkout.path.clone());
         }
         found.checkouts.push(checkout);
+        if scan.is_stopped() {
+            break;
+        }
     }
-    if skip_checkouts.is_empty() && !scan.is_stopped() {
+    for pending in found.pending {
+        if !skip_checkouts.contains(&pending.path) {
+            remaining_pending.push(pending.path);
+        }
+    }
+    remaining_pending.sort();
+    remaining_pending.dedup();
+    remaining_pending.retain(|p| !completed_checkouts.contains(p));
+    if skip_checkouts.is_empty() && seed_pending.is_empty() && !scan.is_stopped() {
         for spec in store_specs(environment) {
             if scan.is_stopped() {
                 break;
@@ -781,6 +806,7 @@ pub(crate) fn inspect_with_tracker(
             errors: scan.errors().to_vec(),
         },
         completed_checkouts,
+        remaining_pending,
         slice_capped,
     }
 }

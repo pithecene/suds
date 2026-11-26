@@ -10,6 +10,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
@@ -297,6 +299,52 @@ pub struct CoordinationLock {
 /// Acquires the exclusive coordination lock beside the registry at `path`.
 pub fn lock(path: &Path) -> Result<CoordinationLock, String> {
     let lock_path = path.with_extension("lock");
+    let file = open_lock_file(&lock_path)?;
+    file.lock()
+        .map_err(|err| format!("could not lock {}: {err}", lock_path.display()))?;
+    Ok(CoordinationLock { _file: file })
+}
+
+/// Acquires the exclusive coordination lock beside the registry at `path`
+/// while observing `cancel` and `timeout` for `operation`.
+pub fn lock_bounded(
+    path: &Path,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    operation: &str,
+) -> Result<CoordinationLock, String> {
+    let lock_path = path.with_extension("lock");
+    let file = open_lock_file(&lock_path)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(format!(
+                "cancelled waiting for coordination lock {} for {operation}",
+                lock_path.display()
+            ));
+        }
+        match file.try_lock() {
+            Ok(()) => return Ok(CoordinationLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "timed out waiting for coordination lock {} for {operation}",
+                        lock_path.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(fs::TryLockError::Error(err)) => {
+                return Err(format!(
+                    "could not lock {} for {operation}: {err}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn open_lock_file(lock_path: &Path) -> Result<fs::File, String> {
     let failed = |err: io::Error| format!("could not lock {}: {err}", lock_path.display());
     if let Some(directory) = lock_path.parent() {
         fs::DirBuilder::new()
@@ -305,16 +353,14 @@ pub fn lock(path: &Path) -> Result<CoordinationLock, String> {
             .create(directory)
             .map_err(failed)?;
     }
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .mode(0o600)
         .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
-        .open(&lock_path)
-        .map_err(failed)?;
-    file.lock().map_err(failed)?;
-    Ok(CoordinationLock { _file: file })
+        .open(lock_path)
+        .map_err(failed)
 }
 
 /// Registers an existing `checkout` under the coordination lock, validating

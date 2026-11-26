@@ -148,7 +148,12 @@ pub fn maintain_with_budget(
         .first()
         .ok_or("the settings name no root, so Suds has no development storage to measure")?;
     // Coordinate concurrent maintenance callers before scanning the workspace.
-    let _maintain_lock = registry::lock(&path.with_extension("maintain.lock"))?;
+    let _maintain_lock = registry::lock_bounded(
+        &path.with_extension("maintain.lock"),
+        &budget.cancel,
+        std::time::Duration::from_secs(5),
+        "maintain",
+    )?;
     if budget.background_priority {
         budget::apply_background_thread_policy();
     }
@@ -211,23 +216,46 @@ pub fn maintain_with_budget(
         checkouts: CheckoutScope::DerivedOnly,
         tolerate_unreadable_processes: settings.tolerate_unreadable_processes,
     };
+    let helper_runner =
+        crate::helper::HelperRunner::new(crate::helper::HelperPolicy::for_maintenance(
+            std::sync::Arc::clone(&budget.cancel),
+            budget.deadline,
+        ));
+    let bounded_git = context
+        .git
+        .clone()
+        .with_runner(std::sync::Arc::clone(&helper_runner));
     let observed = Observed {
-        liveness: &Liveness::observe(),
+        liveness: &Liveness::observe_with_runner(&helper_runner),
         registry: &standings,
     };
-    let plan = plan_reclaim(&scan, &observed, context.git, policy, context.now);
+    let plan = plan_reclaim(&scan, &observed, &bounded_git, policy, context.now);
     let mut journal =
         Journal::open(&context.directories.journal()).map_err(|err| err.to_string())?;
+    let mut observe_bounded = || Liveness::observe_with_runner(&helper_runner);
     let conditions = Conditions {
         authority: Authority::StandingApproval,
-        observe: &mut Liveness::observe,
+        observe: &mut observe_bounded,
         registry: &mut || registry::reading(&registry_path),
         registry_path: Some(&registry_path),
-        git: context.git,
+        git: &bounded_git,
         now: context.now,
     };
-    report.reclaim =
-        Some(execute::apply(&mut journal, &plan, conditions).map_err(|err| err.to_string())?);
+    let exec_bounds = execute::ExecutionBounds {
+        tracker: crate::budget::BudgetTracker::new(budget.clone()),
+        lock_timeout: std::time::Duration::from_secs(5),
+        max_entries_per_candidate: Some(500_000),
+    };
+    report.reclaim = Some(
+        execute::apply_with_bounds(
+            &mut journal,
+            &plan,
+            conditions,
+            execute::ApplyHooks::default(),
+            Some(&exec_bounds),
+        )
+        .map_err(|err| err.to_string())?,
+    );
 
     let mut budgets = Budgets::default();
     for (id, bytes) in &settings.budgets {

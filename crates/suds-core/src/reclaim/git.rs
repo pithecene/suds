@@ -5,29 +5,86 @@
 //! list, and no call passes a shell string.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::Arc;
 
+use crate::helper::{HelperOutput, HelperPolicy, HelperRunner, HelperSpec};
 use crate::model::EntryKind;
 
-/// The Git program that Suds runs.
+/// Worktree-local pseudoreferences that Git can create and that leave with a
+/// linked worktree.
+const WORKTREE_PSEUDOREFS: [&str; 6] = [
+    "ORIG_HEAD",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_HEAD",
+    "AUTO_MERGE",
+];
+
+/// Explicit three-state observation of one worktree pseudoreference.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Git {
-    program: PathBuf,
+pub enum PseudoRefState {
+    /// The pseudoreference resolves to a commit object.
+    PresentCommit(String),
+    /// The pseudoreference exists and resolves to a non-commit object, such as
+    /// Git's tree-valued `AUTO_MERGE`.
+    PresentNonCommit { name: String, object_type: String },
+    /// Git positively confirmed that the pseudoreference does not exist.
+    Absent,
+    /// Suds could not establish the pseudoreference state, so callers preserve
+    /// the candidate.
+    Unknown(String),
 }
 
+/// The Git program that Suds runs, governed by a bounded [`HelperRunner`].
+#[derive(Debug, Clone)]
+pub struct Git {
+    program: PathBuf,
+    runner: Arc<HelperRunner>,
+}
+
+impl PartialEq for Git {
+    fn eq(&self, other: &Self) -> bool {
+        self.program == other.program
+    }
+}
+
+impl Eq for Git {}
+
 impl Default for Git {
-    /// The `git` that the process's search path names.
+    /// The `git` that the process's search path names, with default helper bounds.
     fn default() -> Self {
         Git {
             program: PathBuf::from("git"),
+            runner: HelperRunner::new(HelperPolicy::default()),
         }
     }
 }
 
 impl Git {
+    /// Creates a Git adapter pointing at `program` with default helper bounds.
+    pub fn with_program(program: PathBuf) -> Self {
+        Git {
+            program,
+            runner: HelperRunner::new(HelperPolicy::default()),
+        }
+    }
+
+    /// Replaces the helper runner governing this Git adapter.
+    #[must_use]
+    pub fn with_runner(mut self, runner: Arc<HelperRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// The helper runner governing this Git adapter.
+    pub fn runner(&self) -> &Arc<HelperRunner> {
+        &self.runner
+    }
+
     /// Runs Git in `directory` and returns its standard output. A status
     /// query takes no optional lock, so a query writes nothing.
     fn run(
@@ -40,37 +97,52 @@ impl Git {
             .map(|output| String::from_utf8_lossy(&output).into_owned())
     }
 
+    fn run_raw(
+        &self,
+        directory: &Path,
+        arguments: &[&str],
+        path: Option<&Path>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<HelperOutput, String> {
+        let mut args: Vec<OsString> = Vec::with_capacity(arguments.len() + 5);
+        args.push(OsString::from("--no-optional-locks"));
+        args.push(OsString::from("-C"));
+        args.push(directory.as_os_str().to_os_string());
+        args.extend(arguments.iter().map(OsString::from));
+        if let Some(path) = path {
+            args.push(OsString::from("--"));
+            args.push(path.as_os_str().to_os_string());
+        }
+        let spec = HelperSpec {
+            operation: format!("git {}", arguments.first().copied().unwrap_or("")),
+            program: self.program.clone(),
+            args,
+            current_dir: None,
+            // Object traversal in a partial clone must stay local.
+            env_set: vec![
+                (OsString::from("GIT_NO_LAZY_FETCH"), OsString::from("1")),
+                (OsString::from("GIT_ALLOW_PROTOCOL"), OsString::from("")),
+            ],
+            // A variable of the caller's own repository must not redirect the
+            // query to another repository.
+            env_remove: vec![
+                OsString::from("GIT_DIR"),
+                OsString::from("GIT_WORK_TREE"),
+                OsString::from("GIT_INDEX_FILE"),
+                OsString::from("GIT_COMMON_DIR"),
+            ],
+            stdin,
+        };
+        self.runner.run(spec).map_err(|err| err.to_string())
+    }
+
     fn run_bytes(
         &self,
         directory: &Path,
         arguments: &[&str],
         path: Option<&Path>,
     ) -> Result<Vec<u8>, String> {
-        let mut command = Command::new(&self.program);
-        command
-            .arg("--no-optional-locks")
-            .arg("-C")
-            .arg(directory)
-            .args(arguments)
-            // Object traversal in a partial clone must stay local.
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_ALLOW_PROTOCOL", "");
-        if let Some(path) = path {
-            command.arg("--").arg(path);
-        }
-        // A variable of the caller's own repository must not redirect the
-        // query to another repository.
-        for name in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-        ] {
-            command.env_remove(name);
-        }
-        let output = command
-            .output()
-            .map_err(|err| format!("could not run {}: {err}", self.program.display()))?;
+        let output = self.run_raw(directory, arguments, path, None)?;
         if !output.status.success() {
             return Err(format!(
                 "git {} failed in {}: {}",
@@ -189,6 +261,96 @@ impl Git {
             .map(|name| name.trim().to_owned())
     }
 
+    /// Queries every per-worktree pseudoreference in a single bounded
+    /// `git cat-file --batch-check` call so timeout, failure, or non-commit
+    /// objects never read as absent.
+    pub fn probe_pseudorefs(&self, checkout: &Path) -> Result<Vec<PseudoRefState>, String> {
+        let mut stdin = String::new();
+        for pseudo in WORKTREE_PSEUDOREFS {
+            stdin.push_str(pseudo);
+            stdin.push('\n');
+        }
+        let output = self.run_raw(
+            checkout,
+            &["cat-file", "--batch-check"],
+            None,
+            Some(stdin.into_bytes()),
+        )?;
+        if !output.status.success() {
+            return Err(format!(
+                "git cat-file --batch-check failed in {}: {}",
+                checkout.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() != WORKTREE_PSEUDOREFS.len() {
+            return Err(format!(
+                "git cat-file --batch-check returned {} lines for {} pseudoreferences in {}",
+                lines.len(),
+                WORKTREE_PSEUDOREFS.len(),
+                checkout.display()
+            ));
+        }
+        let mut states = Vec::with_capacity(WORKTREE_PSEUDOREFS.len());
+        for (pseudo, line) in WORKTREE_PSEUDOREFS.iter().zip(lines) {
+            let line = line.trim();
+            if line == format!("{pseudo} missing") {
+                states.push(PseudoRefState::Absent);
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let Some(oid) = parts.next() else {
+                states.push(PseudoRefState::Unknown(format!(
+                    "empty batch-check reply for {pseudo}"
+                )));
+                continue;
+            };
+            let Some(kind) = parts.next() else {
+                states.push(PseudoRefState::Unknown(format!(
+                    "unrecognized batch-check reply for {pseudo}: {line}"
+                )));
+                continue;
+            };
+            let valid_oid = matches!(oid.len(), 40 | 64)
+                && oid
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+            if !valid_oid {
+                states.push(PseudoRefState::Unknown(format!(
+                    "unrecognized batch-check status for {pseudo}: {line}"
+                )));
+                continue;
+            }
+            match kind {
+                "commit" => states.push(PseudoRefState::PresentCommit(oid.to_owned())),
+                "tag" => {
+                    let peeled = self.run(
+                        checkout,
+                        &["rev-parse", "--verify", &format!("{oid}^{{commit}}")],
+                        None,
+                    );
+                    match peeled {
+                        Ok(commit) if !commit.trim().is_empty() => {
+                            states.push(PseudoRefState::PresentCommit(commit.trim().to_owned()));
+                        }
+                        Ok(_) => states.push(PseudoRefState::PresentNonCommit {
+                            name: (*pseudo).to_owned(),
+                            object_type: "tag".to_owned(),
+                        }),
+                        Err(reason) => states.push(PseudoRefState::Unknown(reason)),
+                    }
+                }
+                other => states.push(PseudoRefState::PresentNonCommit {
+                    name: (*pseudo).to_owned(),
+                    object_type: other.to_owned(),
+                }),
+            }
+        }
+        Ok(states)
+    }
+
     /// Worktree-private references (`refs/worktree`, `refs/bisect`,
     /// `refs/rewritten`) and per-worktree pseudoreferences (`ORIG_HEAD`,
     /// `MERGE_HEAD`, etc.) that leave with this worktree.
@@ -210,27 +372,21 @@ impl Git {
             .filter(|line| !line.is_empty())
             .map(str::to_owned)
             .collect();
-        for pseudo in [
-            "ORIG_HEAD",
-            "MERGE_HEAD",
-            "CHERRY_PICK_HEAD",
-            "REVERT_HEAD",
-            "BISECT_HEAD",
-            "AUTO_MERGE",
-        ] {
-            if let Ok(oid) = self.run(
-                checkout,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "-q",
-                    &format!("{pseudo}^{{commit}}"),
-                ],
-                None,
-            ) {
-                let oid = oid.trim();
-                if !oid.is_empty() {
-                    refs.push(oid.to_owned());
+        for state in self.probe_pseudorefs(checkout)? {
+            match state {
+                PseudoRefState::PresentCommit(oid) => refs.push(oid),
+                PseudoRefState::PresentNonCommit { name, object_type } => {
+                    return Err(format!(
+                        "worktree {} holds non-commit pseudoreference {name} ({object_type})",
+                        checkout.display()
+                    ));
+                }
+                PseudoRefState::Absent => {}
+                PseudoRefState::Unknown(reason) => {
+                    return Err(format!(
+                        "could not verify pseudoreferences in {}: {reason}",
+                        checkout.display()
+                    ));
                 }
             }
         }

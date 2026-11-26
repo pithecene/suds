@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::ahead::{Ahead, Body, Claims, Entry, Head, Layout, START_AT, Slot};
+use crate::budget::{Budget, BudgetTracker, ExecutionOutcome};
 use crate::clones::{self, Counted, Extent};
 use crate::inspection::{ChildScan, EntryRevision, RootScan, ScanError};
 use crate::model::{EntryKind, ErrorKind, Measure, RootStatus};
@@ -150,7 +151,10 @@ fn walk_root(root: &Path, cancel: &AtomicBool) -> Outcome {
         walker.walk(root, &mut totals, cancel);
     }
 
-    let status = if walker.error_count == 0 && !walker.cancelled {
+    let status = if walker.error_count == 0
+        && !walker.cancelled
+        && walker.outcome() == ExecutionOutcome::Complete
+    {
         RootStatus::Complete
     } else {
         RootStatus::Partial
@@ -227,17 +231,49 @@ pub struct BoundedMeasure {
 
 impl Default for SharedScan {
     fn default() -> Self {
-        SharedScan {
-            walker: Walker::new(0),
-        }
+        Self::with_budget(Budget::default())
     }
 }
 
 impl SharedScan {
+    /// Creates a shared scan governed by `budget`.
+    pub fn with_budget(budget: Budget) -> Self {
+        Self::with_tracker(BudgetTracker::new(budget))
+    }
+
+    /// Creates a shared scan sharing an existing `tracker`.
+    pub fn with_tracker(tracker: Arc<BudgetTracker>) -> Self {
+        SharedScan {
+            walker: Walker::with_budget(0, tracker),
+        }
+    }
+
     pub(crate) fn for_removal() -> Self {
         let mut scan = Self::default();
         scan.walker.check_file_mounts = true;
         scan
+    }
+
+    /// Whether the scan's budget or cancellation flag has stopped further work.
+    pub fn is_stopped(&self) -> bool {
+        self.walker.cancelled || self.walker.tracker.is_stopped()
+    }
+
+    /// Final outcome of this scan's execution budget.
+    pub fn outcome(&self) -> ExecutionOutcome {
+        self.walker.outcome()
+    }
+
+    pub fn entries_visited(&self) -> u64 {
+        self.walker.tracker.entries_visited()
+    }
+
+    pub fn directories_deferred(&self) -> u64 {
+        self.walker.tracker.directories_deferred()
+    }
+
+    pub fn draining_workers(&self) -> usize {
+        self.walker.tracker.draining_workers()
     }
 
     /// Measures the entry at `start` and everything beneath it on its
@@ -256,6 +292,9 @@ impl SharedScan {
         claims: Claims,
         note: &mut Note<'_>,
     ) -> Option<BoundedMeasure> {
+        if self.is_stopped() {
+            return None;
+        }
         match fs::symlink_metadata(start) {
             Ok(meta) => self.walker.device = meta.dev(),
             Err(err) => {
@@ -265,10 +304,10 @@ impl SharedScan {
         }
         let mut tally = Tally::default();
         let mut set_aside = Vec::new();
-        let never = AtomicBool::new(false);
+        let cancel = Arc::clone(&self.walker.tracker.budget().cancel);
         let rules = Rules { claims, note };
         self.walker
-            .walk_within(start, &mut tally, &never, Some(rules), &mut set_aside)?;
+            .walk_within(start, &mut tally, &cancel, Some(rules), &mut set_aside)?;
         Some(BoundedMeasure {
             measure: tally.into_measure(),
             set_aside,
@@ -340,10 +379,15 @@ struct Walker {
     mounts: Vec<PathBuf>,
     /// Whether the scan stopped at a cancellation request.
     cancelled: bool,
+    tracker: Arc<BudgetTracker>,
 }
 
 impl Walker {
     fn new(device: u64) -> Self {
+        Self::with_budget(device, BudgetTracker::new(Budget::default()))
+    }
+
+    fn with_budget(device: u64, tracker: Arc<BudgetTracker>) -> Self {
         Walker {
             device,
             check_file_mounts: false,
@@ -357,7 +401,15 @@ impl Walker {
             user: rustix::process::geteuid().as_raw(),
             mounts: Vec::new(),
             cancelled: false,
+            tracker,
         }
+    }
+
+    fn outcome(&self) -> ExecutionOutcome {
+        if self.cancelled {
+            return ExecutionOutcome::Cancelled;
+        }
+        self.tracker.outcome(self.error_count > 0)
     }
 
     /// Adds the sums for the entry at `start` and everything beneath it to
@@ -395,7 +447,12 @@ impl Walker {
             Some(rules) => (rules.claims, Some(rules.note)),
             None => (Arc::new(|_| false), None),
         };
-        let ahead = Ahead::new(claims, self.device, self.check_file_mounts);
+        let ahead = Ahead::new(
+            claims,
+            self.device,
+            self.check_file_mounts,
+            Arc::clone(&self.tracker),
+        );
         // Each listing arrives sorted, and the stack takes subdirectories
         // in reverse. The order of the count therefore depends on the tree
         // alone, whichever thread read a directory.
@@ -405,9 +462,21 @@ impl Walker {
         while let Some((dir, slot)) = pending.pop() {
             if cancel.load(Ordering::Relaxed) {
                 self.cancelled = true;
+                self.tracker.cancel();
                 break;
             }
-            let (head, body) = ahead.body(&slot);
+            if self.tracker.is_stopped() {
+                if self.tracker.stop_reason() == Some(ExecutionOutcome::Cancelled) {
+                    self.cancelled = true;
+                }
+                break;
+            }
+            let Some((head, body)) = ahead.body(&slot) else {
+                if self.tracker.stop_reason() == Some(ExecutionOutcome::Cancelled) {
+                    self.cancelled = true;
+                }
+                break;
+            };
             if !asked && pending.len() + body.entered() >= START_AT {
                 asked = true;
                 let listed: Vec<_> = pending.iter().map(|(_, slot)| Arc::clone(slot)).collect();
@@ -423,7 +492,10 @@ impl Walker {
             };
             self.replay(&dir, &head, &body, &mut rest);
             ahead.counted(&body);
-            if self.cancelled {
+            if self.cancelled || self.tracker.is_stopped() {
+                if self.tracker.stop_reason() == Some(ExecutionOutcome::Cancelled) {
+                    self.cancelled = true;
+                }
                 break;
             }
         }
@@ -455,6 +527,13 @@ impl Walker {
             // request takes effect between entries.
             if cancel.load(Ordering::Relaxed) {
                 self.cancelled = true;
+                self.tracker.cancel();
+                break;
+            }
+            if self.tracker.is_stopped() {
+                if self.tracker.stop_reason() == Some(ExecutionOutcome::Cancelled) {
+                    self.cancelled = true;
+                }
                 break;
             }
             let path = child.path.as_path();
@@ -465,7 +544,18 @@ impl Walker {
                     continue;
                 }
             };
-            let entered = child.slot.as_ref().map(|slot| ahead.head(slot));
+            let entered = match child.slot.as_ref() {
+                Some(slot) => match ahead.head(slot) {
+                    Some(head) => Some(head),
+                    None => {
+                        if self.tracker.stop_reason() == Some(ExecutionOutcome::Cancelled) {
+                            self.cancelled = true;
+                        }
+                        break;
+                    }
+                },
+                None => None,
+            };
             if !probed.mount {
                 if let Some(note) = note.as_deref_mut() {
                     note(&Entry {

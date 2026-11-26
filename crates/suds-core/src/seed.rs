@@ -13,9 +13,12 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use std::time::SystemTime;
+
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
+use crate::budget::Budget;
 use crate::development::{self, Ecosystem};
 use crate::organize::journal::{Event, Journal, JournalError, RunStatus};
 use crate::organize::native::NativePath;
@@ -105,8 +108,20 @@ fn same_lock(a: &Path, b: &Path) -> bool {
 
 /// Plans the seed of the checkout at `destination`. With `from`, the plan
 /// takes build state from that checkout alone. Without it, the plan takes
-/// the checkout of the same repository whose build state changed last.
+/// the checkout of the same repository whose build state changed last,
+/// bounded by the default execution budget.
 pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<SeedPlan, String> {
+    plan_seed_with_budget(destination, from, git, &Budget::default())
+}
+
+/// Like [`plan_seed`], bounded by `budget` so sibling worktree enumeration
+/// never scans an unbounded number of checkouts.
+pub fn plan_seed_with_budget(
+    destination: &Path,
+    from: Option<&Path>,
+    git: &Git,
+    budget: &Budget,
+) -> Result<SeedPlan, String> {
     if !development::is_checkout(destination) {
         return Err(format!(
             "{} holds no checkout, so Suds seeds nothing there",
@@ -114,6 +129,7 @@ pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<S
         ));
     }
     let checkouts = git.worktrees(destination)?;
+    let mut passed = Vec::new();
     let candidates: Vec<PathBuf> = match from {
         Some(from) => {
             if !checkouts.iter().any(|checkout| checkout == from) {
@@ -125,15 +141,27 @@ pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<S
             }
             vec![from.to_path_buf()]
         }
-        None => checkouts,
+        None => shortlist_candidates(
+            checkouts,
+            destination,
+            budget.max_seed_candidates,
+            &mut passed,
+        ),
     };
-    let mut passed = Vec::new();
+    let tracker = crate::budget::BudgetTracker::new(budget.clone());
     let mut offers = Vec::new();
     for checkout in candidates {
         if checkout == destination {
             continue;
         }
-        let offer = offer_of(&checkout, destination, &mut passed);
+        if tracker.is_stopped() {
+            passed.push(Passed {
+                path: NativePath::new(checkout),
+                reason: "seed selection stopped because the execution budget ended".to_owned(),
+            });
+            continue;
+        }
+        let offer = offer_of(&checkout, destination, &tracker, &mut passed);
         if !offer.clones.is_empty() {
             offers.push(offer);
         }
@@ -170,9 +198,49 @@ pub fn plan_seed(destination: &Path, from: Option<&Path>, git: &Git) -> Result<S
     })
 }
 
+/// Selects a bounded shortlist of sibling checkouts without traversing every
+/// sibling's tree: the main checkout comes first, followed by siblings ranked
+/// cheaply by `target` (or checkout) modification time.
+fn shortlist_candidates(
+    checkouts: Vec<PathBuf>,
+    destination: &Path,
+    limit: usize,
+    passed: &mut Vec<Passed>,
+) -> Vec<PathBuf> {
+    let mut siblings: Vec<(bool, Option<SystemTime>, PathBuf)> = checkouts
+        .into_iter()
+        .enumerate()
+        .filter(|(_, checkout)| checkout != destination)
+        .map(|(index, checkout)| {
+            let mtime = fs::symlink_metadata(checkout.join("target"))
+                .or_else(|_| fs::symlink_metadata(&checkout))
+                .ok()
+                .and_then(|meta| meta.modified().ok());
+            (index == 0, mtime, checkout)
+        })
+        .collect();
+    if limit == 0 || siblings.len() <= limit {
+        return siblings.into_iter().map(|(_, _, path)| path).collect();
+    }
+    siblings.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    let deferred = siblings.split_off(limit);
+    for (_, _, checkout) in deferred {
+        passed.push(Passed {
+            path: NativePath::new(checkout),
+            reason: format!("seed candidate limit of {limit} checkouts reached"),
+        });
+    }
+    siblings.into_iter().map(|(_, _, path)| path).collect()
+}
+
 /// The build state of `checkout` that the destination can take, with the
 /// reason for each directory that it cannot.
-fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Offer {
+fn offer_of(
+    checkout: &Path,
+    destination: &Path,
+    tracker: &std::sync::Arc<crate::budget::BudgetTracker>,
+    passed: &mut Vec<Passed>,
+) -> Offer {
     let mut offer = Offer {
         checkout: checkout.to_path_buf(),
         clones: Vec::new(),
@@ -180,7 +248,8 @@ fn offer_of(checkout: &Path, destination: &Path, passed: &mut Vec<Passed>) -> Of
         bytes: 0,
         newest: None,
     };
-    let (states, unread, first) = development::build_states(checkout);
+    let (states, unread, first) =
+        development::build_states_with_tracker(checkout, std::sync::Arc::clone(tracker));
     if let Some(first) = first {
         // An entry that the scan could not read may hold build state, so
         // the plan names what it could not establish.

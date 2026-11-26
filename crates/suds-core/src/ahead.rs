@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
+use std::time::Duration;
 
+use crate::budget::{BudgetTracker, apply_background_thread_policy};
 use crate::model::EntryKind;
 use crate::scan::{Probed, entry_kind, probe_at};
 
@@ -143,6 +145,9 @@ pub(crate) struct Head {
     /// Whether the caller's rule claims the directory, so the traversal
     /// never enters it.
     pub(crate) claimed: bool,
+    /// Whether the reader deferred the directory after reaching the
+    /// per-directory entry limit.
+    pub(crate) deferred: bool,
     listing: Option<Arc<Listing>>,
     /// The error that kept the directory's listing from the traversal.
     pub(crate) unlisted: Option<io::Error>,
@@ -228,10 +233,32 @@ impl Slot {
         self.changed.notify_all();
     }
 
-    fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
-        self.changed
-            .wait(state)
-            .unwrap_or_else(PoisonError::into_inner)
+    fn wait_bounded<'a>(
+        &self,
+        state: MutexGuard<'a, State>,
+        tracker: &BudgetTracker,
+    ) -> Option<MutexGuard<'a, State>> {
+        if tracker.is_stopped() {
+            return None;
+        }
+        let (guard, _) = self
+            .changed
+            .wait_timeout(state, Duration::from_millis(25))
+            .unwrap_or_else(PoisonError::into_inner);
+        if tracker.is_stopped() {
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+/// Decrements active worker counts for a traversal and its tracker on drop.
+struct ActiveWorker<'a>(&'a Ahead);
+
+impl Drop for ActiveWorker<'_> {
+    fn drop(&mut self) {
+        self.0.active_workers.fetch_sub(1, Ordering::AcqRel);
+        self.0.tracker.worker_exit();
     }
 }
 
@@ -305,13 +332,20 @@ impl Pool {
     }
 
     fn work(&self) {
+        apply_background_thread_policy();
         let mut shared = self.shared();
         loop {
             match next(&mut shared) {
                 Some((ahead, slot)) => {
                     drop(shared);
-                    ahead.list(&slot);
-                    ahead.probe(&slot);
+                    let _active = ActiveWorker(&ahead);
+                    if !ahead.tracker.is_stopped() {
+                        ahead.list(&slot);
+                        if !ahead.tracker.is_stopped() {
+                            ahead.probe(&slot);
+                        }
+                    }
+                    drop(_active);
                     drop((ahead, slot));
                     shared = self.shared();
                 }
@@ -327,11 +361,16 @@ impl Pool {
 }
 
 /// Takes the waiting directory that a joined traversal needs first. A
-/// traversal that holds its limit of read entries offers none.
+/// traversal that holds its limit of read entries, reached its helper-reader
+/// cap, or stopped offers none.
 fn next(shared: &mut Shared) -> Option<(Arc<Ahead>, Arc<Slot>)> {
     let Shared { waiting, joined } = shared;
     for ahead in joined.iter() {
-        if ahead.held.load(Ordering::Relaxed) >= HELD_LIMIT {
+        if ahead.tracker.is_stopped() || ahead.held.load(Ordering::Relaxed) >= HELD_LIMIT {
+            continue;
+        }
+        let limit = ahead.helper_limit();
+        if limit == 0 || ahead.active_workers.load(Ordering::Acquire) >= limit {
             continue;
         }
         let range = (ahead.id, Box::default())..(ahead.id + 1, Box::default());
@@ -344,6 +383,8 @@ fn next(shared: &mut Shared) -> Option<(Arc<Ahead>, Arc<Slot>)> {
             waiting.remove(&place);
         }
         if let Some(slot) = slot {
+            ahead.active_workers.fetch_add(1, Ordering::AcqRel);
+            ahead.tracker.worker_enter();
             return Some((Arc::clone(ahead), slot));
         }
     }
@@ -356,34 +397,48 @@ pub(crate) struct Ahead {
     claims: Claims,
     device: u64,
     check_file_mounts: bool,
+    tracker: Arc<BudgetTracker>,
     /// Whether the threads have joined. Before they join, the traversal
     /// reads each directory itself and no directory waits in the pool.
     joined: AtomicBool,
     held: AtomicUsize,
+    active_workers: AtomicUsize,
 }
 
 impl Ahead {
-    pub(crate) fn new(claims: Claims, device: u64, check_file_mounts: bool) -> Arc<Self> {
+    pub(crate) fn new(
+        claims: Claims,
+        device: u64,
+        check_file_mounts: bool,
+        tracker: Arc<BudgetTracker>,
+    ) -> Arc<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Arc::new(Ahead {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             claims,
             device,
             check_file_mounts,
+            tracker,
             joined: AtomicBool::new(false),
             held: AtomicUsize::new(0),
+            active_workers: AtomicUsize::new(0),
         })
+    }
+
+    fn helper_limit(&self) -> usize {
+        self.tracker.budget().helper_readers().min(WORKER_LIMIT)
     }
 
     fn joined(&self) -> bool {
         self.joined.load(Ordering::Relaxed)
     }
 
-    /// Lets the threads join. They take the listed directories that the
-    /// traversal has yet to count, given with the next one last, and the
-    /// directories beneath the one that the traversal counts now. A system
-    /// with one processor has no threads, and the traversal reads alone.
+    /// Lets the threads join when the traversal's total-reader budget allows
+    /// helper readers beyond the caller thread.
     pub(crate) fn join(self: &Arc<Self>, listed: &[Arc<Slot>], now: &Slot, body: &Body) {
+        if self.helper_limit() == 0 || self.tracker.is_stopped() {
+            return;
+        }
         let pool = Pool::get();
         if pool.threads == 0 {
             return;
@@ -401,53 +456,66 @@ impl Ahead {
         pool.changed.notify_all();
     }
 
-    /// Ends the reading ahead. A thread finishes the directory that it
-    /// reads, and its result goes unused.
+    /// Ends the reading ahead. It drops queued directories immediately and
+    /// keeps any mid-directory worker counted in `tracker.draining_workers()`.
     pub(crate) fn end(&self) {
         if !self.joined() {
             return;
         }
-        let mut shared = Pool::get().shared();
+        let pool = Pool::get();
+        let mut shared = pool.shared();
         shared.joined.retain(|ahead| ahead.id != self.id);
         let mut own = shared.waiting.split_off(&(self.id, Box::default()));
         let later = own.split_off(&(self.id + 1, Box::default()));
         shared.waiting.extend(later);
         self.joined.store(false, Ordering::Relaxed);
+        drop(shared);
+        pool.changed.notify_all();
     }
 
-    /// The first step of a directory's reading. The traversal lists a
-    /// directory that no thread has taken, and waits for one that a thread
-    /// lists.
-    pub(crate) fn head(&self, slot: &Slot) -> Arc<Head> {
+    /// The first step of a directory's reading. Returns `None` if stopped.
+    pub(crate) fn head(&self, slot: &Slot) -> Option<Arc<Head>> {
         loop {
+            if self.tracker.is_stopped() {
+                return None;
+            }
             self.list(slot);
             let mut state = slot.state();
             loop {
                 match &*state {
                     State::Listed(head) | State::Probing(head) | State::Read(head, _) => {
-                        return Arc::clone(head);
+                        return Some(Arc::clone(head));
                     }
-                    // The thread that listed the directory panicked.
+                    // The thread that listed the directory panicked or stopped.
                     State::Waiting => break,
-                    State::Listing => state = slot.wait(state),
+                    State::Listing => {
+                        state = slot.wait_bounded(state, &self.tracker)?;
+                    }
                 }
             }
         }
     }
 
-    /// Both steps of a directory's reading. The traversal runs each step
-    /// that no thread has taken, and waits for a step that a thread runs.
-    pub(crate) fn body(&self, slot: &Slot) -> (Arc<Head>, Arc<Body>) {
+    /// Both steps of a directory's reading. Returns `None` if stopped.
+    pub(crate) fn body(&self, slot: &Slot) -> Option<(Arc<Head>, Arc<Body>)> {
         loop {
+            if self.tracker.is_stopped() {
+                return None;
+            }
             self.list(slot);
+            if self.tracker.is_stopped() {
+                return None;
+            }
             self.probe(slot);
             let mut state = slot.state();
             loop {
                 match &*state {
-                    State::Read(head, body) => return (Arc::clone(head), Arc::clone(body)),
-                    // The thread that ran a step panicked.
+                    State::Read(head, body) => return Some((Arc::clone(head), Arc::clone(body))),
+                    // The thread that ran a step panicked or stopped.
                     State::Waiting | State::Listed(_) => break,
-                    State::Listing | State::Probing(_) => state = slot.wait(state),
+                    State::Listing | State::Probing(_) => {
+                        state = slot.wait_bounded(state, &self.tracker)?;
+                    }
                 }
             }
         }
@@ -522,18 +590,31 @@ impl Ahead {
         let dir = slot.dir.as_path();
         let mut head = Head {
             claimed: false,
+            deferred: false,
             listing: None,
             unlisted: None,
             unnamed: Vec::new(),
         };
-        match list(dir) {
-            Ok((listing, unnamed)) => {
+        match list_bounded(dir, self.tracker.budget().max_dir_entries, &self.tracker) {
+            Ok(ListOutcome::Listed(listing, unnamed)) => {
                 head.listing = Some(Arc::new(listing));
                 head.unnamed = unnamed;
             }
+            Ok(ListOutcome::Deferred(limit)) => {
+                head.deferred = true;
+                self.tracker.record_deferred_directory();
+                head.unlisted = Some(io::Error::other(format!(
+                    "directory exceeded per-directory entry limit of {limit}"
+                )));
+            }
+            Ok(ListOutcome::Stopped) => {
+                return head;
+            }
             Err(err) => head.unlisted = Some(err),
         }
-        if let (Some(beside), Some(parent)) = (&slot.beside, dir.parent()) {
+        if !head.deferred
+            && let (Some(beside), Some(parent)) = (&slot.beside, dir.parent())
+        {
             let entry = Entry {
                 path: dir,
                 kind: EntryKind::Directory,
@@ -550,12 +631,19 @@ impl Ahead {
             children: Vec::new(),
             weighed: false,
         };
-        let Some(listing) = head.listing.as_ref().filter(|_| !head.claimed) else {
+        let Some(listing) = head
+            .listing
+            .as_ref()
+            .filter(|_| !head.claimed && !head.deferred)
+        else {
             return body;
         };
         let dir = slot.dir.as_path();
-        body.children.reserve_exact(listing.names.len());
+        body.children.reserve(listing.names.len().min(4096));
         for (index, name) in listing.names.iter().enumerate() {
+            if !self.tracker.claim_entry() {
+                break;
+            }
             let path = dir.join(name);
             let probed = probe_at(&path, false, self.device, self.check_file_mounts);
             let enters = probed
@@ -587,12 +675,32 @@ fn offer(waiting: &mut Waiting, id: u64, slot: &Slot, body: &Body) -> usize {
     count
 }
 
-/// Lists a directory's names in byte order, with the error of each name
-/// that the listing could not state.
-fn list(dir: &Path) -> io::Result<(Listing, Vec<io::Error>)> {
+enum ListOutcome {
+    Listed(Listing, Vec<io::Error>),
+    Deferred(usize),
+    Stopped,
+}
+
+/// Lists a directory's names in byte order while enforcing per-directory entry
+/// limits and cancellation before allocating or probing an oversized directory.
+fn list_bounded(
+    dir: &Path,
+    max_entries: Option<usize>,
+    tracker: &BudgetTracker,
+) -> io::Result<ListOutcome> {
     let mut found = Vec::new();
     let mut unnamed = Vec::new();
+    let mut seen = 0_usize;
     for entry in fs::read_dir(dir)? {
+        if seen.is_multiple_of(64) && tracker.is_stopped() {
+            return Ok(ListOutcome::Stopped);
+        }
+        seen = seen.saturating_add(1);
+        if let Some(limit) = max_entries
+            && seen > limit
+        {
+            return Ok(ListOutcome::Deferred(limit));
+        }
         match entry {
             Ok(entry) => {
                 let kind = entry.file_type().ok().map(entry_kind);
@@ -609,7 +717,18 @@ fn list(dir: &Path) -> io::Result<(Listing, Vec<io::Error>)> {
         kinds,
         plain,
     };
-    Ok((listing, unnamed))
+    Ok(ListOutcome::Listed(listing, unnamed))
+}
+
+#[cfg(test)]
+fn list(dir: &Path) -> io::Result<(Listing, Vec<io::Error>)> {
+    let tracker = BudgetTracker::new(crate::budget::Budget::default());
+    match list_bounded(dir, None, &tracker)? {
+        ListOutcome::Listed(listing, unnamed) => Ok((listing, unnamed)),
+        ListOutcome::Deferred(_) | ListOutcome::Stopped => {
+            Err(io::Error::other("unexpected stop in unbounded list"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -742,12 +861,16 @@ mod tests {
     fn a_traversal_reads_the_metadata_of_one_directory_at_a_time_before_the_threads_join() {
         let dir = wide();
         let device = fs::metadata(dir.path()).unwrap().dev();
-        let ahead = super::Ahead::new(Arc::new(|_| false), device, false);
+        let tracker = crate::budget::BudgetTracker::new(crate::budget::Budget {
+            max_total_readers: 4,
+            ..crate::budget::Budget::default()
+        });
+        let ahead = super::Ahead::new(Arc::new(|_| false), device, false, tracker);
         let start = super::Slot::start(dir.path().to_path_buf());
-        let (_, body) = ahead.body(&start);
+        let (_, body) = ahead.body(&start).unwrap();
         for child in &body.children {
             let slot = child.slot.as_ref().unwrap();
-            assert!(!ahead.head(slot).claimed);
+            assert!(!ahead.head(slot).unwrap().claimed);
             // The first step lists the directory and reads no entry of it.
             assert!(matches!(*slot.state(), super::State::Listed(_)));
         }

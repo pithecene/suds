@@ -154,6 +154,22 @@ pub struct PressureArgs {
 
 #[derive(Debug, Args)]
 pub struct MaintainArgs {
+    /// Persist durable maintenance pause state without taking a mutation lock.
+    #[arg(long, conflicts_with_all = ["resume", "status"])]
+    pub pause: bool,
+
+    /// Optional reason recorded when pausing maintenance.
+    #[arg(long, value_name = "TEXT", requires = "pause")]
+    pub reason: Option<String>,
+
+    /// Clear durable maintenance pause state without taking a mutation lock.
+    #[arg(long, conflicts_with_all = ["pause", "status"])]
+    pub resume: bool,
+
+    /// Print cached pause and pressure state without running a scan or taking a lock.
+    #[arg(long, conflicts_with_all = ["pause", "resume"])]
+    pub status: bool,
+
     /// The output format.
     #[arg(long, value_enum, default_value_t = Format::Table)]
     pub format: Format,

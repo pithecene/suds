@@ -157,6 +157,10 @@ fn scan() -> DevelopmentScan {
         skipped_mount_count: 0,
         error_count: 0,
         errors: Vec::new(),
+        outcome: suds_core::budget::ExecutionOutcome::Complete,
+        entries_visited: 0,
+        directories_deferred: 0,
+        draining_workers: 0,
     }
 }
 

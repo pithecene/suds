@@ -220,6 +220,8 @@ fn systemd_files(unit: &Unit, directory: &Path) -> Vec<UnitFile> {
          \n\
          [Service]\n\
          Type=oneshot\n\
+         Nice=10\n\
+         IOSchedulingClass=idle\n\
          {path}\
          ExecStart={program} maintain\n\
          # A run that kept or refused a directory ends with status {PARTIAL_STATUS}.\n\
@@ -270,6 +272,14 @@ fn launchd_files(unit: &Unit, directory: &Path) -> Vec<UnitFile> {
          \t\t<string>maintain</string>\n\
          \t</array>\n\
          {path}\
+         \t<key>ProcessType</key>\n\
+         \t<string>Background</string>\n\
+         \t<key>LowPriorityIO</key>\n\
+         \t<true/>\n\
+         \t<key>LowPriorityBackgroundIO</key>\n\
+         \t<true/>\n\
+         \t<key>Nice</key>\n\
+         \t<integer>10</integer>\n\
          \t<key>StartInterval</key>\n\
          \t<integer>{seconds}</integer>\n\
          \t<key>RunAtLoad</key>\n\
@@ -330,7 +340,8 @@ fn stated(scheduler: Scheduler, placed: &[String]) -> Option<Unit> {
             let (_, arguments) = agent.split_once("<key>ProgramArguments</key>")?;
             let variables = agent.split_once("<key>PATH</key>");
             let path = variables.and_then(|(_, rest)| between(rest, "<string>", "</string>"));
-            let seconds: u64 = between(agent, "<integer>", "</integer>")?.parse().ok()?;
+            let (_, interval) = agent.split_once("<key>StartInterval</key>")?;
+            let seconds: u64 = between(interval, "<integer>", "</integer>")?.parse().ok()?;
             Some(Unit {
                 program: xml_unescape(between(arguments, "<string>", "</string>")?).into(),
                 path: path.map(xml_unescape),

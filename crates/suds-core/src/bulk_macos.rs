@@ -171,6 +171,7 @@ pub(crate) fn read_dir_bulk(
             if tracker.is_stopped() {
                 return Ok(BulkOutcome::Stopped);
             }
+            crate::bench::record_bulk_dir_call();
             let count = match clones::query_dir_bulk(&fd, &mut request, &mut buf) {
                 Ok(count) => count,
                 Err(err) => {

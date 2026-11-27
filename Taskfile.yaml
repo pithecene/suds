@@ -34,6 +34,29 @@ tasks:
       - task: test
       - task: lint
 
+  gates:
+    desc: Run deterministic resource-budget and accounting-equivalence gate tests
+    cmds:
+      - cargo test --locked -p suds-core --test gates -- --nocapture
+      - cargo test --locked -p suds-core --test gates -- --nocapture
+      - cargo test --locked -p suds-core --test gates -- --nocapture
+
+  bench:
+    desc: Run component benchmarks
+    cmd: cargo bench --locked -p suds-core --bench suite -- component {{.CLI_ARGS}}
+
+  bench:system:
+    desc: Run generated multi-scale workspace and maintenance benchmarks
+    cmd: cargo bench --locked -p suds-core --bench suite -- system {{.CLI_ARGS}}
+
+  bench:live:
+    desc: Run read-only operational benchmarks against this checkout
+    cmd: cargo bench --locked -p suds-core --bench suite -- live --root '{{.ROOT_DIR}}' {{.CLI_ARGS}}
+
+  bench:compare:
+    desc: Compare two JSON benchmark reports
+    cmd: cargo bench --locked -p suds-core --bench suite -- compare {{.CLI_ARGS}}
+
   inspect:
     desc: Run the debug build of suds inspect with the arguments after --
     cmd: cargo run --locked --quiet -p suds -- inspect {{.CLI_ARGS}}

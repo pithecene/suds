@@ -428,6 +428,7 @@ impl HelperRunner {
         } else {
             self.launches.fetch_add(1, Ordering::AcqRel);
         }
+        crate::bench::record_helper_launch();
         self.pace_launch(&spec.operation, &spec.program, deadline)?;
 
         let slot_cancel = Arc::new(AtomicBool::new(false));

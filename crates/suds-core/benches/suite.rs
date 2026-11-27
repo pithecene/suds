@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use suds_core::bench::{
     BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, EnvironmentInfo, ScaleProfile,
-    StepOutcome, compare_reports, format_comparison, measure_case, with_reference_scan,
+    StepOutcome, compare_reports, format_comparison, measure_case, read_report,
+    with_reference_scan,
 };
 use suds_core::budget::Budget;
 use suds_core::development::{Environment, inspect};
@@ -217,7 +218,7 @@ fn run() -> Result<(), String> {
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "component".to_owned(),
-                environment: EnvironmentInfo::collect(&cwd),
+                environment: EnvironmentInfo::collect(&cwd, &std::env::temp_dir()),
                 cases: run_component(samples)?,
             };
             emit_report(&report, output.as_deref())
@@ -234,7 +235,7 @@ fn run() -> Result<(), String> {
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "system".to_owned(),
-                environment: EnvironmentInfo::collect(&cwd),
+                environment: EnvironmentInfo::collect(&cwd, &std::env::temp_dir()),
                 cases,
             };
             emit_report(&report, output.as_deref())
@@ -248,7 +249,7 @@ fn run() -> Result<(), String> {
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "live".to_owned(),
-                environment: EnvironmentInfo::collect(&root),
+                environment: EnvironmentInfo::collect(&cwd, &root),
                 cases: run_live(&root, samples)?,
             };
             emit_report(&report, output.as_deref())
@@ -259,17 +260,18 @@ fn run() -> Result<(), String> {
             json,
             allow_incompatible,
         } => {
-            let base: BenchReport = serde_json::from_str(
-                &fs::read_to_string(&baseline)
-                    .map_err(|e| format!("{}: {e}", baseline.display()))?,
-            )
-            .map_err(|e| e.to_string())?;
-            let cand: BenchReport = serde_json::from_str(
-                &fs::read_to_string(&candidate)
-                    .map_err(|e| format!("{}: {e}", candidate.display()))?,
-            )
-            .map_err(|e| e.to_string())?;
+            let read = |side: &str, path: &Path| -> Result<BenchReport, String> {
+                let text =
+                    fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                read_report(side, &text)
+            };
+            let base = read("baseline", &baseline)?;
+            let cand = read("candidate", &candidate)?;
             let comp = compare_reports(&base, &cand);
+            // A refusal prints no delta, so a reader of the output never takes one from reports that differ.
+            if let Some(refusal) = comp.refusal(allow_incompatible) {
+                return Err(refusal);
+            }
             if json {
                 println!(
                     "{}",
@@ -277,12 +279,6 @@ fn run() -> Result<(), String> {
                 );
             } else {
                 print!("{}", format_comparison(&comp));
-            }
-            if !comp.compatible && !allow_incompatible {
-                return Err(format!(
-                    "incompatible benchmark reports ({} issue(s)); pass --allow-incompatible to compare anyway",
-                    comp.incompatibilities.len()
-                ));
             }
             Ok(())
         }
@@ -294,8 +290,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
     let roots = vec![ws.workspace_root.clone(), ws.store_root.clone()];
     let env = Environment::default();
 
-    let mut params = BTreeMap::new();
-    params.insert("profile".to_owned(), "small".to_owned());
+    let params = ScaleProfile::small().parameters();
 
     let mut cases = Vec::new();
     cases.push(measure_case(
@@ -308,6 +303,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: scan.checkouts.iter().map(|c| c.own.allocated_bytes).sum(),
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -323,6 +319,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: scan.checkouts.iter().map(|c| c.own.allocated_bytes).sum(),
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -337,10 +334,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
     let env = Environment::default();
     let programs = Programs::default();
 
-    let mut base_params = BTreeMap::new();
-    base_params.insert("profile".to_owned(), profile.name.clone());
-    base_params.insert("repositories".to_owned(), profile.repositories.to_string());
-    base_params.insert("worktrees".to_owned(), profile.worktrees.to_string());
+    let base_params = profile.parameters();
 
     let mut cases = Vec::new();
 
@@ -366,6 +360,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: allocated,
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -472,6 +467,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             StepOutcome {
                 entries_visited: plan.candidates.len() as u64,
                 reclaimed_bytes: plan.removable_bytes(),
+                // The plan reads a scan that the case holds, so no part of it can stay unmeasured.
+                complete: true,
                 ..StepOutcome::default()
             }
         },
@@ -533,6 +530,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                     entries_visited: target_scan.entries_visited,
                     allocated_bytes: shared,
                     reclaimed_bytes: rreport.freed_bytes,
+                    complete: target_scan.outcome.is_complete(),
                     ..StepOutcome::default()
                 }
             },
@@ -583,7 +581,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 allocated_bytes: report.pressure.usage_bytes,
                 reclaimed_bytes: freed,
                 slices: 1,
-                complete: report.pressure.complete,
+                complete: report.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },

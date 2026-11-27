@@ -136,39 +136,20 @@ fn capture_os() -> Option<ProcessSample> {
 /// Reads the CPU time of this process and of the children it waited for, and this process's peak resident size.
 #[cfg(target_os = "macos")]
 fn capture_os() -> Option<ProcessSample> {
-    let own = resource_usage(libc::RUSAGE_SELF)?;
-    let children = resource_usage(libc::RUSAGE_CHILDREN)?;
+    use nix::sys::resource::{UsageWho, getrusage};
+    use nix::sys::time::TimeValLike;
+
+    let micros = |time: nix::sys::time::TimeVal| u64::try_from(time.num_microseconds()).ok();
+    let own = getrusage(UsageWho::RUSAGE_SELF).ok()?;
+    let children = getrusage(UsageWho::RUSAGE_CHILDREN).ok()?;
     Some(ProcessSample {
-        self_user_us: timeval_us(own.ru_utime)?,
-        self_sys_us: timeval_us(own.ru_stime)?,
-        child_user_us: timeval_us(children.ru_utime)?,
-        child_sys_us: timeval_us(children.ru_stime)?,
+        self_user_us: micros(own.user_time())?,
+        self_sys_us: micros(own.system_time())?,
+        child_user_us: micros(children.user_time())?,
+        child_sys_us: micros(children.system_time())?,
         // macOS states the peak resident size in bytes.
-        peak_rss_bytes: u64::try_from(own.ru_maxrss).ok(),
+        peak_rss_bytes: u64::try_from(own.max_rss()).ok(),
     })
-}
-
-#[cfg(target_os = "macos")]
-#[expect(
-    unsafe_code,
-    reason = "rustix offers no getrusage, so the reading goes through libc"
-)]
-fn resource_usage(who: libc::c_int) -> Option<libc::rusage> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: `usage` points to writable memory of the size of one `rusage`, which is all that getrusage writes.
-    let status = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
-    if status != 0 {
-        return None;
-    }
-    // SAFETY: getrusage returned 0, so it filled the structure, and each of its fields is a plain integer.
-    Some(unsafe { usage.assume_init() })
-}
-
-#[cfg(target_os = "macos")]
-fn timeval_us(time: libc::timeval) -> Option<u64> {
-    let seconds = u64::try_from(time.tv_sec).ok()?;
-    let micros = u64::try_from(time.tv_usec).ok()?;
-    seconds.checked_mul(1_000_000)?.checked_add(micros)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -230,14 +211,15 @@ pub struct EnvironmentInfo {
 }
 
 impl EnvironmentInfo {
-    pub fn collect(repo_root: &Path) -> Self {
+    /// Reads the revision from `repo_root` and the filesystem from `measured_root`, the tree that the cases read.
+    pub fn collect(repo_root: &Path, measured_root: &Path) -> Self {
         let git_revision = run_git_trimmed(repo_root, &["rev-parse", "HEAD"])
             .unwrap_or_else(|| "unknown".to_owned());
         let git_dirty =
             run_git_trimmed(repo_root, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
         let logical_cpus = std::thread::available_parallelism().map_or(1, usize::from);
-        let filesystem = filesystem_type(repo_root);
-        let filesystem_block_size = statvfs(repo_root).ok().map(|st| st.f_frsize);
+        let filesystem = filesystem_type(measured_root);
+        let filesystem_block_size = statvfs(measured_root).ok().map(|st| st.f_frsize);
         let open_files_limit =
             rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
         let now_secs = SystemTime::now()
@@ -297,27 +279,15 @@ fn run_git_trimmed(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// Domain metrics returned by an individual Suds benchmark step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepOutcome {
     pub entries_visited: u64,
     pub allocated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub cursor_bytes: u64,
     pub slices: u64,
+    /// Whether the step measured all of its work. A step that states nothing is incomplete.
     pub complete: bool,
-}
-
-impl Default for StepOutcome {
-    fn default() -> Self {
-        Self {
-            entries_visited: 0,
-            allocated_bytes: 0,
-            reclaimed_bytes: 0,
-            cursor_bytes: 0,
-            slices: 0,
-            complete: true,
-        }
-    }
 }
 
 /// Measurements captured for a single timed benchmark sample.
@@ -390,19 +360,14 @@ pub fn measure_case<S>(
         let after_proc = ProcessSample::capture();
         let after_counts = Counts::now();
         elapsed.push(took_us);
-        let (cpu_us, peak, growth) = match (before_proc, after_proc) {
-            (Some(before), Some(after)) => {
-                let cpu = after.delta_since(before).total_cpu_us();
-                cpus.push(cpu);
-                (
-                    Some(cpu),
-                    after.peak_rss_bytes,
-                    after.peak_rss_growth_since(before),
-                )
-            }
-            _ => (None, None, None),
+        let cpu_us = match (before_proc, after_proc) {
+            (Some(before), Some(after)) => Some(after.delta_since(before).total_cpu_us()),
+            _ => None,
         };
-        process_peak = process_peak.max(peak);
+        cpus.extend(cpu_us);
+        let (peak, growth) = sample_memory(before_proc, after_proc);
+        // The case's peak is the one after its last sample, so a sample that read none leaves none.
+        process_peak = peak;
         peak_growth = peak_growth.max(growth);
         let counts = after_counts.since(before_counts);
         sample_records.push(SampleReport {
@@ -465,6 +430,20 @@ pub fn measure_case<S>(
     }
 }
 
+/// The process's peak resident size after a sample, and how far the sample raised it. The peak needs the reading
+/// after the sample alone, and the rise needs both readings.
+fn sample_memory(
+    before: Option<ProcessSample>,
+    after: Option<ProcessSample>,
+) -> (Option<u64>, Option<u64>) {
+    let peak = after.and_then(|after| after.peak_rss_bytes);
+    let growth = match (before, after) {
+        (Some(before), Some(after)) => after.peak_rss_growth_since(before),
+        _ => None,
+    };
+    (peak, growth)
+}
+
 fn median_u64(values: impl Iterator<Item = u64>) -> u64 {
     let mut sorted: Vec<u64> = values.collect();
     if sorted.is_empty() {
@@ -495,6 +474,23 @@ pub struct ScaleProfile {
 }
 
 impl ScaleProfile {
+    /// Each dimension of the profile as a case's parameters, so two reports of different fixtures do not compare.
+    pub fn parameters(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("profile".to_owned(), self.name.clone()),
+            ("repositories".to_owned(), self.repositories.to_string()),
+            ("worktrees".to_owned(), self.worktrees.to_string()),
+            (
+                "target_files_per_checkout".to_owned(),
+                self.target_files_per_checkout.to_string(),
+            ),
+            (
+                "hardlinked_packages".to_owned(),
+                self.hardlinked_packages.to_string(),
+            ),
+        ])
+    }
+
     pub fn small() -> Self {
         Self {
             name: "small".to_owned(),
@@ -824,6 +820,42 @@ pub struct ComparisonReport {
     pub cases: Vec<CaseDelta>,
 }
 
+impl ComparisonReport {
+    /// The refusal of a comparison that the reports do not support, which names each reason, or none where they
+    /// compare or `allow_incompatible` holds. A caller prints it in place of the deltas.
+    pub fn refusal(&self, allow_incompatible: bool) -> Option<String> {
+        if self.compatible || allow_incompatible {
+            return None;
+        }
+        let mut text =
+            "the reports do not compare, and `--allow-incompatible` compares them anyway:"
+                .to_owned();
+        for reason in &self.incompatibilities {
+            text.push_str("\n  - ");
+            text.push_str(reason);
+        }
+        Some(text)
+    }
+}
+
+/// Reads the report of `side` from `text`. A report of another schema lacks fields that this suite compares, so its
+/// schema answers before its fields are read, and no option compares it.
+pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| format!("{side} is no JSON report: {err}"))?;
+    match value["schema"].as_str() {
+        Some(schema) if schema == BENCHMARK_SCHEMA => {}
+        Some(schema) => {
+            return Err(format!(
+                "{side} has schema {schema}, and this suite compares {BENCHMARK_SCHEMA}"
+            ));
+        }
+        None => return Err(format!("{side} names no schema")),
+    }
+    serde_json::from_value(value)
+        .map_err(|err| format!("{side} holds no report that Suds reads: {err}"))
+}
+
 /// Compares matching benchmark cases between `baseline` and `candidate`, checking environment and workload compatibility.
 pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> ComparisonReport {
     let mut incompatibilities = Vec::new();
@@ -850,6 +882,18 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
     for case in &candidate.cases {
         if !baseline.cases.iter().any(|c| c.name == case.name) {
             incompatibilities.push(format!("baseline lacks case {}", case.name));
+        }
+    }
+    // A case's memory is a rise of the process's peak, so the cases before it decide what is left to rise.
+    let order = |report: &BenchReport| -> Vec<String> {
+        report.cases.iter().map(|c| c.name.clone()).collect()
+    };
+    let (mut base_names, mut cand_names) = (order(baseline), order(candidate));
+    if base_names != cand_names {
+        base_names.sort();
+        cand_names.sort();
+        if base_names == cand_names {
+            incompatibilities.push("the reports run their cases in a different order".to_owned());
         }
     }
     if baseline.suite != candidate.suite {
@@ -1044,8 +1088,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        BENCHMARK_SCHEMA, BenchReport, CaseReport, EnvironmentInfo, ProcessSample, StepOutcome,
-        compare_reports, measure_case, nearest_rank_index, parse_proc_sample,
+        BENCHMARK_SCHEMA, BenchReport, CaseReport, EnvironmentInfo, ProcessSample, ScaleProfile,
+        StepOutcome, compare_reports, measure_case, nearest_rank_index, parse_proc_sample,
+        read_report, sample_memory,
     };
 
     #[test]
@@ -1158,7 +1203,16 @@ mod tests {
     fn case(name: &str, profile: &str) -> CaseReport {
         let mut parameters = BTreeMap::new();
         parameters.insert("profile".to_owned(), profile.to_owned());
-        measure_case(name, parameters, 1, || (), |()| StepOutcome::default())
+        measure_case(
+            name,
+            parameters,
+            1,
+            || (),
+            |()| StepOutcome {
+                complete: true,
+                ..StepOutcome::default()
+            },
+        )
     }
 
     fn report(environment: EnvironmentInfo, cases: Vec<CaseReport>) -> BenchReport {
@@ -1287,5 +1341,99 @@ mod tests {
             let cand = report(changed, vec![case("system/scan", "small")]);
             assert_eq!(compare_reports(&base, &cand).incompatibilities, [refusal]);
         }
+    }
+    #[test]
+    fn a_step_that_states_no_completion_is_incomplete() {
+        let silent = measure_case(
+            "test/silent",
+            BTreeMap::new(),
+            1,
+            || (),
+            |()| StepOutcome::default(),
+        );
+        assert!(!silent.complete);
+        assert_eq!(silent.incomplete_samples, 1);
+    }
+
+    #[test]
+    fn a_sample_s_peak_needs_the_reading_after_it_alone() {
+        let sample = |peak: u64| ProcessSample {
+            peak_rss_bytes: Some(peak),
+            ..ProcessSample::default()
+        };
+        assert_eq!(sample_memory(None, Some(sample(900))), (Some(900), None));
+        assert_eq!(sample_memory(Some(sample(600)), None), (None, None));
+        assert_eq!(
+            sample_memory(Some(sample(600)), Some(sample(900))),
+            (Some(900), Some(300))
+        );
+    }
+
+    #[test]
+    fn compare_reports_refuses_the_same_cases_in_another_order() {
+        let forward = report(
+            environment(Some("ext4")),
+            vec![
+                case("system/scan", "small"),
+                case("system/reclaim", "small"),
+            ],
+        );
+        let reversed = report(
+            environment(Some("ext4")),
+            vec![
+                case("system/reclaim", "small"),
+                case("system/scan", "small"),
+            ],
+        );
+        assert_eq!(
+            compare_reports(&forward, &reversed).incompatibilities,
+            ["the reports run their cases in a different order"]
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_each_reason_and_the_option_lifts_it() {
+        let base = report(
+            environment(Some("ext4")),
+            vec![case("system/scan", "small")],
+        );
+        let cand = report(
+            environment(Some("tmpfs")),
+            vec![case("system/scan", "small")],
+        );
+        let comp = compare_reports(&base, &cand);
+        assert_eq!(
+            comp.refusal(false).as_deref(),
+            Some(
+                "the reports do not compare, and `--allow-incompatible` compares them anyway:\n  - filesystem mismatch: ext4 vs tmpfs"
+            )
+        );
+        assert_eq!(comp.refusal(true), None);
+        assert_eq!(compare_reports(&base, &base).refusal(false), None);
+    }
+
+    #[test]
+    fn a_report_of_an_earlier_schema_is_refused_before_its_fields_are_read() {
+        // The earlier schema's report holds none of the fields that this one added.
+        let earlier =
+            r#"{"schema":"suds.benchmark/v1","suite":"system","environment":{},"cases":[]}"#;
+        assert_eq!(
+            read_report("baseline", earlier).unwrap_err(),
+            "baseline has schema suds.benchmark/v1, and this suite compares suds.benchmark/v2"
+        );
+        let current = report(
+            environment(Some("ext4")),
+            vec![case("system/scan", "small")],
+        );
+        let text = serde_json::to_string(&current).unwrap();
+        assert_eq!(read_report("candidate", &text).unwrap(), current);
+    }
+
+    #[test]
+    fn a_profile_s_parameters_name_each_of_its_dimensions() {
+        let mut larger = ScaleProfile::small();
+        larger.target_files_per_checkout *= 2;
+        assert_ne!(larger.parameters(), ScaleProfile::small().parameters());
+        assert_eq!(ScaleProfile::small().parameters().len(), 5);
     }
 }

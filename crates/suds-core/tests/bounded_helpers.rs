@@ -1108,7 +1108,7 @@ fn multi_slice_reclamation_excludes_freed_bytes_from_cursor_and_final_pressure()
             && !targets[0].exists()
             && !verified_cursor_reduction
         {
-            // Once repo-a/target is reclaimed, accumulated_usage_bytes must not retain its bytes.
+            // Once maintenance reclaims repo-a/target, accumulated_usage_bytes drops its bytes.
             assert!(
                 cursor.accumulated_usage_bytes < 128 * 1024,
                 "cursor retained freed target bytes: {}",
@@ -1160,7 +1160,7 @@ fn legacy_v1_cursor_is_ignored_and_observe_cursor_does_not_skip_reclaim() {
     .unwrap();
     assert!(
         suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor()).is_none(),
-        "legacy v1 cursor must be rejected"
+        "read_maintain_cursor must reject a legacy v1 cursor"
     );
 
     // Observe ignores the legacy cursor and measures the full workspace.

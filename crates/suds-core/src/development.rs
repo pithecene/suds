@@ -591,6 +591,9 @@ pub(crate) struct InspectSlice {
     pub scan: DevelopmentScan,
     pub completed_checkouts: Vec<PathBuf>,
     pub remaining_pending: Vec<PathBuf>,
+    pub completed_stores: Vec<String>,
+    pub remaining_stores: bool,
+    pub workspaces_complete: bool,
     pub slice_capped: bool,
 }
 
@@ -602,17 +605,28 @@ pub fn inspect_with_budget(
     budget: Budget,
 ) -> DevelopmentScan {
     let tracker = crate::budget::BudgetTracker::new(budget);
-    inspect_with_tracker(workspaces, environment, tracker, &HashSet::new(), &[], None).scan
+    inspect_with_tracker(
+        workspaces,
+        environment,
+        tracker,
+        &HashSet::new(),
+        &[],
+        &HashSet::new(),
+        None,
+    )
+    .scan
 }
 
 /// Inspects workspaces and stores sharing an existing `tracker`, resuming
-/// `seed_pending`, skipping `skip_checkouts`, and stopping at `scan_entry_cap`.
+/// `seed_pending`, skipping `skip_checkouts` and `skip_stores`, and stopping
+/// at `scan_entry_cap`.
 pub(crate) fn inspect_with_tracker(
     workspaces: &[PathBuf],
     environment: &Environment,
     tracker: Arc<crate::budget::BudgetTracker>,
     skip_checkouts: &HashSet<PathBuf>,
     seed_pending: &[PathBuf],
+    skip_stores: &HashSet<String>,
     scan_entry_cap: Option<u64>,
 ) -> InspectSlice {
     tracker.set_phase_entry_cap(scan_entry_cap);
@@ -664,6 +678,7 @@ pub(crate) fn inspect_with_tracker(
         }
         results.push(workspace);
     }
+    let workspaces_complete = !scan.is_stopped() && results.iter().all(|w| w.measured);
     while let Some(mut checkout) = found.pending.pop_front() {
         if skip_checkouts.contains(&checkout.path) {
             continue;
@@ -737,12 +752,19 @@ pub(crate) fn inspect_with_tracker(
     remaining_pending.sort();
     remaining_pending.dedup();
     remaining_pending.retain(|p| !completed_checkouts.contains(p));
-    if skip_checkouts.is_empty() && seed_pending.is_empty() && !scan.is_stopped() {
+    let mut completed_stores = Vec::new();
+    let mut remaining_stores = !remaining_pending.is_empty() || scan.is_stopped();
+    if !remaining_stores {
         for spec in store_specs(environment) {
+            if skip_stores.contains(spec.id) {
+                continue;
+            }
             if scan.is_stopped() {
+                remaining_stores = true;
                 break;
             }
             let Some(path) = spec.path else {
+                completed_stores.push(spec.id.to_owned());
                 continue;
             };
             // A workspace may hold a machines directory, and the walk has then
@@ -750,8 +772,10 @@ pub(crate) fn inspect_with_tracker(
             let counted =
                 |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
             if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
+                completed_stores.push(spec.id.to_owned());
                 continue;
             }
+            let deferred_before = scan.directories_deferred();
             let examined = examine_store(&path, environment.home.as_deref());
             if let Err(err) = &examined {
                 scan.record_error(&path, err);
@@ -774,6 +798,13 @@ pub(crate) fn inspect_with_tracker(
             } else {
                 Measure::default()
             };
+            let store_complete =
+                !scan.is_stopped() && deferred_before == scan.directories_deferred();
+            if store_complete {
+                completed_stores.push(spec.id.to_owned());
+            } else {
+                remaining_stores = true;
+            }
             found.stores.push(Store {
                 id: spec.id.to_owned(),
                 class: spec.class,
@@ -807,6 +838,9 @@ pub(crate) fn inspect_with_tracker(
         },
         completed_checkouts,
         remaining_pending,
+        completed_stores,
+        remaining_stores,
+        workspaces_complete,
         slice_capped,
     }
 }

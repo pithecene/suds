@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::arena;
 use crate::budget::{self, Budget, BudgetTracker, ExecutionOutcome};
-use crate::development::{self, DevelopmentScan, Environment};
+use crate::development::{self, DevelopmentScan, Environment, StoreClass, StoreStatus};
 use crate::model::{ReportStatus, TraversalError};
 use crate::organize::journal::Journal;
 use crate::pressure::{self, Level, Measurement, Pressure, Thresholds};
@@ -152,10 +152,137 @@ pub fn maintain_with_budget(
     budget: &Budget,
     clock: &mut dyn FnMut() -> i64,
 ) -> Result<MaintenanceReport, String> {
+    maintain_inner(settings, context, budget, clock, false)
+}
+
+/// Measures development storage without reclaiming or modifying durable pause
+/// state, advancing the bounded maintenance cursor across slices until a full
+/// reading completes.
+pub fn maintain_observe(
+    settings: &Settings,
+    context: &Context<'_>,
+) -> Result<MaintenanceReport, String> {
+    let started = Instant::now();
+    let mut clock = || {
+        context
+            .now
+            .saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(0))
+    };
+    maintain_observe_with_budget(settings, context, &Budget::for_maintenance(), &mut clock)
+}
+
+/// Like [`maintain_observe`], governed by an explicit execution `budget`.
+pub fn maintain_observe_with_budget(
+    settings: &Settings,
+    context: &Context<'_>,
+    budget: &Budget,
+    clock: &mut dyn FnMut() -> i64,
+) -> Result<MaintenanceReport, String> {
+    maintain_inner(settings, context, budget, clock, true)
+}
+
+fn completed_slice_usage(
+    scan: &DevelopmentScan,
+    completed_checkouts: &HashSet<PathBuf>,
+    completed_stores: &HashSet<String>,
+    count_workspaces: bool,
+) -> u64 {
+    let workspaces: u64 = if count_workspaces {
+        let unclassified: u64 = scan
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.unclassified.allocated_bytes)
+            .sum();
+        let workspace_machines: u64 = scan
+            .stores
+            .iter()
+            .filter(|store| {
+                store.class == StoreClass::Machine
+                    && !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
+                    && !completed_stores.contains(&store.id)
+            })
+            .map(|store| store.measure.allocated_bytes)
+            .sum();
+        unclassified.saturating_add(workspace_machines)
+    } else {
+        0
+    };
+    let checkouts: u64 = scan
+        .checkouts
+        .iter()
+        .filter(|checkout| completed_checkouts.contains(&checkout.path))
+        .map(|checkout| {
+            checkout.own.allocated_bytes
+                + checkout
+                    .build_state
+                    .iter()
+                    .map(|build| build.measure.allocated_bytes)
+                    .sum::<u64>()
+        })
+        .sum();
+    let stores: u64 = scan
+        .stores
+        .iter()
+        .filter(|store| {
+            !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
+                && completed_stores.contains(&store.id)
+        })
+        .map(|store| store.measure.allocated_bytes)
+        .sum();
+    workspaces.saturating_add(checkouts).saturating_add(stores)
+}
+
+fn incomplete_slice_usage(
+    scan: &DevelopmentScan,
+    completed_checkouts: &HashSet<PathBuf>,
+    completed_stores: &HashSet<String>,
+    include_workspaces: bool,
+) -> u64 {
+    let workspaces: u64 = if include_workspaces {
+        scan.workspaces
+            .iter()
+            .map(|workspace| workspace.unclassified.allocated_bytes)
+            .sum()
+    } else {
+        0
+    };
+    let checkouts: u64 = scan
+        .checkouts
+        .iter()
+        .filter(|checkout| !completed_checkouts.contains(&checkout.path))
+        .map(|checkout| {
+            checkout.own.allocated_bytes
+                + checkout
+                    .build_state
+                    .iter()
+                    .map(|build| build.measure.allocated_bytes)
+                    .sum::<u64>()
+        })
+        .sum();
+    let stores: u64 = scan
+        .stores
+        .iter()
+        .filter(|store| {
+            !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
+                && !completed_stores.contains(&store.id)
+                && !(store.class == StoreClass::Machine && !include_workspaces)
+        })
+        .map(|store| store.measure.allocated_bytes)
+        .sum();
+    workspaces.saturating_add(checkouts).saturating_add(stores)
+}
+
+fn maintain_inner(
+    settings: &Settings,
+    context: &Context<'_>,
+    budget: &Budget,
+    clock: &mut dyn FnMut() -> i64,
+    observe_only: bool,
+) -> Result<MaintenanceReport, String> {
     let path = context.directories.pressure();
     // Check durable pause before acquiring any lock or scanning storage.
     // An unreadable or malformed pause record fails closed.
-    if let Some(report) = paused_report(settings, context, &path)? {
+    if !observe_only && let Some(report) = paused_report(settings, context, &path)? {
         return Ok(report);
     }
 
@@ -172,7 +299,7 @@ pub fn maintain_with_budget(
     )?;
     // Recheck durable pause after acquiring the lock so a pause written during
     // contention stops queued maintenance from scanning or reclaiming.
-    if let Some(report) = paused_report(settings, context, &path)? {
+    if !observe_only && let Some(report) = paused_report(settings, context, &path)? {
         return Ok(report);
     }
     if budget.background_priority {
@@ -186,13 +313,26 @@ pub fn maintain_with_budget(
         .as_ref()
         .map(|cursor| cursor.completed_checkouts.iter().cloned().collect())
         .unwrap_or_default();
+    let skip_stores: HashSet<String> = existing_cursor
+        .as_ref()
+        .map(|cursor| cursor.completed_stores.iter().cloned().collect())
+        .unwrap_or_default();
+    let prior_usage = existing_cursor
+        .as_ref()
+        .map_or(0, |cursor| cursor.accumulated_usage_bytes);
+    let prior_workspaces_counted = existing_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.workspaces_counted);
+    let prior_had_errors = existing_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.had_errors);
     let seed_pending: Vec<PathBuf> = existing_cursor
         .map(|cursor| cursor.pending_checkouts)
         .unwrap_or_default();
     // Reserve 40% of the unified entry budget for verification and bounded
     // reclamation under standing approval (survey and status checks visit each
     // candidate twice) without resetting the run's entry budget.
-    let scan_entry_cap = if settings.standing_approval {
+    let scan_entry_cap = if !observe_only && settings.standing_approval {
         budget
             .max_entries
             .filter(|limit| *limit >= 5)
@@ -206,6 +346,7 @@ pub fn maintain_with_budget(
         Arc::clone(&tracker),
         &skip_set,
         &seed_pending,
+        &skip_stores,
         scan_entry_cap,
     );
     let scan = slice.scan;
@@ -213,19 +354,50 @@ pub fn maintain_with_budget(
     let inspection = development::build_report(&scan, initial_now);
     let mut completed_this_run = slice.completed_checkouts;
     let mut remaining_pending = slice.remaining_pending;
+    let completed_stores_this_run = slice.completed_stores;
+    let remaining_stores = slice.remaining_stores;
     let has_remaining = !remaining_pending.is_empty();
-    let slice_incomplete = slice.slice_capped || !scan.outcome.is_complete() || has_remaining;
-    let full_scan_complete = skip_set.is_empty()
+    let had_errors_any = prior_had_errors || inspection.error_count > 0;
+    let slice_incomplete =
+        slice.slice_capped || !scan.outcome.is_complete() || has_remaining || remaining_stores;
+    let full_scan_complete =
+        !slice_incomplete && !had_errors_any && inspection.status == ReportStatus::Complete;
+    let single_pass_complete = full_scan_complete
+        && skip_set.is_empty()
         && seed_pending.is_empty()
-        && !slice_incomplete
-        && inspection.status == ReportStatus::Complete;
+        && skip_stores.is_empty();
+    let completed_checkout_set: HashSet<PathBuf> = completed_this_run.iter().cloned().collect();
+    let completed_store_set: HashSet<String> = completed_stores_this_run.iter().cloned().collect();
+    let count_workspaces = !prior_workspaces_counted && slice.workspaces_complete;
+    let slice_completed_bytes = completed_slice_usage(
+        &scan,
+        &completed_checkout_set,
+        &completed_store_set,
+        count_workspaces,
+    );
+    let accumulated_usage = prior_usage.saturating_add(slice_completed_bytes);
+    let measured_usage = if full_scan_complete {
+        accumulated_usage
+    } else {
+        accumulated_usage.saturating_add(incomplete_slice_usage(
+            &scan,
+            &completed_checkout_set,
+            &completed_store_set,
+            !prior_workspaces_counted && !count_workspaces,
+        ))
+    };
+    let workspaces_counted_after = prior_workspaces_counted || count_workspaces;
     let persist_cursor = |completed_now: &[PathBuf],
                           pending_now: &[PathBuf],
                           incomplete: bool|
      -> Result<(), String> {
-        if !incomplete && pending_now.is_empty() {
+        if !incomplete && pending_now.is_empty() && !remaining_stores {
             state::clear_maintain_cursor(&cursor_path)?;
-        } else if !completed_now.is_empty() || !pending_now.is_empty() {
+        } else if !completed_now.is_empty()
+            || !pending_now.is_empty()
+            || !completed_stores_this_run.is_empty()
+            || count_workspaces
+        {
             let mut completed: Vec<PathBuf> = skip_set
                 .iter()
                 .cloned()
@@ -237,6 +409,20 @@ pub fn maintain_with_budget(
             pending.sort();
             pending.dedup();
             pending.retain(|p| !completed.contains(p));
+            let mut stores: Vec<String> = skip_stores
+                .iter()
+                .cloned()
+                .chain(completed_stores_this_run.iter().cloned())
+                .collect();
+            stores.sort();
+            stores.dedup();
+            let completed_now_set: HashSet<PathBuf> = completed_now.iter().cloned().collect();
+            let usage_after = prior_usage.saturating_add(completed_slice_usage(
+                &scan,
+                &completed_now_set,
+                &completed_store_set,
+                count_workspaces,
+            ));
             state::write_maintain_cursor(
                 &cursor_path,
                 &MaintainCursor {
@@ -244,6 +430,10 @@ pub fn maintain_with_budget(
                     roots: settings.roots.clone(),
                     completed_checkouts: completed,
                     pending_checkouts: pending,
+                    completed_stores: stores,
+                    accumulated_usage_bytes: usage_after,
+                    workspaces_counted: workspaces_counted_after,
+                    had_errors: had_errors_any,
                     updated_at: timestamp::format_utc(initial_now),
                 },
             )?;
@@ -262,7 +452,7 @@ pub fn maintain_with_budget(
     let audited = arena::audit(first, &others, settings.ceiling_bytes)?;
     let available_before = Some(audited.available_bytes);
     let measurement = Measurement {
-        usage_bytes: pressure::usage(&scan),
+        usage_bytes: measured_usage,
         ceiling_bytes: audited.ceiling_bytes,
         enforced: audited.enforced,
         filesystem_available_bytes: available_before,
@@ -278,11 +468,13 @@ pub fn maintain_with_budget(
     let initial_outcome = if full_scan_complete {
         ExecutionOutcome::Complete
     } else if tracker.is_stopped() {
-        tracker.outcome(inspection.error_count > 0)
+        tracker.outcome(had_errors_any)
     } else if slice.slice_capped {
         ExecutionOutcome::Exhausted
-    } else if !skip_set.is_empty() || !seed_pending.is_empty() {
+    } else if slice_incomplete {
         ExecutionOutcome::Partial
+    } else if had_errors_any {
+        ExecutionOutcome::Errored
     } else {
         scan.outcome
     };
@@ -303,7 +495,7 @@ pub fn maintain_with_budget(
         reclaim: None,
         stores: None,
     };
-    if !settings.standing_approval {
+    if observe_only || !settings.standing_approval {
         persist_cursor(&completed_this_run, &remaining_pending, slice_incomplete)?;
         return Ok(report);
     }
@@ -394,7 +586,7 @@ pub fn maintain_with_budget(
     // Automatic maintenance skips unbounded external store adapters (such as
     // `docker system df` and blocking CLI trims) and runs only in-process
     // eviction on a complete initial pass with remaining budget.
-    if full_scan_complete && !tracker.is_stopped() {
+    if single_pass_complete && !tracker.is_stopped() {
         let mut budgets = Budgets::default();
         for (id, bytes) in &settings.budgets {
             budgets.set(id, *bytes);
@@ -436,6 +628,7 @@ pub fn maintain_with_budget(
             Arc::clone(&tracker),
             &HashSet::new(),
             &[],
+            &HashSet::new(),
             None,
         );
         let post_scan = post_slice.scan;

@@ -481,34 +481,47 @@ fn maintain_fixture(
     (dirs, settings)
 }
 
+fn maintenance_budget(max_entries: u64) -> Budget {
+    Budget {
+        max_entries: Some(max_entries),
+        pace_every: 0,
+        background_priority: false,
+        ..Budget::for_maintenance()
+    }
+}
+
 fn run_maintain_step(
     settings: &suds_core::state::Settings,
     context: &suds_core::maintain::Context<'_>,
     max_entries: u64,
     clock: &mut dyn FnMut() -> i64,
 ) -> suds_core::maintain::MaintenanceReport {
-    let budget = Budget {
-        max_entries: Some(max_entries),
-        pace_every: 0,
-        background_priority: false,
-        ..Budget::for_maintenance()
-    };
-    suds_core::maintain::maintain_with_budget(settings, context, &budget, clock).unwrap()
+    suds_core::maintain::maintain_with_budget(
+        settings,
+        context,
+        &maintenance_budget(max_entries),
+        clock,
+    )
+    .unwrap()
 }
 
-#[test]
-fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget() {
+fn multi_repo_workspace(files_per_target: usize) -> (TempDir, PathBuf, PathBuf, Vec<PathBuf>) {
     let tmp = TempDir::new().unwrap();
     let base = tmp.path().canonicalize().unwrap();
     let workspace = base.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
-
     let mut targets = Vec::new();
     for name in ["repo-a", "repo-b", "repo-c"] {
         let repo = workspace.join(name);
         init_cargo_repo(&repo, "target/\n");
-        targets.push(populate_cargo_target(&repo, 20));
+        targets.push(populate_cargo_target(&repo, files_per_target));
     }
+    (tmp, base, workspace, targets)
+}
+
+#[test]
+fn bounded_maintenance_makes_forward_progress_across_runs_within_unified_budget() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(20);
 
     let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
     let env = Environment::default();
@@ -861,4 +874,117 @@ fn verification_debits_shared_budget_and_maintain_skips_external_store_adapters(
         !ccache_marker.exists(),
         "maintain must not run external store trim subprocesses"
     );
+}
+
+#[test]
+fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
+
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    fs::create_dir_all(&dirs.state).unwrap();
+
+    // Seed durable pause and an active Hard pressure reading.
+    suds_core::state::write_pause(
+        &dirs.pause(),
+        &suds_core::state::PauseState {
+            schema: suds_core::state::PAUSE_SCHEMA.to_owned(),
+            paused: true,
+            reason: Some("incident-hold".to_owned()),
+            updated_at: "2026-11-26T18:00:00Z".to_owned(),
+        },
+    )
+    .unwrap();
+    let hard = suds_core::pressure::Pressure {
+        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: "2026-11-26T18:00:00Z".to_owned(),
+        level: suds_core::pressure::Level::Hard,
+        lower_since: None,
+        usage_bytes: 1024 * 1024 * 1024,
+        ceiling_bytes: 1024 * 1024 * 1024,
+        enforced: false,
+        filesystem_available_bytes: None,
+        complete: true,
+    };
+    fs::write(dirs.pressure(), serde_json::to_vec_pretty(&hard).unwrap()).unwrap();
+
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+
+    // First full pass spans multiple bounded slices and establishes lower_since.
+    let per_run_cap = 80;
+    let mut clock_now = FUTURE_NOW;
+    let mut saw_cursor = false;
+    let mut first_complete = None;
+    for _ in 0..10 {
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report = suds_core::maintain::maintain_observe_with_budget(
+            &settings,
+            &context,
+            &maintenance_budget(per_run_cap),
+            &mut clock,
+        )
+        .unwrap();
+        assert!(!report.paused, "observe must run while paused");
+        assert!(report.reclaim.is_none(), "observe must never reclaim");
+        assert!(report.stores.is_none(), "observe must never trim stores");
+        if dirs.maintain_cursor().exists() {
+            saw_cursor = true;
+            assert!(!report.pressure.complete);
+        } else if report.pressure.complete {
+            first_complete = Some(report);
+            break;
+        }
+    }
+    assert!(saw_cursor, "tight cap must span multiple slices");
+    let first_complete = first_complete.expect("multi-slice observe must complete");
+    assert_eq!(
+        first_complete.pressure.level,
+        suds_core::pressure::Level::Hard
+    );
+    assert!(first_complete.pressure.lower_since.is_some());
+
+    // Advance past the 300s recovery window and complete a second multi-slice pass.
+    clock_now += 310;
+    let mut second_complete = None;
+    for _ in 0..10 {
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report = suds_core::maintain::maintain_observe_with_budget(
+            &settings,
+            &context,
+            &maintenance_budget(per_run_cap),
+            &mut clock,
+        )
+        .unwrap();
+        if !dirs.maintain_cursor().exists() && report.pressure.complete {
+            second_complete = Some(report);
+            break;
+        }
+    }
+    let second_complete = second_complete.expect("second multi-slice observe must complete");
+    assert_eq!(
+        second_complete.pressure.level,
+        suds_core::pressure::Level::Normal
+    );
+    assert!(second_complete.pressure.lower_since.is_none());
+
+    // Pause remains active and every build target remains untouched despite standing_approval.
+    let pause = suds_core::state::read_pause(&dirs.pause())
+        .unwrap()
+        .unwrap();
+    assert!(pause.paused);
+    assert!(targets.iter().all(|t| t.exists()));
 }

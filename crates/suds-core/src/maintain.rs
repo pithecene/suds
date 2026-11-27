@@ -20,7 +20,7 @@ use crate::clones::Counted;
 use crate::development::{self, DevelopmentScan, Environment, SliceResume, Store, StoreStatus};
 use crate::model::{ReportStatus, TraversalError};
 use crate::organize::journal::Journal;
-use crate::pressure::{self, Level, Measurement, Pressure, Thresholds};
+use crate::pressure::{self, Measurement, Pressure, Thresholds};
 use crate::reclaim::execute::{self, Authority, Conditions, ReclaimReport};
 use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
@@ -45,7 +45,7 @@ pub struct MaintenanceReport {
     /// Execution outcome of this run (`complete`, `partial`, `cancelled`,
     /// `exhausted`, or `errored`).
     pub outcome: ExecutionOutcome,
-    /// Whether durable pause state prevented unattended work from starting.
+    /// Whether durable pause state held this run to a measurement that reclaims nothing.
     pub paused: bool,
     /// Reason recorded in durable pause state, when paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,50 +105,14 @@ pub fn maintain_with_clock(
     maintain_with_budget(settings, context, &Budget::for_maintenance(), clock)
 }
 
-fn paused_report(
-    settings: &Settings,
-    context: &Context<'_>,
-    pressure_path: &Path,
-) -> Result<Option<MaintenanceReport>, String> {
-    let Some(pause) = state::read_pause(&context.directories.pause())? else {
-        return Ok(None);
-    };
-    if !pause.paused {
-        return Ok(None);
-    }
-    let cached = read_pressure(pressure_path).unwrap_or_else(|| Pressure {
-        schema: pressure::PRESSURE_SCHEMA.to_owned(),
-        observed_at: timestamp::format_utc(context.now),
-        level: Level::Normal,
-        lower_since: None,
-        usage_bytes: 0,
-        ceiling_bytes: settings.ceiling_bytes.unwrap_or(0),
-        enforced: false,
-        filesystem_available_bytes: None,
-        complete: false,
-    });
-    let available = cached.filesystem_available_bytes;
-    Ok(Some(MaintenanceReport {
-        schema: MAINTENANCE_SCHEMA.to_owned(),
-        pressure: cached,
-        outcome: ExecutionOutcome::Cancelled,
-        paused: true,
-        pause_reason: pause.reason,
-        entries_visited: 0,
-        directories_deferred: 0,
-        draining_workers: 0,
-        error_count: 0,
-        errors: Vec::new(),
-        standing_approval: settings.standing_approval,
-        filesystem_available_before_bytes: available,
-        filesystem_available_after_bytes: available,
-        reclaim: None,
-        stores: None,
-    }))
+/// The durable pause, where one is in force. An unreadable record is an error, so a broken pause never lets a run
+/// reclaim.
+fn active_pause(context: &Context<'_>) -> Result<Option<state::PauseState>, String> {
+    Ok(state::read_pause(&context.directories.pause())?.filter(|pause| pause.paused))
 }
 
 /// Like [`maintain_with_clock`], governed by an explicit execution `budget`.
-/// Checks durable pause state before taking any lock or traversing storage.
+/// Reads durable pause state before taking any lock. A paused run measures within the budget and reclaims nothing.
 pub fn maintain_with_budget(
     settings: &Settings,
     context: &Context<'_>,
@@ -336,10 +300,9 @@ fn maintain_inner(
     observe_only: bool,
 ) -> Result<MaintenanceReport, String> {
     let path = context.directories.pressure();
-    // Check durable pause before acquiring any lock or scanning storage.
-    // An unreadable or malformed pause record fails closed.
-    if !observe_only && let Some(report) = paused_report(settings, context, &path)? {
-        return Ok(report);
+    // An unreadable or malformed pause record fails closed, before any lock or scan.
+    if !observe_only {
+        active_pause(context)?;
     }
 
     let first = settings
@@ -353,11 +316,15 @@ fn maintain_inner(
         std::time::Duration::from_secs(5),
         "maintain",
     )?;
-    // Recheck durable pause after acquiring the lock so a pause written during
-    // contention stops queued maintenance from scanning or reclaiming.
-    if !observe_only && let Some(report) = paused_report(settings, context, &path)? {
-        return Ok(report);
-    }
+    // Read the pause after acquiring the lock, so a pause written during contention holds a queued run too. A
+    // pause stops reclamation and never the reading: the paused run takes the bounded observation slice, so the
+    // pressure that a client waits on stays current while recovery is held.
+    let pause = if observe_only {
+        None
+    } else {
+        active_pause(context)?
+    };
+    let observe_only = observe_only || pause.is_some();
     if budget.background_priority {
         budget::apply_background_thread_policy();
     }
@@ -596,8 +563,8 @@ fn maintain_inner(
         schema: MAINTENANCE_SCHEMA.to_owned(),
         pressure: reading.clone(),
         outcome: initial_outcome,
-        paused: false,
-        pause_reason: None,
+        paused: pause.is_some(),
+        pause_reason: pause.and_then(|pause| pause.reason),
         entries_visited: tracker.entries_visited(),
         directories_deferred: tracker.directories_deferred(),
         draining_workers: tracker.draining_workers(),

@@ -989,6 +989,86 @@ fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
     assert!(targets.iter().all(|t| t.exists()));
 }
 
+/// Liveness: a pause of recovery never freezes the reading. A client that holds work on a hard reading waits on
+/// the next reading, so the scheduled run must reach one in a bounded number of bounded slices while paused.
+#[test]
+fn a_paused_scheduled_run_reaches_a_fresh_reading_in_bounded_slices_and_reclaims_nothing() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    assert!(settings.standing_approval);
+    fs::create_dir_all(&dirs.state).unwrap();
+    suds_core::state::write_pause(
+        &dirs.pause(),
+        &suds_core::state::PauseState {
+            schema: suds_core::state::PAUSE_SCHEMA.to_owned(),
+            paused: true,
+            reason: Some("incident-hold".to_owned()),
+            updated_at: "2026-11-26T18:00:00Z".to_owned(),
+        },
+    )
+    .unwrap();
+    let pause_before = fs::read(dirs.pause()).unwrap();
+    let frozen = suds_core::pressure::Pressure {
+        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
+        observed_at: "2026-11-26T18:00:00Z".to_owned(),
+        level: suds_core::pressure::Level::Hard,
+        lower_since: None,
+        usage_bytes: 1024 * 1024 * 1024,
+        ceiling_bytes: 1024 * 1024 * 1024,
+        enforced: false,
+        filesystem_available_bytes: None,
+        complete: true,
+    };
+    fs::write(dirs.pressure(), serde_json::to_vec_pretty(&frozen).unwrap()).unwrap();
+
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+
+    // The scheduled run, as `suds maintain` starts it, and not the run of `--observe`.
+    let mut clock_now = FUTURE_NOW;
+    let mut saw_cursor = false;
+    let mut fresh = None;
+    for _ in 0..10 {
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report = run_maintain_step(&settings, &context, 80, &mut clock);
+        assert!(report.paused, "the run must state the pause");
+        assert_eq!(report.pause_reason.as_deref(), Some("incident-hold"));
+        assert!(report.reclaim.is_none(), "a paused run must never reclaim");
+        assert!(
+            report.stores.is_none(),
+            "a paused run must never trim stores"
+        );
+        if dirs.maintain_cursor().exists() {
+            saw_cursor = true;
+        } else if report.pressure.complete {
+            fresh = Some(report.pressure);
+            break;
+        }
+    }
+    assert!(saw_cursor, "each slice must stay within its budget");
+    let fresh = fresh.expect("a paused run must reach a complete reading within ten slices");
+    assert_ne!(fresh.observed_at, frozen.observed_at);
+    assert_eq!(
+        suds_core::maintain::read_pressure(&dirs.pressure()).map(|reading| reading.observed_at),
+        Some(fresh.observed_at)
+    );
+
+    // The pause stands as it was written, and every build target remains.
+    assert_eq!(fs::read(dirs.pause()).unwrap(), pause_before);
+    assert!(targets.iter().all(|target| target.exists()));
+}
+
 struct MaintainHarness {
     dirs: suds_core::state::Directories,
     settings: suds_core::state::Settings,

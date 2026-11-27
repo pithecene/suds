@@ -127,7 +127,7 @@ fn entry_budget_exhaustion_keeps_hard_pressure_without_false_recovery() {
 }
 
 #[test]
-fn durable_pause_prevents_maintenance_and_corrupt_pause_fails_closed() {
+fn durable_pause_prevents_reclamation_and_corrupt_pause_fails_closed() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("work");
     fs::create_dir_all(&root).unwrap();
@@ -166,8 +166,8 @@ fn durable_pause_prevents_maintenance_and_corrupt_pause_fails_closed() {
         .unwrap();
     assert!(report.paused);
     assert_eq!(report.pause_reason.as_deref(), Some("containment"));
-    assert_eq!(report.entries_visited, 0);
     assert!(report.reclaim.is_none());
+    assert!(report.stores.is_none());
 
     // Corrupt pause file must fail closed rather than silently resuming.
     fs::write(dirs.pause(), b"{broken").unwrap();
@@ -369,8 +369,9 @@ fn queued_maintenance_rechecks_pause_after_acquiring_lock() {
         report.pause_reason.as_deref(),
         Some("paused-during-lock-wait")
     );
-    assert_eq!(report.entries_visited, 0);
     assert!(report.reclaim.is_none());
+    assert!(report.stores.is_none());
+    assert!(root.join("file.txt").exists());
 }
 
 #[test]

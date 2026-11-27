@@ -988,3 +988,264 @@ fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
     assert!(pause.paused);
     assert!(targets.iter().all(|t| t.exists()));
 }
+
+struct MaintainHarness {
+    dirs: suds_core::state::Directories,
+    settings: suds_core::state::Settings,
+    env: Environment,
+    programs: suds_core::stores::Programs,
+    git: Git,
+}
+
+impl MaintainHarness {
+    fn new(base: &Path, workspace: PathBuf) -> Self {
+        let (dirs, settings) = maintain_fixture(base, workspace, 1024 * 1024 * 1024);
+        MaintainHarness {
+            dirs,
+            settings,
+            env: Environment::default(),
+            programs: suds_core::stores::Programs::default(),
+            git: Git::default(),
+        }
+    }
+
+    fn context(&self) -> suds_core::maintain::Context<'_> {
+        suds_core::maintain::Context {
+            directories: &self.dirs,
+            environment: &self.env,
+            programs: &self.programs,
+            git: &self.git,
+            now: FUTURE_NOW,
+        }
+    }
+
+    fn observe_to_completion(
+        &self,
+        per_run_cap: u64,
+        clock_now: &mut i64,
+    ) -> (suds_core::maintain::MaintenanceReport, bool) {
+        let context = self.context();
+        let mut saw_cursor = false;
+        for _ in 0..16 {
+            let mut clock = || {
+                *clock_now += 1;
+                *clock_now
+            };
+            let report = suds_core::maintain::maintain_observe_with_budget(
+                &self.settings,
+                &context,
+                &maintenance_budget(per_run_cap),
+                &mut clock,
+            )
+            .unwrap();
+            if self.dirs.maintain_cursor().exists() {
+                saw_cursor = true;
+                assert!(!report.pressure.complete);
+            } else if report.pressure.complete {
+                return (report, saw_cursor);
+            }
+        }
+        panic!("observe did not complete within 16 slices");
+    }
+}
+
+#[test]
+fn multi_slice_accounts_for_checkout_local_and_workspace_toolchains() {
+    let (_tmp, base, workspace, _targets) = multi_repo_workspace(8);
+    let payload = vec![b'v'; 64 * 1024];
+
+    // Add both a checkout-local vcpkg toolchain and a workspace-level vcpkg toolchain.
+    for dir in [
+        workspace.join("repo-a/vcpkg"),
+        workspace.join("vcpkg-shared"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".vcpkg-root"), b"").unwrap();
+        fs::write(dir.join("tool.bin"), &payload).unwrap();
+    }
+
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let expected =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+
+    // Single-pass observe must include both toolchains.
+    let mut now = FUTURE_NOW;
+    let (single, _) = harness.observe_to_completion(10_000, &mut now);
+    assert_eq!(single.pressure.usage_bytes, expected);
+
+    // Multi-slice observe must match single-pass usage exactly.
+    let (sliced, saw_cursor) = harness.observe_to_completion(55, &mut now);
+    assert!(saw_cursor, "tight cap must span multiple slices");
+    assert_eq!(sliced.pressure.usage_bytes, expected);
+}
+
+#[test]
+fn multi_slice_reclamation_excludes_freed_bytes_from_cursor_and_final_pressure() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(12);
+    let payload = vec![b'b'; 128 * 1024];
+    for target in &targets {
+        fs::write(target.join("debug/large.o"), &payload).unwrap();
+    }
+
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let pre_total =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    let context = harness.context();
+
+    let mut now = FUTURE_NOW;
+    let per_run_cap = 135;
+    let mut verified_cursor_reduction = false;
+    let mut last_report = None;
+    for _ in 0..10 {
+        let mut clock = || {
+            now += 1;
+            now
+        };
+        let report = run_maintain_step(&harness.settings, &context, per_run_cap, &mut clock);
+        if let Some(cursor) =
+            suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor())
+            && !targets[0].exists()
+            && !verified_cursor_reduction
+        {
+            // Once repo-a/target is reclaimed, accumulated_usage_bytes must not retain its bytes.
+            assert!(
+                cursor.accumulated_usage_bytes < 128 * 1024,
+                "cursor retained freed target bytes: {}",
+                cursor.accumulated_usage_bytes
+            );
+            verified_cursor_reduction = true;
+        }
+        last_report = Some(report);
+        if targets.iter().all(|t| !t.exists()) && !harness.dirs.maintain_cursor().exists() {
+            break;
+        }
+    }
+    assert!(
+        verified_cursor_reduction,
+        "expected intermediate cursor after reclaiming first target"
+    );
+    assert!(targets.iter().all(|t| !t.exists()));
+    let post_expected = suds_core::pressure::usage(&inspect(&[workspace], &harness.env));
+    assert!(post_expected + 256 * 1024 < pre_total);
+    let final_report = last_report.unwrap();
+    assert!(
+        final_report.pressure.usage_bytes < pre_total,
+        "final pressure must not include previously reclaimed bytes"
+    );
+    let (steady, _) = harness.observe_to_completion(10_000, &mut now);
+    assert_eq!(steady.pressure.usage_bytes, post_expected);
+}
+
+#[test]
+fn legacy_v1_cursor_is_ignored_and_observe_cursor_does_not_skip_reclaim() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(12);
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let expected =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    fs::create_dir_all(&harness.dirs.state).unwrap();
+
+    // Seed a legacy v1 cursor lacking accumulated usage and mode.
+    let legacy = serde_json::json!({
+        "schema": "suds.maintain-cursor/v1",
+        "roots": [workspace],
+        "completed_checkouts": [workspace.join("repo-a"), workspace.join("repo-b")],
+        "pending_checkouts": [workspace.join("repo-c")],
+        "updated_at": "2026-11-26T18:00:00Z"
+    });
+    fs::write(
+        harness.dirs.maintain_cursor(),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor()).is_none(),
+        "legacy v1 cursor must be rejected"
+    );
+
+    // Observe ignores the legacy cursor and measures the full workspace.
+    let mut now = FUTURE_NOW;
+    let (full, _) = harness.observe_to_completion(10_000, &mut now);
+    assert_eq!(full.pressure.usage_bytes, expected);
+
+    // Run one partial observe slice so repo-a lands in an Observe cursor.
+    let context = harness.context();
+    let mut clock = || {
+        now += 1;
+        now
+    };
+    let _ = suds_core::maintain::maintain_observe_with_budget(
+        &harness.settings,
+        &context,
+        &maintenance_budget(65),
+        &mut clock,
+    )
+    .unwrap();
+    let observe_cursor = suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor())
+        .expect("partial observe must persist cursor");
+    assert_eq!(
+        observe_cursor.mode,
+        suds_core::state::MaintainCursorMode::Observe
+    );
+    assert!(
+        !observe_cursor.completed_checkouts.is_empty(),
+        "partial observe should complete at least repo-a"
+    );
+
+    // Ordinary maintenance with standing approval must ignore the Observe cursor
+    // and reclaim every eligible target, including repo-a/target.
+    let _ = run_maintain_step(&harness.settings, &context, 10_000, &mut clock);
+    assert!(
+        targets.iter().all(|t| !t.exists()),
+        "reclaim run must not skip checkouts recorded by an observe cursor"
+    );
+}
+
+#[test]
+fn multi_slice_deduplicates_hard_links_across_slices() {
+    let (_tmp, base, workspace, _targets) = multi_repo_workspace(10);
+    let shared_src = workspace.join("repo-a/shared-blob.bin");
+    fs::write(&shared_src, vec![b'h'; 128 * 1024]).unwrap();
+    fs::hard_link(&shared_src, workspace.join("repo-b/shared-blob.bin")).unwrap();
+    fs::hard_link(&shared_src, workspace.join("repo-c/shared-blob.bin")).unwrap();
+
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let expected =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    let context = harness.context();
+
+    let mut now = FUTURE_NOW;
+    let mut saw_dedup_cursor = false;
+    let mut completed = None;
+    for _ in 0..16 {
+        let mut clock = || {
+            now += 1;
+            now
+        };
+        let report = suds_core::maintain::maintain_observe_with_budget(
+            &harness.settings,
+            &context,
+            &maintenance_budget(55),
+            &mut clock,
+        )
+        .unwrap();
+        if let Some(cursor) =
+            suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor())
+            && !cursor.dedup.linked.is_empty()
+        {
+            saw_dedup_cursor = true;
+        }
+        if !harness.dirs.maintain_cursor().exists() && report.pressure.complete {
+            completed = Some(report);
+            break;
+        }
+    }
+    assert!(
+        saw_dedup_cursor,
+        "intermediate cursor must persist hardlink deduplication state"
+    );
+    let completed = completed.expect("multi-slice observe must complete");
+    assert_eq!(
+        completed.pressure.usage_bytes, expected,
+        "cross-slice hardlinks must not be double-counted"
+    );
+}

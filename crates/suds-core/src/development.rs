@@ -22,7 +22,7 @@ use crate::budget::{Budget, ExecutionOutcome};
 use crate::inspection::ScanError;
 use crate::model::{EntryKind, Measure, Platform, ReportStatus, TraversalError};
 use crate::roots::normalize;
-use crate::scan::SharedScan;
+use crate::scan::{ScanDedup, SharedScan};
 use crate::timestamp;
 
 /// The schema tag of every development report.
@@ -383,6 +383,23 @@ fn store_specs(environment: &Environment) -> Vec<StoreSpec> {
     ]
 }
 
+/// Whether `id` names one of the configured machine-wide stores in `store_specs`.
+pub(crate) fn is_configured_store(id: &str) -> bool {
+    matches!(
+        id,
+        "go.build-cache"
+            | "go.module-cache"
+            | "cargo.registry"
+            | "pnpm.store"
+            | "sccache.cache"
+            | "ccache.cache"
+            | "vcpkg.binary-cache"
+            | "lima.machines"
+            | "colima.machines"
+            | "mise.installs"
+    )
+}
+
 /// The directory of each store that exists, without a measurement. An
 /// audit of the arena needs each location and no size.
 pub fn store_locations(environment: &Environment) -> Vec<PathBuf> {
@@ -595,6 +612,20 @@ pub(crate) struct InspectSlice {
     pub remaining_stores: bool,
     pub workspaces_complete: bool,
     pub slice_capped: bool,
+    pub committed_dedup: ScanDedup,
+    pub shared_checkouts: HashSet<PathBuf>,
+    pub shared_builds: HashSet<PathBuf>,
+}
+
+/// Cursor-resume inputs for [`inspect_with_tracker`].
+pub(crate) struct SliceResume<'a> {
+    pub skip_checkouts: &'a HashSet<PathBuf>,
+    pub seed_pending: &'a [PathBuf],
+    pub skip_stores: &'a HashSet<String>,
+    pub skip_workspaces: bool,
+    pub prior_machine_paths: &'a [PathBuf],
+    pub prior_dedup: Option<ScanDedup>,
+    pub scan_entry_cap: Option<u64>,
 }
 
 /// Like [`inspect`], governed by `budget`. An exhausted or cancelled budget
@@ -605,36 +636,51 @@ pub fn inspect_with_budget(
     budget: Budget,
 ) -> DevelopmentScan {
     let tracker = crate::budget::BudgetTracker::new(budget);
+    let empty_checkouts = HashSet::new();
+    let empty_stores = HashSet::new();
     inspect_with_tracker(
         workspaces,
         environment,
         tracker,
-        &HashSet::new(),
-        &[],
-        &HashSet::new(),
-        None,
+        SliceResume {
+            skip_checkouts: &empty_checkouts,
+            seed_pending: &[],
+            skip_stores: &empty_stores,
+            skip_workspaces: false,
+            prior_machine_paths: &[],
+            prior_dedup: None,
+            scan_entry_cap: None,
+        },
     )
     .scan
 }
 
 /// Inspects workspaces and stores sharing an existing `tracker`, resuming
-/// `seed_pending`, skipping `skip_checkouts` and `skip_stores`, and stopping
-/// at `scan_entry_cap`.
+/// cursor state in `resume` with transactional cross-slice deduplication.
 pub(crate) fn inspect_with_tracker(
     workspaces: &[PathBuf],
     environment: &Environment,
     tracker: Arc<crate::budget::BudgetTracker>,
-    skip_checkouts: &HashSet<PathBuf>,
-    seed_pending: &[PathBuf],
-    skip_stores: &HashSet<String>,
-    scan_entry_cap: Option<u64>,
+    resume: SliceResume<'_>,
 ) -> InspectSlice {
+    let SliceResume {
+        skip_checkouts,
+        seed_pending,
+        skip_stores,
+        skip_workspaces,
+        prior_machine_paths,
+        prior_dedup,
+        scan_entry_cap,
+    } = resume;
     tracker.set_phase_entry_cap(scan_entry_cap);
-    let mut scan = SharedScan::with_tracker(Arc::clone(&tracker));
+    let mut scan =
+        SharedScan::with_tracker_and_dedup(Arc::clone(&tracker), prior_dedup.unwrap_or_default());
     let mut found = Found::default();
     let mut results = Vec::new();
     let mut completed_checkouts = Vec::new();
     let mut remaining_pending = Vec::new();
+    let mut shared_checkouts = HashSet::new();
+    let mut shared_builds = HashSet::new();
     for path in seed_pending {
         if skip_checkouts.contains(path) {
             continue;
@@ -643,42 +689,55 @@ pub(crate) fn inspect_with_tracker(
             found.take(&mut scan, path.clone(), claimed, None);
         }
     }
-    for path in outermost(workspaces) {
-        if scan.is_stopped() {
-            results.push(Workspace {
-                path: path.clone(),
-                measured: false,
-                unclassified: Measure::default(),
-            });
-            continue;
-        }
-        let mut workspace = Workspace {
-            path: path.clone(),
-            measured: true,
-            unclassified: Measure::default(),
-        };
-        if let Some(claimed) = claim_at(path, false) {
-            found.take(&mut scan, path.clone(), claimed, None);
-        } else if let Some(bounded) =
-            scan.measure(path, Arc::new(|entry| claim_of(entry, false).is_some()))
-        {
-            workspace.unclassified = bounded.measure;
-            let mut set_aside = bounded.set_aside;
-            set_aside.sort();
-            for dir in set_aside {
-                if scan.is_stopped() {
-                    break;
-                }
-                if let Some(claimed) = claim_at(&dir, false) {
-                    found.take(&mut scan, dir, claimed, None);
-                }
+    let workspaces_complete = if skip_workspaces {
+        false
+    } else {
+        let deferred_before_ws = scan.directories_deferred();
+        for path in outermost(workspaces) {
+            if scan.is_stopped() {
+                results.push(Workspace {
+                    path: path.clone(),
+                    measured: false,
+                    unclassified: Measure::default(),
+                });
+                continue;
             }
-        } else {
-            workspace.measured = false;
+            let mut workspace = Workspace {
+                path: path.clone(),
+                measured: true,
+                unclassified: Measure::default(),
+            };
+            if let Some(claimed) = claim_at(path, false) {
+                found.take(&mut scan, path.clone(), claimed, None);
+            } else if let Some(bounded) =
+                scan.measure(path, Arc::new(|entry| claim_of(entry, false).is_some()))
+            {
+                workspace.unclassified = bounded.measure;
+                let mut set_aside = bounded.set_aside;
+                set_aside.sort();
+                for dir in set_aside {
+                    if scan.is_stopped() {
+                        break;
+                    }
+                    if let Some(claimed) = claim_at(&dir, false) {
+                        found.take(&mut scan, dir, claimed, None);
+                    }
+                }
+            } else {
+                workspace.measured = false;
+            }
+            results.push(workspace);
         }
-        results.push(workspace);
-    }
-    let workspaces_complete = !scan.is_stopped() && results.iter().all(|w| w.measured);
+        let complete = !scan.is_stopped()
+            && deferred_before_ws == scan.directories_deferred()
+            && results.iter().all(|w| w.measured);
+        if complete {
+            scan.commit_dedup();
+        } else {
+            scan.discard_dedup();
+        }
+        complete
+    };
     while let Some(mut checkout) = found.pending.pop_front() {
         if skip_checkouts.contains(&checkout.path) {
             continue;
@@ -688,6 +747,8 @@ pub(crate) fn inspect_with_tracker(
             break;
         }
         let deferred_before = scan.directories_deferred();
+        let shared_before_checkout = scan.staged_insertions();
+        let mut checkout_shared_builds = Vec::new();
         let mut checkout_complete = false;
         if let Some(bounded) = scan.measure(
             &checkout.path,
@@ -705,7 +766,11 @@ pub(crate) fn inspect_with_tracker(
                         // A repository that the build fetched belongs to
                         // the build. Any other one is a checkout, and the
                         // report lists it as one.
+                        let shared_before_build = scan.staged_insertions();
                         let build = measure_build(&mut scan, &dir, ecosystem);
+                        if scan.staged_insertions() > shared_before_build {
+                            checkout_shared_builds.push(dir.clone());
+                        }
                         let mut unproven = build.unproven;
                         unproven.sort();
                         for path in unproven {
@@ -734,8 +799,14 @@ pub(crate) fn inspect_with_tracker(
                 !scan.is_stopped() && deferred_before == scan.directories_deferred();
         }
         if checkout_complete {
+            if scan.staged_insertions() > shared_before_checkout {
+                shared_checkouts.insert(checkout.path.clone());
+            }
+            shared_builds.extend(checkout_shared_builds);
+            scan.commit_dedup();
             completed_checkouts.push(checkout.path.clone());
         } else {
+            scan.discard_dedup();
             // Retain unfinished checkouts so the next bounded run resumes them.
             remaining_pending.push(checkout.path.clone());
         }
@@ -771,7 +842,10 @@ pub(crate) fn inspect_with_tracker(
             // counted each machine in it already.
             let counted =
                 |store: &Store| store.class == StoreClass::Machine && store.path.starts_with(&path);
-            if spec.class == StoreClass::Machine && found.stores.iter().any(counted) {
+            let prior_counted = prior_machine_paths.iter().any(|p| p.starts_with(&path));
+            if spec.class == StoreClass::Machine
+                && (found.stores.iter().any(counted) || prior_counted)
+            {
                 completed_stores.push(spec.id.to_owned());
                 continue;
             }
@@ -801,8 +875,10 @@ pub(crate) fn inspect_with_tracker(
             let store_complete =
                 !scan.is_stopped() && deferred_before == scan.directories_deferred();
             if store_complete {
+                scan.commit_dedup();
                 completed_stores.push(spec.id.to_owned());
             } else {
+                scan.discard_dedup();
                 remaining_stores = true;
             }
             found.stores.push(Store {
@@ -823,18 +899,25 @@ pub(crate) fn inspect_with_tracker(
         scan.outcome()
     };
     tracker.set_phase_entry_cap(None);
+    let entries_visited = scan.entries_visited();
+    let directories_deferred = scan.directories_deferred();
+    let draining_workers = scan.draining_workers();
+    let skipped_mount_count = scan.skipped_mount_count();
+    let error_count = scan.error_count();
+    let errors = scan.errors().to_vec();
+    let committed_dedup = scan.into_committed_dedup();
     InspectSlice {
         scan: DevelopmentScan {
             workspaces: results,
             checkouts: found.checkouts,
             stores: found.stores,
             outcome,
-            entries_visited: scan.entries_visited(),
-            directories_deferred: scan.directories_deferred(),
-            draining_workers: scan.draining_workers(),
-            skipped_mount_count: scan.skipped_mount_count(),
-            error_count: scan.error_count(),
-            errors: scan.errors().to_vec(),
+            entries_visited,
+            directories_deferred,
+            draining_workers,
+            skipped_mount_count,
+            error_count,
+            errors,
         },
         completed_checkouts,
         remaining_pending,
@@ -842,6 +925,9 @@ pub(crate) fn inspect_with_tracker(
         remaining_stores,
         workspaces_complete,
         slice_capped,
+        committed_dedup,
+        shared_checkouts,
+        shared_builds,
     }
 }
 

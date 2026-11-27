@@ -812,6 +812,7 @@ pub(crate) fn probe_at(
     device: u64,
     check_file_mounts: bool,
 ) -> io::Result<Probed> {
+    crate::bench::record_entry_probe();
     let meta = fs::symlink_metadata(path)?;
     let kind = entry_kind(meta.file_type());
     let mut mount = !chosen && meta.dev() != device;

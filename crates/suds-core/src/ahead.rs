@@ -720,7 +720,7 @@ fn list_bounded(
     tracker: &BudgetTracker,
 ) -> io::Result<ListOutcome> {
     #[cfg(target_os = "macos")]
-    {
+    if !crate::bench::reference_scan_enabled() {
         match crate::bulk_macos::read_dir_bulk(dir, device, max_entries, tracker)? {
             crate::bulk_macos::BulkOutcome::Listed { entries, unnamed } => {
                 let mut names = Vec::with_capacity(entries.len());

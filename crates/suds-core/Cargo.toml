@@ -25,5 +25,10 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[[bench]]
+name = "suite"
+path = "benches/suite.rs"
+harness = false
+
 [lints]
 workspace = true

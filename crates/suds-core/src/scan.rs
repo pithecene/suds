@@ -410,11 +410,18 @@ struct Walker {
     /// Each hard-linked regular file whose storage the scan has counted under
     /// the root.
     linked: HashSet<(u64, u64)>,
+    /// Hard-linked files counted anywhere in the active slice (including
+    /// incomplete trees) so later trees in the same slice never double-count
+    /// them, without polluting committed cross-slice state.
+    slice_linked: HashSet<(u64, u64)>,
     /// Hard-linked files staged for the active tree until it finishes cleanly.
     staged_linked: HashSet<(u64, u64)>,
     /// The shared extents whose storage the scan has counted under the
     /// root.
     cloned: Counted,
+    /// Shared extents counted anywhere in the active slice (including
+    /// incomplete trees) to prevent intra-slice double counting.
+    slice_cloned: Counted,
     /// Shared extents staged for the active tree until it finishes cleanly.
     staged_cloned: Counted,
     /// Whether new deduplication claims go into staged sets awaiting commit.
@@ -445,8 +452,10 @@ impl Walker {
             device,
             check_file_mounts: false,
             linked: HashSet::new(),
+            slice_linked: HashSet::new(),
             staged_linked: HashSet::new(),
             cloned: Counted::default(),
+            slice_cloned: Counted::default(),
             staged_cloned: Counted::default(),
             staging: false,
             staged_insertions: 0,
@@ -674,13 +683,14 @@ impl Walker {
             || meta.nlink() <= 1
             || if self.staging {
                 let key = (meta.dev(), meta.ino());
-                if self.linked.contains(&key) {
+                if self.linked.contains(&key) || self.slice_linked.contains(&key) {
                     false
-                } else if self.staged_linked.insert(key) {
-                    self.staged_insertions = self.staged_insertions.saturating_add(1);
-                    true
                 } else {
-                    false
+                    self.slice_linked.insert(key);
+                    if self.staged_linked.insert(key) {
+                        self.staged_insertions = self.staged_insertions.saturating_add(1);
+                    }
+                    true
                 }
             } else {
                 self.linked.insert((meta.dev(), meta.ino()))
@@ -701,15 +711,17 @@ impl Walker {
                         let uncovered = self.cloned.uncovered(meta.dev(), *extent);
                         let uncovered_len: u64 = uncovered.iter().map(|(_, l)| *l).sum();
                         let in_committed = len.saturating_sub(uncovered_len);
-                        let mut in_staged = 0_u64;
+                        let mut in_slice = 0_u64;
                         for sub in uncovered {
-                            let prior = self.staged_cloned.claim(meta.dev(), sub);
-                            if sub.1 > prior {
+                            let fresh = self.slice_cloned.uncovered(meta.dev(), sub);
+                            let prior = self.slice_cloned.claim(meta.dev(), sub);
+                            for piece in fresh {
+                                self.staged_cloned.claim(meta.dev(), piece);
                                 self.staged_insertions = self.staged_insertions.saturating_add(1);
                             }
-                            in_staged = in_staged.saturating_add(prior);
+                            in_slice = in_slice.saturating_add(prior);
                         }
-                        in_committed.saturating_add(in_staged)
+                        in_committed.saturating_add(in_slice)
                     } else {
                         self.cloned.claim(meta.dev(), *extent)
                     };

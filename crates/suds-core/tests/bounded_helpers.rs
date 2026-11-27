@@ -1083,12 +1083,15 @@ fn multi_slice_accounts_for_checkout_local_and_workspace_toolchains() {
 #[test]
 fn multi_slice_reclamation_excludes_freed_bytes_from_cursor_and_final_pressure() {
     let (_tmp, base, workspace, targets) = multi_repo_workspace(12);
-    let payload = vec![b'b'; 128 * 1024];
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let pre_payload_total =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+
+    let payload = vec![b'b'; 1024 * 1024];
     for target in &targets {
         fs::write(target.join("debug/large.o"), &payload).unwrap();
     }
 
-    let harness = MaintainHarness::new(&base, workspace.clone());
     let pre_total =
         suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
     let context = harness.context();
@@ -1110,8 +1113,8 @@ fn multi_slice_reclamation_excludes_freed_bytes_from_cursor_and_final_pressure()
         {
             // Once maintenance reclaims repo-a/target, accumulated_usage_bytes drops its bytes.
             assert!(
-                cursor.accumulated_usage_bytes < 128 * 1024,
-                "cursor retained freed target bytes: {}",
+                cursor.accumulated_usage_bytes <= pre_payload_total,
+                "cursor retained freed target bytes: {} > {pre_payload_total}",
                 cursor.accumulated_usage_bytes
             );
             verified_cursor_reduction = true;
@@ -1127,7 +1130,7 @@ fn multi_slice_reclamation_excludes_freed_bytes_from_cursor_and_final_pressure()
     );
     assert!(targets.iter().all(|t| !t.exists()));
     let post_expected = suds_core::pressure::usage(&inspect(&[workspace], &harness.env));
-    assert!(post_expected + 256 * 1024 < pre_total);
+    assert!(post_expected + 2 * 1024 * 1024 < pre_total);
     let final_report = last_report.unwrap();
     assert!(
         final_report.pressure.usage_bytes < pre_total,
@@ -1249,5 +1252,57 @@ fn multi_slice_deduplicates_hard_links_across_slices() {
     assert_eq!(
         completed.pressure.usage_bytes, expected,
         "cross-slice hardlinks must not be double-counted"
+    );
+}
+
+#[test]
+fn incomplete_checkout_dedup_stays_active_for_same_slice_without_persisting_to_cursor() {
+    let (_tmp, base, workspace, _targets) = multi_repo_workspace(2);
+    let shared = workspace.join("repo-a/shared-blob.bin");
+    fs::write(&shared, vec![b'd'; 256 * 1024]).unwrap();
+    fs::hard_link(&shared, workspace.join("repo-b/shared-blob.bin")).unwrap();
+
+    // Add a directory inside repo-a that exceeds max_dir_entries so repo-a
+    // stays incomplete while repo-b completes in the same slice.
+    let wide = workspace.join("repo-a/z-wide");
+    fs::create_dir_all(&wide).unwrap();
+    for i in 0..25 {
+        fs::write(wide.join(format!("f{i}.txt")), b"x").unwrap();
+    }
+
+    let harness = MaintainHarness::new(&base, workspace.clone());
+    let full_total =
+        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    let context = harness.context();
+    let mut now = FUTURE_NOW;
+    let mut clock = || {
+        now += 1;
+        now
+    };
+    let budget = Budget {
+        max_dir_entries: Some(20),
+        max_entries: Some(10_000),
+        pace_every: 0,
+        background_priority: false,
+        ..Budget::for_maintenance()
+    };
+    let report = suds_core::maintain::maintain_observe_with_budget(
+        &harness.settings,
+        &context,
+        &budget,
+        &mut clock,
+    )
+    .unwrap();
+    assert!(!report.pressure.complete);
+    assert!(
+        report.pressure.usage_bytes <= full_total,
+        "incomplete checkout hardlink leaked into same-slice sibling: {} > {full_total}",
+        report.pressure.usage_bytes
+    );
+    let cursor = suds_core::state::read_maintain_cursor(&harness.dirs.maintain_cursor())
+        .expect("partial observe must persist cursor");
+    assert!(
+        cursor.dedup.linked.is_empty(),
+        "uncommitted hardlink from incomplete checkout must not persist to cursor"
     );
 }

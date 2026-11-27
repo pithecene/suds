@@ -102,8 +102,8 @@ pub(crate) fn read_dir_bulk(
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
     let fd = open(dir, flags, Mode::empty()).map_err(io::Error::from)?;
     let dir_stat = fstat(&fd).map_err(io::Error::from)?;
-    // On APFS directories occupy 0 blocks. On filesystems where directories
-    // allocate blocks, let `probe_at` read directory metadata directly.
+    // APFS directories occupy zero blocks. Filesystems that allocate directory
+    // blocks fall back to `probe_at` for directory metadata.
     let dir_has_blocks = dir_stat.st_blocks != 0;
 
     let mut request = libc::attrlist {

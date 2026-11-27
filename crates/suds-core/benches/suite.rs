@@ -92,48 +92,26 @@ fn parse_cli() -> Result<BenchCommand, String> {
     let rest = &args[1..];
     match sub {
         "component" => {
-            let (samples, output, _) = parse_common_flags(rest, 5)?;
-            Ok(BenchCommand::Component { samples, output })
+            let flags = parse_run_flags(rest, 5, FlagScope::Component)?;
+            Ok(BenchCommand::Component {
+                samples: flags.samples,
+                output: flags.output,
+            })
         }
         "system" => {
-            let (samples, output, profile) = parse_common_flags(rest, 3)?;
+            let flags = parse_run_flags(rest, 3, FlagScope::System)?;
             Ok(BenchCommand::System {
-                profile,
-                samples,
-                output,
+                profile: flags.profile,
+                samples: flags.samples,
+                output: flags.output,
             })
         }
         "live" => {
-            let mut samples = 2_usize;
-            let mut output = None;
-            let mut root = PathBuf::from(".");
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--samples" => {
-                        i += 1;
-                        samples = rest
-                            .get(i)
-                            .ok_or("missing --samples value")?
-                            .parse()
-                            .map_err(|_| "invalid --samples integer")?;
-                    }
-                    "--output" => {
-                        i += 1;
-                        output = Some(PathBuf::from(rest.get(i).ok_or("missing --output path")?));
-                    }
-                    "--root" => {
-                        i += 1;
-                        root = PathBuf::from(rest.get(i).ok_or("missing --root path")?);
-                    }
-                    flag => return Err(format!("unknown live option `{flag}`")),
-                }
-                i += 1;
-            }
+            let flags = parse_run_flags(rest, 2, FlagScope::Live)?;
             Ok(BenchCommand::Live {
-                root,
-                samples,
-                output,
+                root: flags.root,
+                samples: flags.samples,
+                output: flags.output,
             })
         }
         "compare" => {
@@ -161,37 +139,60 @@ fn parse_cli() -> Result<BenchCommand, String> {
     }
 }
 
-fn parse_common_flags(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlagScope {
+    Component,
+    System,
+    Live,
+}
+
+struct RunFlags {
+    samples: usize,
+    output: Option<PathBuf>,
+    profile: ProfileSelection,
+    root: PathBuf,
+}
+
+fn parse_run_flags(
     args: &[String],
     default_samples: usize,
-) -> Result<(usize, Option<PathBuf>, ProfileSelection), String> {
-    let mut samples = default_samples;
-    let mut output = None;
-    let mut profile = ProfileSelection::Small;
+    scope: FlagScope,
+) -> Result<RunFlags, String> {
+    let mut flags = RunFlags {
+        samples: default_samples,
+        output: None,
+        profile: ProfileSelection::Small,
+        root: PathBuf::from("."),
+    };
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--samples" => {
+        match (args[i].as_str(), scope) {
+            ("--samples", _) => {
                 i += 1;
-                samples = args
+                flags.samples = args
                     .get(i)
                     .ok_or("missing --samples value")?
                     .parse()
                     .map_err(|_| "invalid --samples integer")?;
             }
-            "--output" => {
+            ("--output", _) => {
                 i += 1;
-                output = Some(PathBuf::from(args.get(i).ok_or("missing --output path")?));
+                flags.output = Some(PathBuf::from(args.get(i).ok_or("missing --output path")?));
             }
-            "--profile" => {
+            ("--profile", FlagScope::System) => {
                 i += 1;
-                profile = ProfileSelection::parse(args.get(i).ok_or("missing --profile value")?)?;
+                flags.profile =
+                    ProfileSelection::parse(args.get(i).ok_or("missing --profile value")?)?;
             }
-            flag => return Err(format!("unknown option `{flag}`")),
+            ("--root", FlagScope::Live) => {
+                i += 1;
+                flags.root = PathBuf::from(args.get(i).ok_or("missing --root path")?);
+            }
+            (flag, _) => return Err(format!("unknown option `{flag}`")),
         }
         i += 1;
     }
-    Ok((samples, output, profile))
+    Ok(flags)
 }
 
 fn main() -> ExitCode {

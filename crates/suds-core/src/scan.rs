@@ -392,13 +392,41 @@ impl SharedScan {
     }
 }
 
-/// The state that persists across one root's traversal.
+/// Metadata fields that traversal accounting and revision checks read from an
+/// entry, obtained either from `symlink_metadata` or macOS `getattrlistbulk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryMeta {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) nlink: u64,
+    pub(crate) uid: u32,
+    pub(crate) logical_bytes: u64,
+    pub(crate) allocated_bytes: u64,
+    pub(crate) mtime: i64,
+    pub(crate) mtime_nsec: i64,
+}
+
+impl EntryMeta {
+    pub(crate) fn from_metadata(meta: &Metadata) -> Self {
+        EntryMeta {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            nlink: meta.nlink(),
+            uid: meta.uid(),
+            logical_bytes: meta.len(),
+            allocated_bytes: meta.blocks().saturating_mul(BLOCK_UNIT),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+}
+
 /// One entry's metadata, its kind, and whether a mount point stands there.
 pub(crate) struct Probed {
-    meta: fs::Metadata,
+    pub(crate) meta: EntryMeta,
     /// Each extent that a regular file shares with another file, or the
     /// reason that the scan could not read the file's extents.
-    shared: io::Result<Vec<Extent>>,
+    pub(crate) shared: io::Result<Vec<Extent>>,
     pub(crate) kind: EntryKind,
     pub(crate) mount: bool,
 }
@@ -680,9 +708,9 @@ impl Walker {
         // A regular file with several links stores its data once, so only the
         // first link that the traversal reaches under the root contributes bytes.
         let counts_storage = *kind != EntryKind::File
-            || meta.nlink() <= 1
+            || meta.nlink <= 1
             || if self.staging {
-                let key = (meta.dev(), meta.ino());
+                let key = (meta.dev, meta.ino);
                 if self.linked.contains(&key) || self.slice_linked.contains(&key) {
                     false
                 } else {
@@ -693,9 +721,9 @@ impl Walker {
                     true
                 }
             } else {
-                self.linked.insert((meta.dev(), meta.ino()))
+                self.linked.insert((meta.dev, meta.ino))
             };
-        if *kind == EntryKind::Directory && meta.uid() != self.user {
+        if *kind == EntryKind::Directory && meta.uid != self.user {
             self.foreign_directory_count = self.foreign_directory_count.saturating_add(1);
             self.first_foreign_directory
                 .get_or_insert_with(|| path.to_path_buf());
@@ -708,22 +736,22 @@ impl Walker {
                 for extent in shared {
                     let before = if self.staging {
                         let (_, len) = *extent;
-                        let uncovered = self.cloned.uncovered(meta.dev(), *extent);
+                        let uncovered = self.cloned.uncovered(meta.dev, *extent);
                         let uncovered_len: u64 = uncovered.iter().map(|(_, l)| *l).sum();
                         let in_committed = len.saturating_sub(uncovered_len);
                         let mut in_slice = 0_u64;
                         for sub in uncovered {
-                            let fresh = self.slice_cloned.uncovered(meta.dev(), sub);
-                            let prior = self.slice_cloned.claim(meta.dev(), sub);
+                            let fresh = self.slice_cloned.uncovered(meta.dev, sub);
+                            let prior = self.slice_cloned.claim(meta.dev, sub);
                             for piece in fresh {
-                                self.staged_cloned.claim(meta.dev(), piece);
+                                self.staged_cloned.claim(meta.dev, piece);
                                 self.staged_insertions = self.staged_insertions.saturating_add(1);
                             }
                             in_slice = in_slice.saturating_add(prior);
                         }
                         in_committed.saturating_add(in_slice)
                     } else {
-                        self.cloned.claim(meta.dev(), *extent)
+                        self.cloned.claim(meta.dev, *extent)
                     };
                     counted_before = counted_before.saturating_add(before);
                 }
@@ -733,8 +761,8 @@ impl Walker {
             // that the scan could not read which of them it shares.
             Err(err) => self.record_error(path, err),
         }
-        tally.count(*kind, meta, counts_storage, counted_before);
-        Some(EntryRevision::from_metadata(meta))
+        tally.count(*kind, *meta, counts_storage, counted_before);
+        Some(EntryRevision::from_entry_meta(*meta, *kind))
     }
 
     /// Lists a directory's entry names in byte order.
@@ -796,7 +824,7 @@ pub(crate) fn probe_at(
         Ok(Vec::new())
     };
     Ok(Probed {
-        meta,
+        meta: EntryMeta::from_metadata(&meta),
         shared,
         kind,
         mount,
@@ -874,7 +902,7 @@ impl Tally {
     fn count(
         &mut self,
         kind: EntryKind,
-        meta: &Metadata,
+        meta: EntryMeta,
         counts_storage: bool,
         counted_before: u64,
     ) {
@@ -887,15 +915,12 @@ impl Tally {
         *counter = counter.saturating_add(1);
         if counts_storage {
             if kind == EntryKind::File {
-                self.logical = self.logical.saturating_add(meta.len());
+                self.logical = self.logical.saturating_add(meta.logical_bytes);
             }
-            let allocated = meta
-                .blocks()
-                .saturating_mul(BLOCK_UNIT)
-                .saturating_sub(counted_before);
+            let allocated = meta.allocated_bytes.saturating_sub(counted_before);
             self.allocated = self.allocated.saturating_add(allocated);
         }
-        let modified = meta.mtime();
+        let modified = meta.mtime;
         self.oldest = Some(self.oldest.map_or(modified, |t| t.min(modified)));
         self.newest = Some(self.newest.map_or(modified, |t| t.max(modified)));
     }

@@ -136,7 +136,15 @@ impl Counted {
 /// of the correction on one Linux workstation, which cost a seventh of the
 /// time. It kept 97 percent on one macOS workstation, at a fourteenth.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const FLOOR: u64 = 16 * 1024;
+pub(crate) const FLOOR: u64 = 16 * 1024;
+
+#[cfg(target_os = "macos")]
+pub(crate) const SHARES_ALL: u64 = apfs::SHARES_ALL;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn apfs_extent(number: u64, bytes: u64) -> Option<Extent> {
+    apfs::extent(number, bytes)
+}
 
 /// Each extent of the regular file at `path` that the file shares, in the
 /// file's order. A file below the floor yields none, and so does a
@@ -330,7 +338,7 @@ mod apfs {
 
     /// The file shares every block with another file, which the system's
     /// headers name `EF_SHARES_ALL_BLOCKS`.
-    const SHARES_ALL: u64 = 0x40;
+    pub(super) const SHARES_ALL: u64 = 0x40;
     /// The range of places that each number owns, so no two numbers' extents
     /// touch.
     const SPAN: u64 = 1 << 32;

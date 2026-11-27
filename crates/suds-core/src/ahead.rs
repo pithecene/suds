@@ -149,6 +149,9 @@ pub(crate) struct Head {
     /// per-directory entry limit.
     pub(crate) deferred: bool,
     listing: Option<Arc<Listing>>,
+    /// Pre-probed entry metadata collected during directory listing on macOS,
+    /// taken once when building the directory's body.
+    preprobed: Mutex<Option<Vec<Option<Probed>>>>,
     /// The error that kept the directory's listing from the traversal.
     pub(crate) unlisted: Option<io::Error>,
     /// The error of each name that the listing could not state.
@@ -592,12 +595,19 @@ impl Ahead {
             claimed: false,
             deferred: false,
             listing: None,
+            preprobed: Mutex::new(None),
             unlisted: None,
             unnamed: Vec::new(),
         };
-        match list_bounded(dir, self.tracker.budget().max_dir_entries, &self.tracker) {
-            Ok(ListOutcome::Listed(listing, unnamed)) => {
+        match list_bounded(
+            dir,
+            self.device,
+            self.tracker.budget().max_dir_entries,
+            &self.tracker,
+        ) {
+            Ok(ListOutcome::Listed(listing, preprobed, unnamed)) => {
                 head.listing = Some(Arc::new(listing));
+                head.preprobed = Mutex::new(preprobed);
                 head.unnamed = unnamed;
             }
             Ok(ListOutcome::Deferred(limit)) => {
@@ -622,6 +632,12 @@ impl Ahead {
                 beside: Layout::Listed(parent, beside),
             };
             head.claimed = (self.claims)(&entry);
+            if head.claimed {
+                *head
+                    .preprobed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+            }
         }
         head
     }
@@ -638,6 +654,12 @@ impl Ahead {
         else {
             return body;
         };
+        let mut preprobed = head
+            .preprobed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .map(Vec::into_iter);
         let dir = slot.dir.as_path();
         body.children.reserve(listing.names.len().min(4096));
         for (index, name) in listing.names.iter().enumerate() {
@@ -645,7 +667,11 @@ impl Ahead {
                 break;
             }
             let path = dir.join(name);
-            let probed = probe_at(&path, false, self.device, self.check_file_mounts);
+            let cached = preprobed.as_mut().and_then(|iter| iter.next()).flatten();
+            let probed = match cached {
+                Some(probed) => Ok(probed),
+                None => probe_at(&path, false, self.device, self.check_file_mounts),
+            };
             let enters = probed
                 .as_ref()
                 .is_ok_and(|probed| probed.kind == EntryKind::Directory && !probed.mount);
@@ -676,7 +702,7 @@ fn offer(waiting: &mut Waiting, id: u64, slot: &Slot, body: &Body) -> usize {
 }
 
 enum ListOutcome {
-    Listed(Listing, Vec<io::Error>),
+    Listed(Listing, Option<Vec<Option<Probed>>>, Vec<io::Error>),
     Deferred(usize),
     Stopped,
 }
@@ -685,9 +711,39 @@ enum ListOutcome {
 /// limits and cancellation before allocating or probing an oversized directory.
 fn list_bounded(
     dir: &Path,
+    device: u64,
     max_entries: Option<usize>,
     tracker: &BudgetTracker,
 ) -> io::Result<ListOutcome> {
+    #[cfg(target_os = "macos")]
+    {
+        match crate::bulk_macos::read_dir_bulk(dir, device, max_entries, tracker)? {
+            crate::bulk_macos::BulkOutcome::Listed(entries) => {
+                let mut names = Vec::with_capacity(entries.len());
+                let mut kinds = Vec::with_capacity(entries.len());
+                let mut preprobed = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    names.push(entry.name);
+                    kinds.push(entry.kind);
+                    preprobed.push(entry.probed);
+                }
+                let plain = names.iter().all(|name| name.as_encoded_bytes().is_ascii());
+                let listing = Listing {
+                    names,
+                    kinds,
+                    plain,
+                };
+                return Ok(ListOutcome::Listed(listing, Some(preprobed), Vec::new()));
+            }
+            crate::bulk_macos::BulkOutcome::Deferred(limit) => {
+                return Ok(ListOutcome::Deferred(limit));
+            }
+            crate::bulk_macos::BulkOutcome::Stopped => return Ok(ListOutcome::Stopped),
+            crate::bulk_macos::BulkOutcome::Unsupported => {}
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = device;
     let mut found = Vec::new();
     let mut unnamed = Vec::new();
     let mut seen = 0_usize;
@@ -717,14 +773,14 @@ fn list_bounded(
         kinds,
         plain,
     };
-    Ok(ListOutcome::Listed(listing, unnamed))
+    Ok(ListOutcome::Listed(listing, None, unnamed))
 }
 
 #[cfg(test)]
 fn list(dir: &Path) -> io::Result<(Listing, Vec<io::Error>)> {
     let tracker = BudgetTracker::new(crate::budget::Budget::default());
-    match list_bounded(dir, None, &tracker)? {
-        ListOutcome::Listed(listing, unnamed) => Ok((listing, unnamed)),
+    match list_bounded(dir, 0, None, &tracker)? {
+        ListOutcome::Listed(listing, _, unnamed) => Ok((listing, unnamed)),
         ListOutcome::Deferred(_) | ListOutcome::Stopped => {
             Err(io::Error::other("unexpected stop in unbounded list"))
         }

@@ -4,6 +4,6 @@ rust = { version = "1.98.1", components = "rustfmt,clippy" }
 "aqua:go-task/task" = "3.48.0"
 "aqua:google/yamlfmt" = "0.21.0"
 # Bosun registers each worktree of this repository with Suds (bosun.yaml), through this release.
-"github:pithecene/suds" = { version = "0.1.9", os = ["linux", "macos"] }
+"github:pithecene/suds" = { version = "0.1.10", os = ["linux", "macos"] }
 # Bosun's release is private. Mise installs it on first use so contributors can install the build tools without access.
 "github:pithecene/bosun" = { version = "0.28.3", lazy = true, lazy_bins = ["bosun"] }

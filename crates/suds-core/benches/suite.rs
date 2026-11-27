@@ -42,6 +42,7 @@ enum BenchCommand {
         baseline: PathBuf,
         candidate: PathBuf,
         json: bool,
+        allow_incompatible: bool,
     },
 }
 
@@ -116,23 +117,26 @@ fn parse_cli() -> Result<BenchCommand, String> {
         }
         "compare" => {
             let mut json = false;
+            let mut allow_incompatible = false;
             let mut positional = Vec::new();
             for item in rest {
-                if item == "--json" {
-                    json = true;
-                } else {
-                    positional.push(PathBuf::from(item));
+                match item.as_str() {
+                    "--json" => json = true,
+                    "--allow-incompatible" => allow_incompatible = true,
+                    _ => positional.push(PathBuf::from(item)),
                 }
             }
             if positional.len() != 2 {
                 return Err(
-                    "usage: suite compare <baseline.json> <candidate.json> [--json]".to_owned(),
+                    "usage: suite compare <baseline.json> <candidate.json> [--json] [--allow-incompatible]"
+                        .to_owned(),
                 );
             }
             Ok(BenchCommand::Compare {
                 baseline: positional[0].clone(),
                 candidate: positional[1].clone(),
                 json,
+                allow_incompatible,
             })
         }
         other => Err(format!("unknown subcommand `{other}`")),
@@ -253,6 +257,7 @@ fn run() -> Result<(), String> {
             baseline,
             candidate,
             json,
+            allow_incompatible,
         } => {
             let base: BenchReport = serde_json::from_str(
                 &fs::read_to_string(&baseline)
@@ -272,6 +277,12 @@ fn run() -> Result<(), String> {
                 );
             } else {
                 print!("{}", format_comparison(&comp));
+            }
+            if !comp.compatible && !allow_incompatible {
+                return Err(format!(
+                    "incompatible benchmark reports ({} issue(s)); pass --allow-incompatible to compare anyway",
+                    comp.incompatibilities.len()
+                ));
             }
             Ok(())
         }
@@ -395,6 +406,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             let mut visited = 0_u64;
             let mut peak_cursor = 0_u64;
             let mut usage = 0_u64;
+            let mut slices = 0_u64;
+            let mut complete = false;
             for _ in 0..16 {
                 ts += 5;
                 let report = maintain_observe_with_budget(
@@ -410,12 +423,14 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                     &mut || ts,
                 )
                 .unwrap();
+                slices += 1;
                 visited += report.entries_visited;
                 if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
                     peak_cursor = peak_cursor.max(meta.len());
                 }
                 if report.pressure.complete && !dirs.maintain_cursor().exists() {
                     usage = report.pressure.usage_bytes;
+                    complete = true;
                     break;
                 }
             }
@@ -423,6 +438,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 entries_visited: visited,
                 allocated_bytes: usage,
                 cursor_bytes: peak_cursor,
+                slices,
+                complete,
                 ..StepOutcome::default()
             }
         },
@@ -565,6 +582,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 entries_visited: report.entries_visited,
                 allocated_bytes: report.pressure.usage_bytes,
                 reclaimed_bytes: freed,
+                slices: 1,
+                complete: report.pressure.complete,
                 ..StepOutcome::default()
             }
         },
@@ -597,10 +616,11 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
 
     let mut cases = Vec::new();
     cases.push(measure_case(
-        "live/observe_root",
-        params,
+        "live/observe_root_single_slice",
+        params.clone(),
         samples,
         || {
+            let _ = fs::remove_file(dirs.pressure());
             let _ = fs::remove_file(dirs.maintain_cursor());
         },
         |()| {
@@ -627,9 +647,71 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
                 },
             )
             .unwrap();
+            let cursor_bytes = fs::metadata(dirs.maintain_cursor()).map_or(0, |m| m.len());
             StepOutcome {
                 entries_visited: report.entries_visited,
                 allocated_bytes: report.pressure.usage_bytes,
+                cursor_bytes,
+                slices: 1,
+                complete: report.pressure.complete,
+                ..StepOutcome::default()
+            }
+        },
+    ));
+
+    cases.push(measure_case(
+        "live/observe_root_complete",
+        params,
+        samples,
+        || {
+            let _ = fs::remove_file(dirs.pressure());
+            let _ = fs::remove_file(dirs.maintain_cursor());
+        },
+        |()| {
+            let git = Git::default();
+            let budget = Budget {
+                pace_every: 0,
+                background_priority: false,
+                ..Budget::for_maintenance()
+            };
+            let mut ts = BENCH_NOW;
+            let mut visited = 0_u64;
+            let mut peak_cursor = 0_u64;
+            let mut usage = 0_u64;
+            let mut slices = 0_u64;
+            let mut complete = false;
+            for _ in 0..256 {
+                ts += 5;
+                let report = maintain_observe_with_budget(
+                    &settings,
+                    &Context {
+                        directories: &dirs,
+                        environment: &env,
+                        programs: &programs,
+                        git: &git,
+                        now: ts,
+                    },
+                    &budget,
+                    &mut || ts,
+                )
+                .unwrap();
+                slices += 1;
+                visited += report.entries_visited;
+                if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
+                    peak_cursor = peak_cursor.max(meta.len());
+                }
+                if report.pressure.complete && !dirs.maintain_cursor().exists() {
+                    usage = report.pressure.usage_bytes;
+                    complete = true;
+                    break;
+                }
+            }
+            StepOutcome {
+                entries_visited: visited,
+                allocated_bytes: usage,
+                cursor_bytes: peak_cursor,
+                slices,
+                complete,
                 ..StepOutcome::default()
             }
         },
@@ -641,12 +723,16 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
 
 fn emit_report(report: &BenchReport, output: Option<&Path>) -> Result<(), String> {
     println!(
-        "Suite: {} | rev: {} | os: {}/{} | block: {}B",
+        "Suite: {} | rev: {} | os: {}/{} | fs: {} | block: {}",
         report.suite,
         &report.environment.git_revision[..10.min(report.environment.git_revision.len())],
         report.environment.os,
         report.environment.arch,
-        report.environment.filesystem_block_size
+        report.environment.filesystem.as_deref().unwrap_or("-"),
+        report
+            .environment
+            .filesystem_block_size
+            .map_or_else(|| "-".to_owned(), |size| format!("{size}B"))
     );
     println!(
         "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
@@ -656,8 +742,9 @@ fn emit_report(report: &BenchReport, output: Option<&Path>) -> Result<(), String
         let cpu_col = c
             .median_cpu_us
             .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+        let status = if c.complete { "" } else { " [INCOMPLETE]" };
         println!(
-            "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
+            "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}{status}",
             c.name,
             c.median_us,
             cpu_col,

@@ -12,6 +12,8 @@ compile_error!("Suds supports macOS and Linux only.");
 mod ahead;
 pub mod arena;
 pub mod budget;
+#[cfg(target_os = "macos")]
+mod bulk_macos;
 mod clones;
 pub mod development;
 pub mod go_cache;

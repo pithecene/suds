@@ -13,6 +13,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Bounded observation while paused**: `suds maintain --observe` runs a bounded pressure observation slice while `pause.json` stays active. It never reclaims storage or modifies durable pause state.
 
+### Changed
+
+- **Batched macOS metadata scanning with `getattrlistbulk(2)`**: `suds` reads macOS directory entries, metadata, and APFS clone flags in batches through `getattrlistbulk(2)`. This replaces per-entry `lstat` and `getattrlist` calls.
+
 ### Fixed
 
 - **Multi-slice pressure completion across bounded runs**: `maintain-cursor.json` now records completed stores and accumulated usage across slices. Once the final slice finishes every checkout and store, Suds publishes a complete reading and clears the cursor.

@@ -84,6 +84,18 @@ impl EntryRevision {
         }
     }
 
+    /// The revision of the entry that pre-extracted traversal metadata describes.
+    pub(crate) fn from_entry_meta(meta: crate::scan::EntryMeta, kind: EntryKind) -> Self {
+        EntryRevision {
+            device: meta.dev,
+            inode: meta.ino,
+            kind,
+            logical_size: meta.logical_bytes,
+            modified_seconds: meta.mtime,
+            modified_nanoseconds: meta.mtime_nsec,
+        }
+    }
+
     /// Whether both revisions describe the same entry, whether or not its
     /// content changed.
     pub fn is_same_entry(&self, other: &EntryRevision) -> bool {

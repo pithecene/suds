@@ -1042,6 +1042,11 @@ fn a_paused_scheduled_run_reaches_a_fresh_reading_in_bounded_slices_and_reclaims
             clock_now
         };
         let report = run_maintain_step(&settings, &context, 80, &mut clock);
+        assert!(
+            report.entries_visited <= 80,
+            "a paused slice exceeded its entry budget: {}",
+            report.entries_visited
+        );
         assert!(report.paused, "the run must state the pause");
         assert_eq!(report.pause_reason.as_deref(), Some("incident-hold"));
         assert!(report.reclaim.is_none(), "a paused run must never reclaim");

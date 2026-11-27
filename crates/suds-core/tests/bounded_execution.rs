@@ -129,11 +129,13 @@ fn entry_budget_exhaustion_keeps_hard_pressure_without_false_recovery() {
 #[test]
 fn durable_pause_prevents_reclamation_and_corrupt_pause_fails_closed() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("work");
+    // The paused run audits the arena, which accepts no root that a symbolic link reaches.
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("work");
     fs::create_dir_all(&root).unwrap();
     let dirs = Directories {
-        state: tmp.path().join("state"),
-        config: tmp.path().join("config"),
+        state: base.join("state"),
+        config: base.join("config"),
     };
     fs::create_dir_all(&dirs.state).unwrap();
     write_pause(
@@ -169,14 +171,31 @@ fn durable_pause_prevents_reclamation_and_corrupt_pause_fails_closed() {
     assert!(report.reclaim.is_none());
     assert!(report.stores.is_none());
 
-    // Corrupt pause file must fail closed rather than silently resuming.
-    fs::write(dirs.pause(), b"{broken").unwrap();
-    assert!(
-        maintain::maintain_with_budget(&settings, &context, &Budget::default(), &mut || {
+    // A corrupt pause record fails the run before it takes the maintenance lock, in a state directory that no
+    // earlier run left a lock file in.
+    let fresh = Directories {
+        state: base.join("fresh-state"),
+        config: base.join("config"),
+    };
+    fs::create_dir_all(&fresh.state).unwrap();
+    fs::write(fresh.pause(), b"{broken").unwrap();
+    let fresh_context = Context {
+        directories: &fresh,
+        environment: &Environment::default(),
+        programs: &Programs::default(),
+        git: &Git::default(),
+        now: 1_795_600_000,
+    };
+    let refusal =
+        maintain::maintain_with_budget(&settings, &fresh_context, &Budget::default(), &mut || {
             1_795_600_002
-        },)
-        .is_err()
+        })
+        .unwrap_err();
+    assert!(
+        refusal.contains("holds no pause record that Suds reads"),
+        "{refusal}"
     );
+    assert!(!fresh.pressure().with_extension("maintain.lock").exists());
 }
 
 #[test]

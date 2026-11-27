@@ -194,19 +194,19 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
     } else {
         maintain::maintain(&settings, &context)?
     };
-    let partial = !report.paused
-        && (!report.outcome.is_complete()
-            || report.error_count > 0
-            || report
-                .reclaim
-                .iter()
-                .flat_map(|reclaim| &reclaim.removals)
-                .any(|removal| !removal.removed)
-            || report
-                .stores
-                .iter()
-                .flat_map(|stores| &stores.trims)
-                .any(|trim| trim.failure.is_some()));
+    // A paused run measures, so its outcome and errors decide the status as those of any other run do.
+    let partial = !report.outcome.is_complete()
+        || report.error_count > 0
+        || report
+            .reclaim
+            .iter()
+            .flat_map(|reclaim| &reclaim.removals)
+            .any(|removal| !removal.removed)
+        || report
+            .stores
+            .iter()
+            .flat_map(|stores| &stores.trims)
+            .any(|trim| trim.failure.is_some());
     ran(emit(args.format, &report, write_maintenance), partial)
 }
 

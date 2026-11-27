@@ -1065,8 +1065,8 @@ fn multi_slice_accounts_for_checkout_local_and_workspace_toolchains() {
     }
 
     let harness = MaintainHarness::new(&base, workspace.clone());
-    let expected =
-        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    let baseline = inspect(std::slice::from_ref(&workspace), &harness.env);
+    let expected = suds_core::pressure::usage(&baseline);
 
     // Single-pass observe must include both toolchains.
     let mut now = FUTURE_NOW;
@@ -1074,7 +1074,8 @@ fn multi_slice_accounts_for_checkout_local_and_workspace_toolchains() {
     assert_eq!(single.pressure.usage_bytes, expected);
 
     // Multi-slice observe must match single-pass usage exactly.
-    let (sliced, saw_cursor) = harness.observe_to_completion(55, &mut now);
+    let per_run_cap = (baseline.entries_visited / 2).max(1);
+    let (sliced, saw_cursor) = harness.observe_to_completion(per_run_cap, &mut now);
     assert!(saw_cursor, "tight cap must span multiple slices");
     assert_eq!(sliced.pressure.usage_bytes, expected);
 }
@@ -1209,8 +1210,9 @@ fn multi_slice_deduplicates_hard_links_across_slices() {
     fs::hard_link(&shared_src, workspace.join("repo-c/shared-blob.bin")).unwrap();
 
     let harness = MaintainHarness::new(&base, workspace.clone());
-    let expected =
-        suds_core::pressure::usage(&inspect(std::slice::from_ref(&workspace), &harness.env));
+    let baseline = inspect(std::slice::from_ref(&workspace), &harness.env);
+    let expected = suds_core::pressure::usage(&baseline);
+    let per_run_cap = (baseline.entries_visited / 2).max(1);
     let context = harness.context();
 
     let mut now = FUTURE_NOW;
@@ -1224,7 +1226,7 @@ fn multi_slice_deduplicates_hard_links_across_slices() {
         let report = suds_core::maintain::maintain_observe_with_budget(
             &harness.settings,
             &context,
-            &maintenance_budget(55),
+            &maintenance_budget(per_run_cap),
             &mut clock,
         )
         .unwrap();

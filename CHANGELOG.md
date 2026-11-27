@@ -16,6 +16,7 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Multi-slice pressure completion across bounded runs**: `maintain-cursor.json` now records completed stores and accumulated usage across slices. Once the final slice finishes every checkout and store, Suds publishes a complete reading and clears the cursor.
+- **Multi-slice cursor schema, mode separation, and cross-slice deduplication**: `maintain-cursor.json` uses schema `suds.maintain-cursor/v2`, separates observation and reclamation passes, tracks checkout-local and workspace-discovered toolchains, excludes confirmed reclaimed build state from accumulated usage, and carries committed hardlink and clone deduplication across slices.
 
 ## [0.1.9] - 2026-11-26
 

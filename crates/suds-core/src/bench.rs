@@ -2,6 +2,7 @@
 //! storage fixtures, and benchmark report comparison for Suds.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +55,7 @@ impl Counts {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn record_bulk_dir_call() {
     BULK_DIR_CALLS.fetch_add(1, Ordering::Relaxed);
 }
@@ -66,6 +68,7 @@ pub(crate) fn record_helper_launch() {
     HELPER_LAUNCHES.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn reference_scan_enabled() -> bool {
     FORCE_REFERENCE_SCAN.load(Ordering::Relaxed)
 }
@@ -83,7 +86,7 @@ pub fn with_reference_scan<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// Process CPU and resident-memory figures captured through safe `rustix` `getrusage`.
+/// Process CPU and resident-memory figures captured without `unsafe` code where the OS exposes `/proc`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessSample {
     pub self_user_us: u64,
@@ -94,16 +97,8 @@ pub struct ProcessSample {
 }
 
 impl ProcessSample {
-    pub fn capture() -> Self {
-        let (self_user_us, self_sys_us, max_rss_bytes) = rusage(libc::RUSAGE_SELF);
-        let (child_user_us, child_sys_us, _) = rusage(libc::RUSAGE_CHILDREN);
-        Self {
-            self_user_us,
-            self_sys_us,
-            child_user_us,
-            child_sys_us,
-            max_rss_bytes,
-        }
+    pub fn capture() -> Option<Self> {
+        capture_os()
     }
 
     pub fn delta_since(self, earlier: Self) -> Self {
@@ -124,34 +119,50 @@ impl ProcessSample {
     }
 }
 
-#[expect(
-    unsafe_code,
-    reason = "rustix exposes no safe getrusage wrapper in its enabled features"
-)]
-fn rusage(who: libc::c_int) -> (u64, u64, u64) {
-    // SAFETY: `usage` starts zeroed and `getrusage` populates it for `who`.
-    unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        if libc::getrusage(who, &mut usage) != 0 {
-            return (0, 0, 0);
-        }
-        let user = timeval_us(usage.ru_utime.tv_sec, i64::from(usage.ru_utime.tv_usec));
-        let sys = timeval_us(usage.ru_stime.tv_sec, i64::from(usage.ru_stime.tv_usec));
-        #[cfg(target_os = "macos")]
-        let rss = u64::try_from(usage.ru_maxrss).unwrap_or(0);
-        #[cfg(not(target_os = "macos"))]
-        let rss = u64::try_from(usage.ru_maxrss)
-            .unwrap_or(0)
-            .saturating_mul(1024);
-        (user, sys, rss)
-    }
+#[cfg(target_os = "linux")]
+fn capture_os() -> Option<ProcessSample> {
+    let stat = fs::read_to_string("/proc/self/stat").ok()?;
+    let status = fs::read_to_string("/proc/self/status").ok();
+    parse_proc_sample(&stat, status.as_deref())
 }
 
-fn timeval_us(secs: i64, usecs: i64) -> u64 {
-    u64::try_from(secs)
+#[cfg(not(target_os = "linux"))]
+fn capture_os() -> Option<ProcessSample> {
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_sample(stat: &str, status: Option<&str>) -> Option<ProcessSample> {
+    // Linux `/proc/[pid]/stat` reports jiffies in `USER_HZ` (100 Hz = 10,000 microseconds per tick).
+    const TICK_US: u64 = 10_000;
+    let after_comm = stat.rfind(')')?.checked_add(1)?;
+    let fields: Vec<&str> = stat.get(after_comm..)?.split_whitespace().collect();
+    let utime = fields.get(11)?.parse::<u64>().ok()?.saturating_mul(TICK_US);
+    let stime = fields.get(12)?.parse::<u64>().ok()?.saturating_mul(TICK_US);
+    let cutime = fields.get(13)?.parse::<u64>().ok()?.saturating_mul(TICK_US);
+    let cstime = fields.get(14)?.parse::<u64>().ok()?.saturating_mul(TICK_US);
+    let max_rss_bytes = status
+        .and_then(|s| parse_status_kib(s, "VmHWM:").or_else(|| parse_status_kib(s, "VmRSS:")))
         .unwrap_or(0)
-        .saturating_mul(1_000_000)
-        .saturating_add(u64::try_from(usecs).unwrap_or(0))
+        .saturating_mul(1024);
+    Some(ProcessSample {
+        self_user_us: utime,
+        self_sys_us: stime,
+        child_user_us: cutime,
+        child_sys_us: cstime,
+        max_rss_bytes,
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_status_kib(status: &str, prefix: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        line.strip_prefix(prefix)?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })
 }
 
 /// Host, filesystem, Git revision, and Rust toolchain metadata recorded in benchmark reports.
@@ -169,15 +180,12 @@ pub struct EnvironmentInfo {
 
 impl EnvironmentInfo {
     pub fn collect(repo_root: &Path) -> Self {
-        let root_str = repo_root.display().to_string();
-        let git_revision = run_trimmed("git", &["-C", &root_str, "rev-parse", "HEAD"])
+        let git_revision = run_git_trimmed(repo_root, &["rev-parse", "HEAD"])
             .unwrap_or_else(|| "unknown".to_owned());
-        let git_dirty = run_trimmed("git", &["-C", &root_str, "status", "--porcelain"])
-            .is_some_and(|s| !s.is_empty());
+        let git_dirty =
+            run_git_trimmed(repo_root, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
         let logical_cpus = std::thread::available_parallelism().map_or(1, usize::from);
         let filesystem_block_size = statvfs(repo_root).map_or(0, |st| st.f_frsize);
-        let rustc_version =
-            run_trimmed("rustc", &["--version"]).unwrap_or_else(|| "unknown".to_owned());
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
@@ -188,14 +196,18 @@ impl EnvironmentInfo {
             arch: std::env::consts::ARCH.to_owned(),
             logical_cpus,
             filesystem_block_size,
-            rustc_version,
+            rustc_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
             observed_at: timestamp::format_utc(now_secs),
         }
     }
 }
 
-fn run_trimmed(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program).args(args).output().ok()?;
+fn run_git_trimmed(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -220,9 +232,9 @@ pub struct CaseReport {
     pub median_us: u64,
     pub p95_us: u64,
     pub max_us: u64,
-    pub median_cpu_us: u64,
+    pub median_cpu_us: Option<u64>,
     pub entries_per_sec: u64,
-    pub max_rss_bytes: u64,
+    pub max_rss_bytes: Option<u64>,
     pub counts: Counts,
     pub outcome: StepOutcome,
 }
@@ -247,7 +259,7 @@ pub fn measure_case<S>(
     let runs = samples.max(1);
     let mut elapsed = Vec::with_capacity(runs);
     let mut cpus = Vec::with_capacity(runs);
-    let mut last_proc = ProcessSample::default();
+    let mut last_rss = None;
     let mut last_counts = Counts::default();
     let mut last_outcome = StepOutcome::default();
     for _ in 0..runs {
@@ -259,18 +271,21 @@ pub fn measure_case<S>(
         let took_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let after_proc = ProcessSample::capture();
         let after_counts = Counts::now();
-        let proc_delta = after_proc.delta_since(before_proc);
         elapsed.push(took_us);
-        cpus.push(proc_delta.total_cpu_us());
-        last_proc = proc_delta;
+        if let (Some(before), Some(after)) = (before_proc, after_proc) {
+            let proc_delta = after.delta_since(before);
+            cpus.push(proc_delta.total_cpu_us());
+            last_rss = Some(proc_delta.max_rss_bytes);
+        }
         last_counts = after_counts.since(before_counts);
         last_outcome = outcome;
     }
     elapsed.sort_unstable();
     cpus.sort_unstable();
     let mid = elapsed.len() / 2;
-    let p95 = ((elapsed.len().saturating_sub(1)) * 95) / 100;
+    let p95 = nearest_rank_index(elapsed.len(), 95);
     let median_us = elapsed[mid];
+    let median_cpu_us = (!cpus.is_empty()).then(|| cpus[cpus.len() / 2]);
     let entries_per_sec = if median_us > 0 {
         last_outcome
             .entries_visited
@@ -288,12 +303,22 @@ pub fn measure_case<S>(
         median_us,
         p95_us: elapsed[p95],
         max_us: *elapsed.last().unwrap_or(&0),
-        median_cpu_us: cpus[cpus.len() / 2],
+        median_cpu_us,
         entries_per_sec,
-        max_rss_bytes: last_proc.max_rss_bytes,
+        max_rss_bytes: last_rss,
         counts: last_counts,
         outcome: last_outcome,
     }
+}
+
+fn nearest_rank_index(len: usize, pct: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    len.saturating_mul(pct)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(len - 1)
 }
 
 /// Multi-scale fixture profile modeling Cargo output, hard-linked stores, clones, and claims.
@@ -401,14 +426,19 @@ impl BenchWorkspace {
             let remote = base.join(format!("remote-{r:02}.git"));
             run_git(
                 &base,
-                &["init", "-q", "--bare", &format!("remote-{r:02}.git")],
+                [
+                    OsStr::new("init"),
+                    OsStr::new("-q"),
+                    OsStr::new("--bare"),
+                    remote.as_os_str(),
+                ],
             )?;
             let repo = workspace_root.join(format!("repo-{r:02}"));
             fs::create_dir_all(repo.join("src")).map_err(|e| e.to_string())?;
-            run_git(&repo, &["init", "-q", "-b", "main"])?;
-            run_git(&repo, &["config", "user.name", "Bench"])?;
-            run_git(&repo, &["config", "user.email", "bench@example.com"])?;
-            run_git(&repo, &["config", "commit.gpgsign", "false"])?;
+            run_git(&repo, ["init", "-q", "-b", "main"])?;
+            run_git(&repo, ["config", "user.name", "Bench"])?;
+            run_git(&repo, ["config", "user.email", "bench@example.com"])?;
+            run_git(&repo, ["config", "commit.gpgsign", "false"])?;
             fs::write(
                 repo.join("Cargo.toml"),
                 format!("[package]\nname = \"repo-{r:02}\"\nversion = \"0.1.0\"\n"),
@@ -422,13 +452,18 @@ impl BenchWorkspace {
             .map_err(|e| e.to_string())?;
             fs::write(repo.join("src/lib.rs"), "pub fn item() -> u64 { 1 }\n")
                 .map_err(|e| e.to_string())?;
-            run_git(&repo, &["add", "."])?;
-            run_git(&repo, &["commit", "-q", "-m", "chore: initial"])?;
+            run_git(&repo, ["add", "."])?;
+            run_git(&repo, ["commit", "-q", "-m", "chore: initial"])?;
             run_git(
                 &repo,
-                &["remote", "add", "origin", &remote.display().to_string()],
+                [
+                    OsStr::new("remote"),
+                    OsStr::new("add"),
+                    OsStr::new("origin"),
+                    remote.as_os_str(),
+                ],
             )?;
-            run_git(&repo, &["push", "-q", "origin", "main"])?;
+            run_git(&repo, ["push", "-q", "origin", "main"])?;
 
             populate_cargo_target(&repo, profile.target_files_per_checkout, &payload)?;
             populate_hardlinked_node_modules(&repo, &store_files)?;
@@ -441,16 +476,16 @@ impl BenchWorkspace {
                 }
                 run_git(
                     &repo,
-                    &[
-                        "worktree",
-                        "add",
-                        "-q",
-                        "-b",
-                        &branch,
-                        &wt.display().to_string(),
+                    [
+                        OsStr::new("worktree"),
+                        OsStr::new("add"),
+                        OsStr::new("-q"),
+                        OsStr::new("-b"),
+                        OsStr::new(&branch),
+                        wt.as_os_str(),
                     ],
                 )?;
-                run_git(&wt, &["push", "-q", "origin", &branch])?;
+                run_git(&wt, ["push", "-q", "origin", &branch])?;
                 populate_hardlinked_node_modules(&wt, &store_files)?;
 
                 match w % 3 {
@@ -576,16 +611,23 @@ fn seed_or_populate(
     Ok(())
 }
 
-fn run_git(dir: &Path, args: &[&str]) -> Result<(), String> {
+fn run_git<I, S>(dir: &Path, args: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let arg_vec: Vec<OsString> = args
+        .into_iter()
+        .map(|a| a.as_ref().to_os_string())
+        .collect();
     let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+        .current_dir(dir)
+        .args(&arg_vec)
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "git {args:?} failed: {}",
+            "git {arg_vec:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -701,4 +743,34 @@ fn signed_delta(base: u64, cand: u64) -> i64 {
     i128::from(cand)
         .saturating_sub(i128::from(base))
         .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProcessSample, nearest_rank_index, parse_proc_sample};
+
+    #[test]
+    fn nearest_rank_selects_upper_tail_percentile() {
+        assert_eq!(nearest_rank_index(1, 95), 0);
+        assert_eq!(nearest_rank_index(2, 95), 1);
+        assert_eq!(nearest_rank_index(3, 95), 2);
+        assert_eq!(nearest_rank_index(20, 95), 18);
+        assert_eq!(nearest_rank_index(100, 95), 94);
+    }
+
+    #[test]
+    fn proc_sample_parses_ticks_and_high_water_mark() {
+        let stat = "42 (suds bench) R 1 42 42 0 -1 4194304 10 20 0 0 15 6 4 2 20 0 1 0 100 0 0";
+        let status = "Name:\tsuds\nVmHWM:\t   2048 kB\nVmRSS:\t   1024 kB\n";
+        assert_eq!(
+            parse_proc_sample(stat, Some(status)),
+            Some(ProcessSample {
+                self_user_us: 150_000,
+                self_sys_us: 60_000,
+                child_user_us: 40_000,
+                child_sys_us: 20_000,
+                max_rss_bytes: 2_097_152,
+            })
+        );
+    }
 }

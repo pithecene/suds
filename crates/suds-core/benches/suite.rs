@@ -463,12 +463,13 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
     // 4. Build-state seeding followed by bounded reclamation execution.
     if let (Some(src_repo), Some(dest_wt)) = (ws.main_repos.first(), ws.unseeded_worktrees.first())
     {
+        let seeded_target = dest_wt.join("target");
         cases.push(measure_case(
             format!("system/{}/seed_and_reclaim_cycle", profile.name),
             base_params.clone(),
             samples,
             || {
-                let _ = fs::remove_dir_all(dest_wt.join("target"));
+                let _ = fs::remove_dir_all(&seeded_target);
             },
             |()| {
                 let git = Git::default();
@@ -479,7 +480,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
 
                 let target_scan = inspect(std::slice::from_ref(dest_wt), &env);
                 let r_reg = registry::reading(&ws.state_dir.join("registry.jsonl"));
-                let rplan = plan_reclaim(
+                let mut rplan = plan_reclaim(
                     &target_scan,
                     &Observed {
                         liveness: &Ok(Liveness::default()),
@@ -493,6 +494,10 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                     },
                     BENCH_NOW,
                 );
+                // Restrict reclamation to the seeded target so `node_modules` stays intact across samples.
+                rplan
+                    .candidates
+                    .retain(|c| c.path.as_path() == seeded_target);
                 let reg_path = ws.state_dir.join("registry.jsonl");
                 let rreport = apply(
                     &mut journal,
@@ -648,11 +653,14 @@ fn emit_report(report: &BenchReport, output: Option<&Path>) -> Result<(), String
         "CASE", "MED (us)", "CPU (us)", "ENTRIES/s", "BULK", "PROBES", "GIT"
     );
     for c in &report.cases {
+        let cpu_col = c
+            .median_cpu_us
+            .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
         println!(
             "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
             c.name,
             c.median_us,
-            c.median_cpu_us,
+            cpu_col,
             c.entries_per_sec,
             c.counts.bulk_dir_calls,
             c.counts.entry_probe_calls,

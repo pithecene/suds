@@ -481,16 +481,13 @@ mod tests {
         // ATTR_CMN_ERROR(4) + attrreference_t(8) + NUL-terminated name bytes.
         let name = b"secret\0";
         let mut record = Vec::new();
-        record.extend_from_slice(&0_u32.to_ne_bytes()); // length placeholder
+        record.extend_from_slice(&0_u32.to_ne_bytes());
         record.extend_from_slice(
             &(libc::ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | libc::ATTR_CMN_NAME).to_ne_bytes(),
         );
-        record.extend_from_slice(&0_u32.to_ne_bytes()); // volattr
-        record.extend_from_slice(&0_u32.to_ne_bytes()); // dirattr
-        record.extend_from_slice(&0_u32.to_ne_bytes()); // fileattr
-        record.extend_from_slice(&0_u32.to_ne_bytes()); // forkattr
+        record.extend_from_slice(&[0_u8; 16]);
         record.extend_from_slice(&(libc::EACCES as u32).to_ne_bytes());
-        record.extend_from_slice(&8_i32.to_ne_bytes()); // offset from attrreference_t to name
+        record.extend_from_slice(&8_i32.to_ne_bytes());
         record.extend_from_slice(&(name.len() as u32).to_ne_bytes());
         record.extend_from_slice(name);
         let total = record.len() as u32;

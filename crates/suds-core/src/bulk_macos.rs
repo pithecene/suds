@@ -1,14 +1,14 @@
-//! Batched directory listing, entry metadata, and APFS clone lookup on macOS
-//! through `getattrlistbulk(2)`.
+//! Batched directory listing, regular-file metadata, and APFS clone lookup on
+//! macOS through `getattrlistbulk(2)`.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io;
 use std::mem::size_of;
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags, fstat, open};
+use rustix::fs::{Mode, OFlags, open};
 
 use crate::budget::BudgetTracker;
 use crate::clones;
@@ -26,22 +26,37 @@ const VLNK: u32 = 5;
 /// `ATTR_CMN_ERROR` from macOS `<sys/attr.h>`, omitted by `libc`.
 const ATTR_CMN_ERROR: libc::attrgroup_t = 0x2000_0000;
 
-/// One directory entry returned by `getattrlistbulk(2)`.
+thread_local! {
+    /// Reusable per-thread buffer so directory scans avoid a 64 KiB allocation
+    /// for every directory they visit.
+    static BULK_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0_u8; BULK_BUFFER_BYTES]);
+}
+
+/// One named directory entry returned by `getattrlistbulk(2)`.
 pub(crate) struct BulkEntry {
     pub(crate) name: OsString,
     pub(crate) kind: Option<EntryKind>,
-    pub(crate) probed: Option<Probed>,
+    pub(crate) probed: Option<io::Result<Probed>>,
 }
 
 /// Outcome of reading a directory through `getattrlistbulk(2)`.
 pub(crate) enum BulkOutcome {
-    Listed(Vec<BulkEntry>),
+    Listed {
+        entries: Vec<BulkEntry>,
+        unnamed: Vec<io::Error>,
+    },
     Deferred(usize),
     Stopped,
     Unsupported,
 }
 
-/// Cursor that decodes packed attributes inside one `getattrlistbulk` record.
+enum ParsedRecord {
+    Entry(BulkEntry),
+    UnnamedError(io::Error),
+}
+
+/// Safe byte-slice cursor that decodes packed attributes inside one
+/// `getattrlistbulk(2)` record without unsafe pointer casts.
 struct RecordCursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -55,34 +70,54 @@ impl<'a> RecordCursor<'a> {
         }
     }
 
-    fn read<T: Copy>(&mut self) -> Option<T> {
-        let size = size_of::<T>();
-        let end = self.offset.checked_add(size)?;
-        if end > self.bytes.len() {
-            return None;
-        }
-        let ptr = self.bytes[self.offset..end].as_ptr().cast::<T>();
+    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let end = self.offset.checked_add(N)?;
+        let slice = self.bytes.get(self.offset..end)?;
         self.offset = end;
-        #[expect(
-            unsafe_code,
-            reason = "getattrlistbulk packs 4-byte aligned structs into a byte buffer"
-        )]
-        // SAFETY: `end <= self.bytes.len()` guarantees `size` readable bytes
-        // starting at `ptr`, and `read_unaligned` handles 4-byte packing.
-        Some(unsafe { ptr.read_unaligned() })
+        slice.try_into().ok()
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        Some(u32::from_ne_bytes(self.take::<4>()?))
+    }
+
+    fn read_i32(&mut self) -> Option<i32> {
+        Some(i32::from_ne_bytes(self.take::<4>()?))
+    }
+
+    fn read_u64(&mut self) -> Option<u64> {
+        Some(u64::from_ne_bytes(self.take::<8>()?))
+    }
+
+    fn read_i64(&mut self) -> Option<i64> {
+        Some(i64::from_ne_bytes(self.take::<8>()?))
+    }
+
+    fn read_attr_set(&mut self) -> Option<libc::attribute_set_t> {
+        Some(libc::attribute_set_t {
+            commonattr: self.read_u32()?,
+            volattr: self.read_u32()?,
+            dirattr: self.read_u32()?,
+            fileattr: self.read_u32()?,
+            forkattr: self.read_u32()?,
+        })
+    }
+
+    fn read_timespec(&mut self) -> Option<(i64, i64)> {
+        let tv_sec = self.read_i64()?;
+        let tv_nsec = self.read_i64()?;
+        Some((tv_sec, tv_nsec))
     }
 
     fn read_name(&mut self) -> Option<OsString> {
         let field_pos = self.offset;
-        let attr_ref: libc::attrreference_t = self.read()?;
-        let rel = usize::try_from(attr_ref.attr_dataoffset).ok()?;
-        let len = usize::try_from(attr_ref.attr_length).ok()?;
+        let data_offset = self.read_i32()?;
+        let data_length = self.read_u32()?;
+        let rel = usize::try_from(data_offset).ok()?;
+        let len = usize::try_from(data_length).ok()?;
         let start = field_pos.checked_add(rel)?;
         let end = start.checked_add(len)?;
-        if end > self.bytes.len() {
-            return None;
-        }
-        let raw = &self.bytes[start..end];
+        let raw = self.bytes.get(start..end)?;
         let trimmed = match raw.iter().position(|&b| b == 0) {
             Some(nul) => &raw[..nul],
             None => raw,
@@ -92,7 +127,8 @@ impl<'a> RecordCursor<'a> {
 }
 
 /// Lists `dir` with `getattrlistbulk(2)` while enforcing `max_entries` and
-/// cancellation, returning pre-probed metadata and APFS clone info per entry.
+/// cancellation, returning pre-probed metadata and APFS clone info for regular
+/// files while preserving traversal errors.
 pub(crate) fn read_dir_bulk(
     dir: &Path,
     device: u64,
@@ -101,10 +137,6 @@ pub(crate) fn read_dir_bulk(
 ) -> io::Result<BulkOutcome> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
     let fd = open(dir, flags, Mode::empty()).map_err(io::Error::from)?;
-    let dir_stat = fstat(&fd).map_err(io::Error::from)?;
-    // APFS directories occupy zero blocks. Filesystems that allocate directory
-    // blocks fall back to `probe_at` for directory metadata.
-    let dir_has_blocks = dir_stat.st_blocks != 0;
 
     let mut request = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
@@ -126,91 +158,91 @@ pub(crate) fn read_dir_bulk(
         forkattr: libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS,
     };
 
-    let mut buf = vec![0_u8; BULK_BUFFER_BYTES];
-    let mut entries = Vec::new();
-    let mut seen = 0_usize;
+    BULK_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < BULK_BUFFER_BYTES {
+            buf.resize(BULK_BUFFER_BYTES, 0);
+        }
+        let mut entries = Vec::new();
+        let mut unnamed = Vec::new();
+        let mut seen = 0_usize;
 
-    loop {
-        if tracker.is_stopped() {
-            return Ok(BulkOutcome::Stopped);
-        }
-        #[expect(
-            unsafe_code,
-            reason = "no safe interface wraps macOS getattrlistbulk(2)"
-        )]
-        // SAFETY: `fd` is an open directory descriptor, `request` holds a valid
-        // `attrlist`, and `buf` has length `BULK_BUFFER_BYTES`.
-        let count = unsafe {
-            libc::getattrlistbulk(
-                fd.as_raw_fd(),
-                (&raw mut request).cast(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                u64::from(libc::FSOPT_ATTR_CMN_EXTENDED),
-            )
-        };
-        if count < 0 {
-            let err = io::Error::last_os_error();
-            if seen == 0 && matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) {
-                return Ok(BulkOutcome::Unsupported);
-            }
-            return Err(err);
-        }
-        if count == 0 {
-            break;
-        }
-        let mut pos = 0_usize;
-        for _ in 0..count {
-            if seen.is_multiple_of(64) && tracker.is_stopped() {
+        loop {
+            if tracker.is_stopped() {
                 return Ok(BulkOutcome::Stopped);
             }
-            seen = seen.saturating_add(1);
-            if let Some(limit) = max_entries
-                && seen > limit
-            {
-                return Ok(BulkOutcome::Deferred(limit));
-            }
-            if pos.saturating_add(size_of::<u32>()) > buf.len() {
-                return Ok(BulkOutcome::Unsupported);
-            }
-            let len_bytes: [u8; 4] = buf[pos..pos + 4].try_into().unwrap();
-            let rec_len = u32::from_ne_bytes(len_bytes) as usize;
-            let rec_end = pos.saturating_add(rec_len);
-            if rec_len < size_of::<u32>() + size_of::<libc::attribute_set_t>()
-                || rec_end > buf.len()
-            {
-                return Ok(BulkOutcome::Unsupported);
-            }
-            let Some(entry) = parse_record(&buf[pos..rec_end], device, dir_has_blocks) else {
-                return Ok(BulkOutcome::Unsupported);
+            let count = match clones::query_dir_bulk(&fd, &mut request, &mut buf) {
+                Ok(count) => count,
+                Err(err) => {
+                    if seen == 0 && matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL))
+                    {
+                        return Ok(BulkOutcome::Unsupported);
+                    }
+                    return Err(err);
+                }
             };
-            entries.push(entry);
-            pos = rec_end;
+            if count == 0 {
+                break;
+            }
+            let mut pos = 0_usize;
+            for _ in 0..count {
+                if seen.is_multiple_of(64) && tracker.is_stopped() {
+                    return Ok(BulkOutcome::Stopped);
+                }
+                seen = seen.saturating_add(1);
+                if let Some(limit) = max_entries
+                    && seen > limit
+                {
+                    return Ok(BulkOutcome::Deferred(limit));
+                }
+                let Some(len_slice) = buf.get(pos..pos.saturating_add(size_of::<u32>())) else {
+                    return Ok(BulkOutcome::Unsupported);
+                };
+                let rec_len = u32::from_ne_bytes(len_slice.try_into().unwrap()) as usize;
+                let rec_end = pos.saturating_add(rec_len);
+                if rec_len < size_of::<u32>() + size_of::<libc::attribute_set_t>()
+                    || rec_end > buf.len()
+                {
+                    return Ok(BulkOutcome::Unsupported);
+                }
+                match parse_record(&buf[pos..rec_end], device) {
+                    Some(ParsedRecord::Entry(entry)) => entries.push(entry),
+                    Some(ParsedRecord::UnnamedError(err)) => unnamed.push(err),
+                    None => return Ok(BulkOutcome::Unsupported),
+                }
+                pos = rec_end;
+            }
         }
-    }
 
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(BulkOutcome::Listed(entries))
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(BulkOutcome::Listed { entries, unnamed })
+    })
 }
 
-fn parse_record(record: &[u8], device: u64, dir_has_blocks: bool) -> Option<BulkEntry> {
+fn parse_record(record: &[u8], device: u64) -> Option<ParsedRecord> {
     let mut cur = RecordCursor::new(record, size_of::<u32>());
-    let returned: libc::attribute_set_t = cur.read()?;
+    let returned = cur.read_attr_set()?;
     let cmn = returned.commonattr;
 
-    let name = if cmn & libc::ATTR_CMN_NAME != 0 {
-        cur.read_name()?
+    // XNU packs `ATTR_CMN_ERROR` immediately after `ATTR_CMN_RETURNED_ATTRS`,
+    // ahead of `ATTR_CMN_NAME` and all other common attributes.
+    let entry_err = if cmn & ATTR_CMN_ERROR != 0 {
+        cur.read_u32()?
     } else {
-        return None;
+        0
+    };
+    let name = if cmn & libc::ATTR_CMN_NAME != 0 {
+        Some(cur.read_name()?)
+    } else {
+        None
     };
     let dev = if cmn & libc::ATTR_CMN_DEVID != 0 {
-        let raw: i32 = cur.read()?;
-        Some(u64::from(raw.cast_unsigned()))
+        Some(u64::from(cur.read_i32()?.cast_unsigned()))
     } else {
         None
     };
     let kind = if cmn & libc::ATTR_CMN_OBJTYPE != 0 {
-        let obj_type: u32 = cur.read()?;
+        let obj_type = cur.read_u32()?;
         Some(match obj_type {
             VREG => EntryKind::File,
             VDIR => EntryKind::Directory,
@@ -221,65 +253,70 @@ fn parse_record(record: &[u8], device: u64, dir_has_blocks: bool) -> Option<Bulk
         None
     };
     let mtime = if cmn & libc::ATTR_CMN_MODTIME != 0 {
-        let ts: libc::timespec = cur.read()?;
-        Some((ts.tv_sec, ts.tv_nsec))
+        Some(cur.read_timespec()?)
     } else {
         None
     };
     let uid = if cmn & libc::ATTR_CMN_OWNERID != 0 {
-        cur.read::<u32>()
+        Some(cur.read_u32()?)
     } else {
         None
     };
     let ino = if cmn & libc::ATTR_CMN_FILEID != 0 {
-        cur.read::<u64>()
+        Some(cur.read_u64()?)
     } else {
         None
     };
-    let entry_err = if cmn & ATTR_CMN_ERROR != 0 {
-        cur.read::<u32>().unwrap_or(0)
-    } else {
-        0
-    };
 
+    if entry_err != 0 {
+        let err = io::Error::from_raw_os_error(entry_err.cast_signed());
+        return match name {
+            Some(name) => Some(ParsedRecord::Entry(BulkEntry {
+                name,
+                kind,
+                probed: Some(Err(err)),
+            })),
+            None => Some(ParsedRecord::UnnamedError(err)),
+        };
+    }
+
+    let name = name?;
     let file = returned.fileattr;
     let nlink = if file & libc::ATTR_FILE_LINKCOUNT != 0 {
-        cur.read::<u32>().map(u64::from)
+        Some(u64::from(cur.read_u32()?))
     } else {
         None
     };
     let alloc_size = if file & libc::ATTR_FILE_ALLOCSIZE != 0 {
-        cur.read::<i64>().map(|v| u64::try_from(v).unwrap_or(0))
+        Some(u64::try_from(cur.read_i64()?).unwrap_or(0))
     } else {
         None
     };
     let data_len = if file & libc::ATTR_FILE_DATALENGTH != 0 {
-        cur.read::<i64>().map(|v| u64::try_from(v).unwrap_or(0))
+        Some(u64::try_from(cur.read_i64()?).unwrap_or(0))
     } else {
         None
     };
     let data_alloc_size = if file & libc::ATTR_FILE_DATAALLOCSIZE != 0 {
-        cur.read::<i64>().map(|v| u64::try_from(v).unwrap_or(0))
+        Some(u64::try_from(cur.read_i64()?).unwrap_or(0))
     } else {
         None
     };
 
     let fork = returned.forkattr;
     let clone_id = if fork & libc::ATTR_CMNEXT_CLONEID != 0 {
-        cur.read::<u64>()
+        Some(cur.read_u64()?)
     } else {
         None
     };
     let ext_flags = if fork & libc::ATTR_CMNEXT_EXT_FLAGS != 0 {
-        cur.read::<u64>()
+        Some(cur.read_u64()?)
     } else {
         None
     };
 
     let raw = RawAttrs {
-        entry_err,
         device,
-        dir_has_blocks,
         dev,
         ino,
         kind,
@@ -292,14 +329,12 @@ fn parse_record(record: &[u8], device: u64, dir_has_blocks: bool) -> Option<Bulk
         clone_id,
         ext_flags,
     };
-    let probed = build_probed(raw);
-    Some(BulkEntry { name, kind, probed })
+    let probed = build_probed(raw).map(Ok);
+    Some(ParsedRecord::Entry(BulkEntry { name, kind, probed }))
 }
 
 struct RawAttrs {
-    entry_err: u32,
     device: u64,
-    dir_has_blocks: bool,
     dev: Option<u64>,
     ino: Option<u64>,
     kind: Option<EntryKind>,
@@ -314,12 +349,13 @@ struct RawAttrs {
 }
 
 fn build_probed(raw: RawAttrs) -> Option<Probed> {
-    if raw.entry_err != 0 {
-        return None;
-    }
     let (dev, ino, kind, (mtime, mtime_nsec), uid) =
         (raw.dev?, raw.ino?, raw.kind?, raw.mtime?, raw.uid?);
     let mount = dev != raw.device;
+    // Regular files carry exact logical size, allocated blocks, and APFS clone
+    // flags in the bulk response. Directories, symlinks, and other entries fall
+    // back to `probe_at` so directory `logical_bytes` in `EntryRevision` stays
+    // exact.
     match kind {
         EntryKind::File => {
             let (nlink, allocated_bytes, logical_bytes) =
@@ -354,27 +390,13 @@ fn build_probed(raw: RawAttrs) -> Option<Probed> {
                 mount,
             })
         }
-        EntryKind::Directory if !raw.dir_has_blocks && !mount => Some(Probed {
-            meta: EntryMeta {
-                dev,
-                ino,
-                nlink: 1,
-                uid,
-                logical_bytes: 0,
-                allocated_bytes: 0,
-                mtime,
-                mtime_nsec,
-            },
-            shared: Ok(Vec::new()),
-            kind,
-            mount,
-        }),
-        _ => None,
+        EntryKind::Directory | EntryKind::Symlink | EntryKind::Other => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
     use std::os::unix::fs::{MetadataExt, symlink};
 
@@ -385,7 +407,7 @@ mod tests {
     use crate::model::EntryKind;
     use crate::scan::probe_at;
 
-    use super::{BulkOutcome, read_dir_bulk};
+    use super::{ATTR_CMN_ERROR, BulkOutcome, ParsedRecord, parse_record, read_dir_bulk};
 
     #[test]
     fn bulk_metadata_matches_probe_at_across_entry_types() {
@@ -411,10 +433,12 @@ mod tests {
         }
 
         let tracker = BudgetTracker::new(Budget::default());
-        let BulkOutcome::Listed(entries) = read_dir_bulk(root, device, None, &tracker).unwrap()
+        let BulkOutcome::Listed { entries, unnamed } =
+            read_dir_bulk(root, device, None, &tracker).unwrap()
         else {
             panic!("expected Listed from getattrlistbulk on macOS");
         };
+        assert!(unnamed.is_empty());
         assert!(entries.len() >= 5);
 
         for entry in entries {
@@ -430,7 +454,8 @@ mod tests {
                 EntryKind::File => {
                     let bulk = entry
                         .probed
-                        .expect("regular file must be pre-probed by getattrlistbulk");
+                        .expect("getattrlistbulk pre-probes regular files")
+                        .unwrap();
                     assert_eq!(bulk.meta, reference.meta, "meta for {:?}", entry.name);
                     assert_eq!(
                         bulk.shared.unwrap(),
@@ -440,20 +465,53 @@ mod tests {
                     );
                     assert_eq!(bulk.mount, reference.mount);
                 }
-                EntryKind::Directory => {
-                    if let Some(bulk) = entry.probed {
-                        assert_eq!(bulk.meta.dev, reference.meta.dev);
-                        assert_eq!(bulk.meta.ino, reference.meta.ino);
-                        assert_eq!(bulk.meta.uid, reference.meta.uid);
-                        assert_eq!(bulk.meta.mtime, reference.meta.mtime);
-                        assert_eq!(bulk.meta.allocated_bytes, reference.meta.allocated_bytes);
-                        assert_eq!(bulk.mount, reference.mount);
-                    }
-                }
-                EntryKind::Symlink | EntryKind::Other => {
-                    assert!(entry.probed.is_none(), "symlinks fall back to probe_at");
+                EntryKind::Directory | EntryKind::Symlink | EntryKind::Other => {
+                    assert!(
+                        entry.probed.is_none(),
+                        "directories and symlinks fall back to probe_at"
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn parse_record_decodes_cmn_error_before_name_and_preserves_errno() {
+        // Build a synthetic XNU record: length(4) + attribute_set_t(20) +
+        // ATTR_CMN_ERROR(4) + attrreference_t(8) + NUL-terminated name bytes.
+        let name = b"secret\0";
+        let mut record = Vec::new();
+        record.extend_from_slice(&0_u32.to_ne_bytes()); // length placeholder
+        record.extend_from_slice(
+            &(libc::ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | libc::ATTR_CMN_NAME).to_ne_bytes(),
+        );
+        record.extend_from_slice(&0_u32.to_ne_bytes()); // volattr
+        record.extend_from_slice(&0_u32.to_ne_bytes()); // dirattr
+        record.extend_from_slice(&0_u32.to_ne_bytes()); // fileattr
+        record.extend_from_slice(&0_u32.to_ne_bytes()); // forkattr
+        record.extend_from_slice(&(libc::EACCES as u32).to_ne_bytes());
+        record.extend_from_slice(&8_i32.to_ne_bytes()); // offset from attrreference_t to name
+        record.extend_from_slice(&(name.len() as u32).to_ne_bytes());
+        record.extend_from_slice(name);
+        let total = record.len() as u32;
+        record[0..4].copy_from_slice(&total.to_ne_bytes());
+
+        let Some(ParsedRecord::Entry(entry)) = parse_record(&record, 1) else {
+            panic!("expected named entry carrying the kernel error");
+        };
+        assert_eq!(entry.name, OsStr::new("secret"));
+        let err = entry.probed.unwrap().err().expect("expected kernel error");
+        assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+
+        // Nameless error record must preserve its errno in unnamed errors.
+        let mut nameless = Vec::new();
+        nameless.extend_from_slice(&28_u32.to_ne_bytes());
+        nameless.extend_from_slice(&(libc::ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR).to_ne_bytes());
+        nameless.extend_from_slice(&[0_u8; 16]);
+        nameless.extend_from_slice(&(libc::EIO as u32).to_ne_bytes());
+        let Some(ParsedRecord::UnnamedError(err)) = parse_record(&nameless, 1) else {
+            panic!("expected unnamed error");
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EIO));
     }
 }

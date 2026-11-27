@@ -146,6 +146,15 @@ pub(crate) fn apfs_extent(number: u64, bytes: u64) -> Option<Extent> {
     apfs::extent(number, bytes)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn query_dir_bulk(
+    fd: &rustix::fd::OwnedFd,
+    request: &mut libc::attrlist,
+    buf: &mut [u8],
+) -> io::Result<i32> {
+    apfs::query_attrs(apfs::AttrTarget::DirFd(fd), request, buf)
+}
+
 /// Each extent of the regular file at `path` that the file shares, in the
 /// file's order. A file below the floor yields none, and so does a
 /// filesystem that maps no file. An error states that Suds could not open
@@ -329,10 +338,13 @@ pub(crate) fn shared(path: &Path, meta: &Metadata) -> io::Result<Vec<Extent>> {
 /// The attributes by which APFS names a file's clones.
 #[cfg(target_os = "macos")]
 mod apfs {
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
     use std::io;
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
+
+    use rustix::fd::OwnedFd;
 
     use super::Extent;
 
@@ -342,6 +354,14 @@ mod apfs {
     /// The range of places that each number owns, so no two numbers' extents
     /// touch.
     const SPAN: u64 = 1 << 32;
+    /// Size of the kernel's packed single-file answer buffer.
+    const ANSWER_LEN: usize = 4 + 20 + 4 + 8 + 8 + 8 + 8;
+
+    /// Target for the single macOS APFS attribute syscall boundary.
+    pub(super) enum AttrTarget<'a> {
+        Path(&'a CStr),
+        DirFd(&'a OwnedFd),
+    }
 
     /// A file whose data shares every block with another file.
     pub struct Clones {
@@ -354,26 +374,65 @@ mod apfs {
         pub bytes: u64,
     }
 
-    /// The answer in the kernel's layout: its length, the sets of returned
-    /// attributes, and then each attribute in the order of its set.
-    #[repr(C, packed(4))]
-    #[derive(Clone, Copy)]
-    struct Answer {
-        length: u32,
-        returned: libc::attribute_set_t,
-        device: i32,
-        inode: u64,
-        data_bytes: i64,
-        number: u64,
-        flags: u64,
-    }
-
-    /// The clones of the file at `path`, or none where the file shares less
-    /// than every block or the filesystem names no clones.
+    /// Queries macOS APFS attributes for either one path (`getattrlist`) or
+    /// one open directory descriptor (`getattrlistbulk`).
     #[expect(
         unsafe_code,
         reason = "no safe interface reads the clone attributes of APFS"
     )]
+    pub(super) fn query_attrs(
+        target: AttrTarget<'_>,
+        request: &mut libc::attrlist,
+        buf: &mut [u8],
+    ) -> io::Result<i32> {
+        // SAFETY: `request` holds a valid `attrlist`, `buf` is writable for
+        // `buf.len()` bytes, and the target is either a NUL-terminated path
+        // or an open directory descriptor.
+        let status = match target {
+            AttrTarget::Path(path) => unsafe {
+                libc::getattrlist(
+                    path.as_ptr(),
+                    (&raw mut *request).cast(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
+                )
+            },
+            AttrTarget::DirFd(fd) => unsafe {
+                libc::getattrlistbulk(
+                    fd.as_raw_fd(),
+                    (&raw mut *request).cast(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    u64::from(libc::FSOPT_ATTR_CMN_EXTENDED),
+                )
+            },
+        };
+        if status < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(status)
+        }
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_i32(bytes: &[u8], offset: usize) -> i32 {
+        i32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    fn read_i64(bytes: &[u8], offset: usize) -> i64 {
+        i64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    /// The clones of the file at `path`, or none where the file shares less
+    /// than every block or the filesystem names no clones.
     pub fn clones(path: &Path) -> io::Result<Option<Clones>> {
         let path = CString::new(path.as_os_str().as_bytes())?;
         let mut request = libc::attrlist {
@@ -387,41 +446,30 @@ mod apfs {
             fileattr: libc::ATTR_FILE_DATAALLOCSIZE,
             forkattr: libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS,
         };
-        let mut answer = std::mem::MaybeUninit::<Answer>::zeroed();
-        // SAFETY: the path ends in a null byte. The kernel reads `request`,
-        // and it writes at most the size of `Answer`, for which zero bytes
-        // and any other bytes are valid.
-        let (status, answer) = unsafe {
-            let status = libc::getattrlist(
-                path.as_ptr(),
-                (&raw mut request).cast(),
-                answer.as_mut_ptr().cast(),
-                size_of::<Answer>(),
-                libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
-            );
-            (status, answer.assume_init())
-        };
-        if status != 0 {
-            let err = io::Error::last_os_error();
+        let mut buf = [0_u8; ANSWER_LEN];
+        if let Err(err) = query_attrs(AttrTarget::Path(&path), &mut request, &mut buf) {
             // A filesystem without these attributes names no clone.
             return match err.raw_os_error() {
                 Some(libc::EINVAL | libc::ENOTSUP) => Ok(None),
                 _ => Err(err),
             };
         }
-        let returned = answer.returned;
+        let returned_common = read_u32(&buf, 4);
+        let returned_file = read_u32(&buf, 16);
+        let returned_fork = read_u32(&buf, 20);
         // An attribute that the filesystem leaves out moves those behind it.
-        let complete = returned.commonattr == request.commonattr
-            && returned.fileattr == request.fileattr
-            && returned.forkattr == request.forkattr;
-        if !complete || answer.flags & SHARES_ALL == 0 {
+        let complete = returned_common == request.commonattr
+            && returned_file == request.fileattr
+            && returned_fork == request.forkattr;
+        let flags = read_u64(&buf, 52);
+        if !complete || flags & SHARES_ALL == 0 {
             return Ok(None);
         }
         Ok(Some(Clones {
-            device: u64::from(answer.device.cast_unsigned()),
-            inode: answer.inode,
-            number: answer.number,
-            bytes: u64::try_from(answer.data_bytes).unwrap_or(0),
+            device: u64::from(read_i32(&buf, 24).cast_unsigned()),
+            inode: read_u64(&buf, 28),
+            number: read_u64(&buf, 44),
+            bytes: u64::try_from(read_i64(&buf, 36)).unwrap_or(0),
         }))
     }
 
@@ -434,11 +482,11 @@ mod apfs {
 
     #[cfg(test)]
     mod tests {
-        use super::{Answer, extent};
+        use super::{ANSWER_LEN, extent};
 
         #[test]
         fn the_answer_holds_the_kernels_layout() {
-            assert_eq!(size_of::<Answer>(), 4 + 20 + 4 + 8 + 8 + 8 + 8);
+            assert_eq!(ANSWER_LEN, 4 + 20 + 4 + 8 + 8 + 8 + 8);
         }
 
         #[test]

@@ -151,7 +151,7 @@ pub(crate) struct Head {
     listing: Option<Arc<Listing>>,
     /// Pre-probed entry metadata collected during directory listing on macOS,
     /// taken once when building the directory's body.
-    preprobed: Mutex<Option<Vec<Option<Probed>>>>,
+    preprobed: Mutex<Option<Vec<Option<io::Result<Probed>>>>>,
     /// The error that kept the directory's listing from the traversal.
     pub(crate) unlisted: Option<io::Error>,
     /// The error of each name that the listing could not state.
@@ -669,7 +669,7 @@ impl Ahead {
             let path = dir.join(name);
             let cached = preprobed.as_mut().and_then(|iter| iter.next()).flatten();
             let probed = match cached {
-                Some(probed) => Ok(probed),
+                Some(probed) => probed,
                 None => probe_at(&path, false, self.device, self.check_file_mounts),
             };
             let enters = probed
@@ -702,7 +702,11 @@ fn offer(waiting: &mut Waiting, id: u64, slot: &Slot, body: &Body) -> usize {
 }
 
 enum ListOutcome {
-    Listed(Listing, Option<Vec<Option<Probed>>>, Vec<io::Error>),
+    Listed(
+        Listing,
+        Option<Vec<Option<io::Result<Probed>>>>,
+        Vec<io::Error>,
+    ),
     Deferred(usize),
     Stopped,
 }
@@ -718,7 +722,7 @@ fn list_bounded(
     #[cfg(target_os = "macos")]
     {
         match crate::bulk_macos::read_dir_bulk(dir, device, max_entries, tracker)? {
-            crate::bulk_macos::BulkOutcome::Listed(entries) => {
+            crate::bulk_macos::BulkOutcome::Listed { entries, unnamed } => {
                 let mut names = Vec::with_capacity(entries.len());
                 let mut kinds = Vec::with_capacity(entries.len());
                 let mut preprobed = Vec::with_capacity(entries.len());
@@ -733,7 +737,7 @@ fn list_bounded(
                     kinds,
                     plain,
                 };
-                return Ok(ListOutcome::Listed(listing, Some(preprobed), Vec::new()));
+                return Ok(ListOutcome::Listed(listing, Some(preprobed), unnamed));
             }
             crate::bulk_macos::BulkOutcome::Deferred(limit) => {
                 return Ok(ListOutcome::Deferred(limit));

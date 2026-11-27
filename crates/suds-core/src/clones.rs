@@ -17,7 +17,7 @@ use std::path::Path;
 pub(crate) type Extent = (u64, u64);
 
 /// The ranges of each filesystem's disk that a scan has counted.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Counted {
     /// For each device, each counted range by its first byte, with the
     /// byte after its last. No two ranges of a device touch.
@@ -48,6 +48,86 @@ impl Counted {
         }
         ranges.insert(start, end);
         before
+    }
+
+    /// Returns the sub-extents of `extent` on `device` not yet covered by any
+    /// counted range, without mutating `self`.
+    pub(crate) fn uncovered(&self, device: u64, extent: Extent) -> Vec<Extent> {
+        let (start, length) = extent;
+        if length == 0 {
+            return Vec::new();
+        }
+        let end = start.saturating_add(length);
+        let Some(ranges) = self.devices.get(&device) else {
+            return vec![extent];
+        };
+        let mut cursor = start;
+        let mut result = Vec::new();
+        if let Some((_, &range_end)) = ranges.range(..=start).next_back()
+            && range_end > start
+        {
+            cursor = range_end.min(end);
+        }
+        for (&range_start, &range_end) in ranges.range(start..end) {
+            if range_start > cursor {
+                result.push((cursor, range_start - cursor));
+            }
+            if range_end > cursor {
+                cursor = range_end.min(end);
+            }
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            result.push((cursor, end - cursor));
+        }
+        result
+    }
+
+    /// Merges all counted ranges from `other` into `self`.
+    pub(crate) fn merge(&mut self, other: Counted) {
+        for (device, ranges) in other.devices {
+            for (start, end) in ranges {
+                let length = end.saturating_sub(start);
+                if length > 0 {
+                    self.claim(device, (start, length));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.devices.clear();
+    }
+
+    /// Exports counted ranges in deterministic device and start-offset order.
+    pub(crate) fn to_device_extents(&self) -> Vec<crate::state::DeviceExtents> {
+        let mut devices: Vec<crate::state::DeviceExtents> = self
+            .devices
+            .iter()
+            .filter(|(_, ranges)| !ranges.is_empty())
+            .map(|(&device, ranges)| crate::state::DeviceExtents {
+                device,
+                ranges: ranges.iter().map(|(&s, &e)| (s, e)).collect(),
+            })
+            .collect();
+        devices.sort_by_key(|entry| entry.device);
+        devices
+    }
+
+    /// Reconstructs counted ranges from persisted `(start, end)` intervals.
+    pub(crate) fn from_device_extents(data: &[crate::state::DeviceExtents]) -> Self {
+        let mut counted = Counted::default();
+        for entry in data {
+            for &(start, end) in &entry.ranges {
+                let length = end.saturating_sub(start);
+                if length > 0 {
+                    counted.claim(entry.device, (start, length));
+                }
+            }
+        }
+        counted
     }
 }
 
@@ -390,5 +470,25 @@ mod tests {
         assert_eq!(counted.claim(1, (2100, 10)), 0);
         // Another filesystem numbers its own bytes.
         assert_eq!(counted.claim(2, (1000, 300)), 0);
+    }
+
+    #[test]
+    fn uncovered_merge_and_serialization_preserve_intervals() {
+        let mut base = Counted::default();
+        assert_eq!(base.claim(1, (100, 100)), 0);
+        assert_eq!(base.claim(1, (300, 100)), 0);
+
+        assert_eq!(base.uncovered(1, (150, 200)), vec![(200, 100)]);
+        assert_eq!(base.uncovered(1, (100, 100)), Vec::<(u64, u64)>::new());
+        assert_eq!(base.uncovered(1, (50, 200)), vec![(50, 50), (200, 50)]);
+        assert_eq!(base.uncovered(2, (100, 50)), vec![(100, 50)]);
+
+        let mut staged = Counted::default();
+        assert_eq!(staged.claim(1, (200, 100)), 0);
+        base.merge(staged);
+        assert_eq!(base.uncovered(1, (100, 300)), Vec::<(u64, u64)>::new());
+
+        let roundtrip = Counted::from_device_extents(&base.to_device_extents());
+        assert_eq!(roundtrip, base);
     }
 }

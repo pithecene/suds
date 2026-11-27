@@ -16,7 +16,8 @@ use serde::Serialize;
 
 use crate::arena;
 use crate::budget::{self, Budget, BudgetTracker, ExecutionOutcome};
-use crate::development::{self, DevelopmentScan, Environment, StoreClass, StoreStatus};
+use crate::clones::Counted;
+use crate::development::{self, DevelopmentScan, Environment, SliceResume, Store, StoreStatus};
 use crate::model::{ReportStatus, TraversalError};
 use crate::organize::journal::Journal;
 use crate::pressure::{self, Level, Measurement, Pressure, Thresholds};
@@ -25,8 +26,10 @@ use crate::reclaim::git::Git;
 use crate::reclaim::liveness::Liveness;
 use crate::reclaim::plan::{CheckoutScope, Observed, Policy, plan_reclaim};
 use crate::registry;
+use crate::scan::ScanDedup;
 use crate::state::{
-    self, Directories, MAINTAIN_CURSOR_SCHEMA, MaintainCursor, Settings, write_staged,
+    self, CursorDedup, Directories, MAINTAIN_CURSOR_SCHEMA, MaintainCursor, MaintainCursorMode,
+    Settings, write_staged,
 };
 use crate::stores::{self, Budgets, Inputs, Programs, StoresReport};
 use crate::timestamp;
@@ -181,41 +184,70 @@ pub fn maintain_observe_with_budget(
     maintain_inner(settings, context, budget, clock, true)
 }
 
+fn store_counted_in_completed(
+    store: &Store,
+    completed_checkouts: &HashSet<PathBuf>,
+    completed_stores: &HashSet<String>,
+    count_workspaces: bool,
+) -> bool {
+    if matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable) {
+        return false;
+    }
+    if let Some(owner) = &store.owner {
+        completed_checkouts.contains(owner)
+    } else if development::is_configured_store(&store.id) {
+        completed_stores.contains(&store.id)
+    } else {
+        count_workspaces
+    }
+}
+
+fn store_counted_in_incomplete(
+    store: &Store,
+    completed_checkouts: &HashSet<PathBuf>,
+    completed_stores: &HashSet<String>,
+    include_workspaces: bool,
+) -> bool {
+    if matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable) {
+        return false;
+    }
+    if let Some(owner) = &store.owner {
+        !completed_checkouts.contains(owner)
+    } else if development::is_configured_store(&store.id) {
+        !completed_stores.contains(&store.id)
+    } else {
+        include_workspaces
+    }
+}
+
 fn completed_slice_usage(
     scan: &DevelopmentScan,
     completed_checkouts: &HashSet<PathBuf>,
     completed_stores: &HashSet<String>,
+    reclaimed_paths: &HashSet<PathBuf>,
     count_workspaces: bool,
 ) -> u64 {
     let workspaces: u64 = if count_workspaces {
-        let unclassified: u64 = scan
-            .workspaces
+        scan.workspaces
             .iter()
             .map(|workspace| workspace.unclassified.allocated_bytes)
-            .sum();
-        let workspace_machines: u64 = scan
-            .stores
-            .iter()
-            .filter(|store| {
-                store.class == StoreClass::Machine
-                    && !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
-                    && !completed_stores.contains(&store.id)
-            })
-            .map(|store| store.measure.allocated_bytes)
-            .sum();
-        unclassified.saturating_add(workspace_machines)
+            .sum()
     } else {
         0
     };
     let checkouts: u64 = scan
         .checkouts
         .iter()
-        .filter(|checkout| completed_checkouts.contains(&checkout.path))
+        .filter(|checkout| {
+            completed_checkouts.contains(&checkout.path)
+                && !reclaimed_paths.contains(&checkout.path)
+        })
         .map(|checkout| {
             checkout.own.allocated_bytes
                 + checkout
                     .build_state
                     .iter()
+                    .filter(|build| !reclaimed_paths.contains(&build.path))
                     .map(|build| build.measure.allocated_bytes)
                     .sum::<u64>()
         })
@@ -224,8 +256,13 @@ fn completed_slice_usage(
         .stores
         .iter()
         .filter(|store| {
-            !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
-                && completed_stores.contains(&store.id)
+            !reclaimed_paths.contains(&store.path)
+                && store_counted_in_completed(
+                    store,
+                    completed_checkouts,
+                    completed_stores,
+                    count_workspaces,
+                )
         })
         .map(|store| store.measure.allocated_bytes)
         .sum();
@@ -263,13 +300,32 @@ fn incomplete_slice_usage(
         .stores
         .iter()
         .filter(|store| {
-            !matches!(store.status, StoreStatus::Absent | StoreStatus::Unreadable)
-                && !completed_stores.contains(&store.id)
-                && !(store.class == StoreClass::Machine && !include_workspaces)
+            store_counted_in_incomplete(
+                store,
+                completed_checkouts,
+                completed_stores,
+                include_workspaces,
+            )
         })
         .map(|store| store.measure.allocated_bytes)
         .sum();
     workspaces.saturating_add(checkouts).saturating_add(stores)
+}
+
+fn dedup_to_cursor(dedup: &ScanDedup) -> CursorDedup {
+    let mut linked: Vec<(u64, u64)> = dedup.linked.iter().copied().collect();
+    linked.sort_unstable();
+    CursorDedup {
+        linked,
+        cloned: dedup.cloned.to_device_extents(),
+    }
+}
+
+fn dedup_from_cursor(cursor: &CursorDedup) -> ScanDedup {
+    ScanDedup {
+        linked: cursor.linked.iter().copied().collect(),
+        cloned: Counted::from_device_extents(&cursor.cloned),
+    }
 }
 
 fn maintain_inner(
@@ -307,8 +363,13 @@ fn maintain_inner(
     }
     let tracker = BudgetTracker::new(budget.clone());
     let cursor_path = context.directories.maintain_cursor();
-    let existing_cursor =
-        state::read_maintain_cursor(&cursor_path).filter(|cursor| cursor.roots == settings.roots);
+    let cursor_mode = if observe_only || !settings.standing_approval {
+        MaintainCursorMode::Observe
+    } else {
+        MaintainCursorMode::Reclaim
+    };
+    let existing_cursor = state::read_maintain_cursor(&cursor_path)
+        .filter(|cursor| cursor.roots == settings.roots && cursor.mode == cursor_mode);
     let skip_set: HashSet<PathBuf> = existing_cursor
         .as_ref()
         .map(|cursor| cursor.completed_checkouts.iter().cloned().collect())
@@ -316,6 +377,10 @@ fn maintain_inner(
     let skip_stores: HashSet<String> = existing_cursor
         .as_ref()
         .map(|cursor| cursor.completed_stores.iter().cloned().collect())
+        .unwrap_or_default();
+    let prior_machine_paths: Vec<PathBuf> = existing_cursor
+        .as_ref()
+        .map(|cursor| cursor.discovered_machine_paths.clone())
         .unwrap_or_default();
     let prior_usage = existing_cursor
         .as_ref()
@@ -326,6 +391,12 @@ fn maintain_inner(
     let prior_had_errors = existing_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.had_errors);
+    let prior_invalidated = existing_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.measurement_invalidated);
+    let prior_dedup = existing_cursor
+        .as_ref()
+        .map(|cursor| dedup_from_cursor(&cursor.dedup));
     let seed_pending: Vec<PathBuf> = existing_cursor
         .map(|cursor| cursor.pending_checkouts)
         .unwrap_or_default();
@@ -344,10 +415,15 @@ fn maintain_inner(
         &settings.roots,
         context.environment,
         Arc::clone(&tracker),
-        &skip_set,
-        &seed_pending,
-        &skip_stores,
-        scan_entry_cap,
+        SliceResume {
+            skip_checkouts: &skip_set,
+            seed_pending: &seed_pending,
+            skip_stores: &skip_stores,
+            skip_workspaces: prior_workspaces_counted,
+            prior_machine_paths: &prior_machine_paths,
+            prior_dedup,
+            scan_entry_cap,
+        },
     );
     let scan = slice.scan;
     let initial_now = clock();
@@ -356,23 +432,33 @@ fn maintain_inner(
     let mut remaining_pending = slice.remaining_pending;
     let completed_stores_this_run = slice.completed_stores;
     let remaining_stores = slice.remaining_stores;
+    let committed_dedup = slice.committed_dedup;
+    let shared_checkouts = slice.shared_checkouts;
+    let shared_builds = slice.shared_builds;
     let has_remaining = !remaining_pending.is_empty();
     let had_errors_any = prior_had_errors || inspection.error_count > 0;
     let slice_incomplete =
         slice.slice_capped || !scan.outcome.is_complete() || has_remaining || remaining_stores;
-    let full_scan_complete =
-        !slice_incomplete && !had_errors_any && inspection.status == ReportStatus::Complete;
+    let workspaces_ok = prior_workspaces_counted || slice.workspaces_complete;
+    let full_scan_complete = !slice_incomplete
+        && workspaces_ok
+        && !had_errors_any
+        && !prior_invalidated
+        && inspection.status == ReportStatus::Complete;
     let single_pass_complete = full_scan_complete
         && skip_set.is_empty()
         && seed_pending.is_empty()
-        && skip_stores.is_empty();
+        && skip_stores.is_empty()
+        && !prior_workspaces_counted;
     let completed_checkout_set: HashSet<PathBuf> = completed_this_run.iter().cloned().collect();
     let completed_store_set: HashSet<String> = completed_stores_this_run.iter().cloned().collect();
     let count_workspaces = !prior_workspaces_counted && slice.workspaces_complete;
+    let empty_reclaimed = HashSet::new();
     let slice_completed_bytes = completed_slice_usage(
         &scan,
         &completed_checkout_set,
         &completed_store_set,
+        &empty_reclaimed,
         count_workspaces,
     );
     let accumulated_usage = prior_usage.saturating_add(slice_completed_bytes);
@@ -389,6 +475,8 @@ fn maintain_inner(
     let workspaces_counted_after = prior_workspaces_counted || count_workspaces;
     let persist_cursor = |completed_now: &[PathBuf],
                           pending_now: &[PathBuf],
+                          reclaimed_paths: &HashSet<PathBuf>,
+                          invalidated_now: bool,
                           incomplete: bool|
      -> Result<(), String> {
         if !incomplete && pending_now.is_empty() && !remaining_stores {
@@ -417,23 +505,49 @@ fn maintain_inner(
             stores.sort();
             stores.dedup();
             let completed_now_set: HashSet<PathBuf> = completed_now.iter().cloned().collect();
+            let mut machine_paths: Vec<PathBuf> = prior_machine_paths
+                .iter()
+                .cloned()
+                .chain(
+                    scan.stores
+                        .iter()
+                        .filter(|store| {
+                            store.class == development::StoreClass::Machine
+                                && !development::is_configured_store(&store.id)
+                                && store_counted_in_completed(
+                                    store,
+                                    &completed_now_set,
+                                    &completed_store_set,
+                                    count_workspaces,
+                                )
+                        })
+                        .map(|store| store.path.clone()),
+                )
+                .collect();
+            machine_paths.sort();
+            machine_paths.dedup();
             let usage_after = prior_usage.saturating_add(completed_slice_usage(
                 &scan,
                 &completed_now_set,
                 &completed_store_set,
+                reclaimed_paths,
                 count_workspaces,
             ));
             state::write_maintain_cursor(
                 &cursor_path,
                 &MaintainCursor {
                     schema: MAINTAIN_CURSOR_SCHEMA.to_owned(),
+                    mode: cursor_mode,
                     roots: settings.roots.clone(),
                     completed_checkouts: completed,
                     pending_checkouts: pending,
                     completed_stores: stores,
+                    discovered_machine_paths: machine_paths,
                     accumulated_usage_bytes: usage_after,
                     workspaces_counted: workspaces_counted_after,
                     had_errors: had_errors_any,
+                    measurement_invalidated: prior_invalidated || invalidated_now,
+                    dedup: dedup_to_cursor(&committed_dedup),
                     updated_at: timestamp::format_utc(initial_now),
                 },
             )?;
@@ -496,7 +610,13 @@ fn maintain_inner(
         stores: None,
     };
     if observe_only || !settings.standing_approval {
-        persist_cursor(&completed_this_run, &remaining_pending, slice_incomplete)?;
+        persist_cursor(
+            &completed_this_run,
+            &remaining_pending,
+            &empty_reclaimed,
+            false,
+            slice_incomplete,
+        )?;
         return Ok(report);
     }
     let completed_set: HashSet<PathBuf> = completed_this_run.iter().cloned().collect();
@@ -512,7 +632,13 @@ fn maintain_inner(
         partial
     };
     if reclaim_scan.checkouts.is_empty() && !full_scan_complete {
-        persist_cursor(&completed_this_run, &remaining_pending, slice_incomplete)?;
+        persist_cursor(
+            &completed_this_run,
+            &remaining_pending,
+            &empty_reclaimed,
+            false,
+            slice_incomplete,
+        )?;
         return Ok(report);
     }
 
@@ -561,23 +687,35 @@ fn maintain_inner(
     // Move any checkout whose verification stopped on budget back to pending so
     // the next bounded run retries its reclamation instead of skipping it.
     let mut budget_deferred: HashSet<PathBuf> = HashSet::new();
+    let mut reclaimed_paths: HashSet<PathBuf> = HashSet::new();
     for removal in &reclaim_report.removals {
-        if !removal.removed
-            && removal
-                .refusal
-                .as_deref()
-                .is_some_and(|r| r.contains("budget"))
+        if removal.removed {
+            if let Some(candidate) = plan.candidates.get(removal.index) {
+                reclaimed_paths.insert(candidate.path.as_path().to_path_buf());
+            }
+        } else if removal
+            .refusal
+            .as_deref()
+            .is_some_and(|r| r.contains("budget"))
             && let Some(candidate) = plan.candidates.get(removal.index)
         {
             budget_deferred.insert(candidate.checkout.as_path().to_path_buf());
         }
     }
+    let invalidated_now = reclaimed_paths.iter().any(|p| shared_builds.contains(p))
+        || budget_deferred.iter().any(|p| shared_checkouts.contains(p));
     if !budget_deferred.is_empty() {
         completed_this_run.retain(|path| !budget_deferred.contains(path));
         remaining_pending.extend(budget_deferred);
     }
     let run_incomplete = slice_incomplete || !remaining_pending.is_empty() || tracker.is_stopped();
-    persist_cursor(&completed_this_run, &remaining_pending, run_incomplete)?;
+    persist_cursor(
+        &completed_this_run,
+        &remaining_pending,
+        &reclaimed_paths,
+        invalidated_now,
+        run_incomplete,
+    )?;
     report.reclaim = Some(reclaim_report);
     report.entries_visited = tracker.entries_visited();
     report.directories_deferred = tracker.directories_deferred();
@@ -622,14 +760,21 @@ fn maintain_inner(
     // post-observation never erases an active `lower_since` window established
     // by a complete initial observation unless its lower bound raises pressure.
     if !run_incomplete && !tracker.is_stopped() {
+        let empty_checkouts = HashSet::new();
+        let empty_stores = HashSet::new();
         let post_slice = development::inspect_with_tracker(
             &settings.roots,
             context.environment,
             Arc::clone(&tracker),
-            &HashSet::new(),
-            &[],
-            &HashSet::new(),
-            None,
+            SliceResume {
+                skip_checkouts: &empty_checkouts,
+                seed_pending: &[],
+                skip_stores: &empty_stores,
+                skip_workspaces: false,
+                prior_machine_paths: &[],
+                prior_dedup: None,
+                scan_entry_cap: None,
+            },
         );
         let post_scan = post_slice.scan;
         let post_now = clock();

@@ -190,6 +190,14 @@ pub fn measure_entry(path: &Path, device: u64) -> EntryMeasure {
     }
 }
 
+/// Shared-storage deduplication state (hard-linked regular files and cloned
+/// extents) preserved across completed bounded inspection slices.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScanDedup {
+    pub(crate) linked: HashSet<(u64, u64)>,
+    pub(crate) cloned: Counted,
+}
+
 /// One traversal that several measurements share. A regular file with
 /// several links counts toward the first measurement that reaches it, so the
 /// measurements of one scan sum to the storage that their trees occupy.
@@ -245,6 +253,43 @@ impl SharedScan {
     pub fn with_tracker(tracker: Arc<BudgetTracker>) -> Self {
         SharedScan {
             walker: Walker::with_budget(0, tracker),
+        }
+    }
+
+    /// Creates a shared scan seeded with prior committed deduplication state
+    /// and transactional staging enabled so incomplete trees never pollute
+    /// committed deduplication across slices.
+    pub(crate) fn with_tracker_and_dedup(tracker: Arc<BudgetTracker>, dedup: ScanDedup) -> Self {
+        let mut walker = Walker::with_budget(0, tracker);
+        walker.linked = dedup.linked;
+        walker.cloned = dedup.cloned;
+        walker.staging = true;
+        SharedScan { walker }
+    }
+
+    /// Commits staged deduplication entries from a completed tree.
+    pub(crate) fn commit_dedup(&mut self) {
+        self.walker.linked.extend(self.walker.staged_linked.drain());
+        let staged = std::mem::take(&mut self.walker.staged_cloned);
+        self.walker.cloned.merge(staged);
+    }
+
+    /// Discards staged deduplication entries from an incomplete tree.
+    pub(crate) fn discard_dedup(&mut self) {
+        self.walker.staged_linked.clear();
+        self.walker.staged_cloned.clear();
+    }
+
+    /// Monotonic count of newly staged hardlink or shared-extent claims.
+    pub(crate) fn staged_insertions(&self) -> u64 {
+        self.walker.staged_insertions
+    }
+
+    /// Extracts only the committed deduplication state for cursor persistence.
+    pub(crate) fn into_committed_dedup(self) -> ScanDedup {
+        ScanDedup {
+            linked: self.walker.linked,
+            cloned: self.walker.cloned,
         }
     }
 
@@ -365,9 +410,24 @@ struct Walker {
     /// Each hard-linked regular file whose storage the scan has counted under
     /// the root.
     linked: HashSet<(u64, u64)>,
+    /// Hard-linked files counted anywhere in the active slice (including
+    /// incomplete trees) so later trees in the same slice never double-count
+    /// them, without polluting committed cross-slice state.
+    slice_linked: HashSet<(u64, u64)>,
+    /// Hard-linked files staged for the active tree until it finishes cleanly.
+    staged_linked: HashSet<(u64, u64)>,
     /// The shared extents whose storage the scan has counted under the
     /// root.
     cloned: Counted,
+    /// Shared extents counted anywhere in the active slice (including
+    /// incomplete trees) to prevent intra-slice double counting.
+    slice_cloned: Counted,
+    /// Shared extents staged for the active tree until it finishes cleanly.
+    staged_cloned: Counted,
+    /// Whether new deduplication claims go into staged sets awaiting commit.
+    staging: bool,
+    /// Monotonic counter of newly staged hardlink or shared-extent claims.
+    staged_insertions: u64,
     error_count: u64,
     errors: Vec<ScanError>,
     mount_count: u64,
@@ -392,7 +452,13 @@ impl Walker {
             device,
             check_file_mounts: false,
             linked: HashSet::new(),
+            slice_linked: HashSet::new(),
+            staged_linked: HashSet::new(),
             cloned: Counted::default(),
+            slice_cloned: Counted::default(),
+            staged_cloned: Counted::default(),
+            staging: false,
+            staged_insertions: 0,
             error_count: 0,
             errors: Vec::new(),
             mount_count: 0,
@@ -615,7 +681,20 @@ impl Walker {
         // first link that the traversal reaches under the root contributes bytes.
         let counts_storage = *kind != EntryKind::File
             || meta.nlink() <= 1
-            || self.linked.insert((meta.dev(), meta.ino()));
+            || if self.staging {
+                let key = (meta.dev(), meta.ino());
+                if self.linked.contains(&key) || self.slice_linked.contains(&key) {
+                    false
+                } else {
+                    self.slice_linked.insert(key);
+                    if self.staged_linked.insert(key) {
+                        self.staged_insertions = self.staged_insertions.saturating_add(1);
+                    }
+                    true
+                }
+            } else {
+                self.linked.insert((meta.dev(), meta.ino()))
+            };
         if *kind == EntryKind::Directory && meta.uid() != self.user {
             self.foreign_directory_count = self.foreign_directory_count.saturating_add(1);
             self.first_foreign_directory
@@ -627,7 +706,25 @@ impl Walker {
         match shared {
             Ok(shared) if counts_storage => {
                 for extent in shared {
-                    let before = self.cloned.claim(meta.dev(), *extent);
+                    let before = if self.staging {
+                        let (_, len) = *extent;
+                        let uncovered = self.cloned.uncovered(meta.dev(), *extent);
+                        let uncovered_len: u64 = uncovered.iter().map(|(_, l)| *l).sum();
+                        let in_committed = len.saturating_sub(uncovered_len);
+                        let mut in_slice = 0_u64;
+                        for sub in uncovered {
+                            let fresh = self.slice_cloned.uncovered(meta.dev(), sub);
+                            let prior = self.slice_cloned.claim(meta.dev(), sub);
+                            for piece in fresh {
+                                self.staged_cloned.claim(meta.dev(), piece);
+                                self.staged_insertions = self.staged_insertions.saturating_add(1);
+                            }
+                            in_slice = in_slice.saturating_add(prior);
+                        }
+                        in_committed.saturating_add(in_slice)
+                    } else {
+                        self.cloned.claim(meta.dev(), *extent)
+                    };
                     counted_before = counted_before.saturating_add(before);
                 }
             }

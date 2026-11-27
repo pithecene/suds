@@ -190,7 +190,33 @@ pub fn clear_pause(path: &Path) -> Result<(), String> {
 }
 
 /// Schema tag of the bounded maintenance progress cursor.
-pub const MAINTAIN_CURSOR_SCHEMA: &str = "suds.maintain-cursor/v1";
+pub const MAINTAIN_CURSOR_SCHEMA: &str = "suds.maintain-cursor/v2";
+
+/// Mode of a bounded maintenance pass recorded in the cursor so observation
+/// progress never causes subsequent reclamation runs to skip checkouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintainCursorMode {
+    Observe,
+    Reclaim,
+}
+
+/// Counted non-overlapping `(start, end)` shared-extent ranges on one device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceExtents {
+    pub device: u64,
+    pub ranges: Vec<(u64, u64)>,
+}
+
+/// Persisted cross-slice deduplication state for hard-linked files and cloned
+/// extents belonging to completed trees.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CursorDedup {
+    pub linked: Vec<(u64, u64)>,
+    pub cloned: Vec<DeviceExtents>,
+}
 
 /// Persisted cursor recording completed and pending checkouts across partial
 /// maintenance slices so subsequent bounded runs reach nested worktrees.
@@ -198,18 +224,17 @@ pub const MAINTAIN_CURSOR_SCHEMA: &str = "suds.maintain-cursor/v1";
 #[serde(deny_unknown_fields)]
 pub struct MaintainCursor {
     pub schema: String,
+    pub mode: MaintainCursorMode,
     pub roots: Vec<PathBuf>,
     pub completed_checkouts: Vec<PathBuf>,
-    #[serde(default)]
     pub pending_checkouts: Vec<PathBuf>,
-    #[serde(default)]
     pub completed_stores: Vec<String>,
-    #[serde(default)]
+    pub discovered_machine_paths: Vec<PathBuf>,
     pub accumulated_usage_bytes: u64,
-    #[serde(default)]
     pub workspaces_counted: bool,
-    #[serde(default)]
     pub had_errors: bool,
+    pub measurement_invalidated: bool,
+    pub dedup: CursorDedup,
     pub updated_at: String,
 }
 

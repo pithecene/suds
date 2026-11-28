@@ -865,6 +865,19 @@ pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
         .map_err(|err| format!("{side} holds no report that Suds reads: {err}"))
 }
 
+/// Reads the two reports of a comparison from their files, each checked in turn, so a baseline that is refused
+/// opens no candidate.
+pub fn read_reports(
+    baseline: &Path,
+    candidate: &Path,
+) -> Result<(BenchReport, BenchReport), String> {
+    let read = |side: &str, path: &Path| -> Result<BenchReport, String> {
+        let text = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        read_report(side, &text)
+    };
+    Ok((read("baseline", baseline)?, read("candidate", candidate)?))
+}
+
 /// The form in which a comparison is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonFormat {
@@ -1557,5 +1570,33 @@ mod tests {
         comp.schemas_match = false;
         assert!(comp.refusal(false).is_some());
         assert!(comp.refusal(true).is_some());
+    }
+    #[test]
+    fn a_refused_baseline_opens_no_candidate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        std::fs::write(&baseline, r#"{"schema":"suds.benchmark/v1"}"#).unwrap();
+        let refusal = super::read_reports(&baseline, &dir.path().join("absent.json")).unwrap_err();
+        assert_eq!(
+            refusal,
+            "baseline has schema suds.benchmark/v1, and this suite compares suds.benchmark/v2"
+        );
+    }
+
+    #[test]
+    fn a_foreign_schema_is_the_only_diagnosis() {
+        let mut earlier = report(
+            environment(Some("tmpfs")),
+            vec![case("system/other", "large")],
+        );
+        earlier.schema = "suds.benchmark/v1".to_owned();
+        let current = report(
+            environment(Some("ext4")),
+            vec![case("system/scan", "small")],
+        );
+        assert_eq!(
+            compare_reports(&earlier, &current).incompatibilities,
+            ["baseline has schema suds.benchmark/v1, and this suite compares suds.benchmark/v2"]
+        );
     }
 }

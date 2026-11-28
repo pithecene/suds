@@ -1,5 +1,5 @@
-//! Command-line tests of `suds maintain` under a durable pause, in a temporary
-//! workspace with a home directory of its own.
+//! Command-line tests of a paused `suds maintain`. Each test owns a temporary
+//! workspace and home directory.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -55,7 +55,7 @@ fn a_paused_run_measures_and_its_status_follows_the_measurement() {
     let paused = fixture.maintain(&["--pause", "--reason", "incident-hold"]);
     assert!(paused.status.success(), "{paused:?}");
 
-    // A paused scheduled run that measures everything succeeds, as the explicit observation does.
+    // A paused scheduled run that measures everything succeeds, like the explicit observation.
     let scheduled = fixture.maintain(&[]);
     let text = String::from_utf8_lossy(&scheduled.stdout);
     assert!(

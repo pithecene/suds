@@ -194,7 +194,7 @@ fn run_maintenance(args: &MaintainArgs) -> Result<ExitCode, String> {
     } else {
         maintain::maintain(&settings, &context)?
     };
-    // A paused run measures, so its outcome and errors decide the status as those of any other run do.
+    // A paused run measures, so its outcome and errors decide the status, as for any other run.
     let partial = !report.outcome.is_complete()
         || report.error_count > 0
         || report

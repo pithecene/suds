@@ -316,9 +316,9 @@ fn maintain_inner(
         std::time::Duration::from_secs(5),
         "maintain",
     )?;
-    // Read the pause after acquiring the lock, so a pause written during contention holds a queued run too. A
-    // pause stops reclamation and never the reading: the paused run takes the bounded observation slice, so the
-    // pressure that a client waits on stays current while recovery is held.
+    // Read the pause after acquiring the lock, so a pause that arrives during contention holds a queued run too. A
+    // pause stops reclamation and never the reading: the paused run takes the bounded observation slice, so a
+    // client's wait for the next pressure reading ends while the pause holds recovery.
     let pause = if observe_only {
         None
     } else {

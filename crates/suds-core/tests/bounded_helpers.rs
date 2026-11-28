@@ -876,14 +876,11 @@ fn verification_debits_shared_budget_and_maintain_skips_external_store_adapters(
     );
 }
 
-#[test]
-fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
-    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
-
-    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
-    fs::create_dir_all(&dirs.state).unwrap();
-
-    // Seed durable pause and an active Hard pressure reading.
+/// Writes a durable pause and a complete hard reading into `dirs`, as an incident leaves them, and returns the
+/// reading.
+fn pause_under_hard_pressure(
+    dirs: &suds_core::state::Directories,
+) -> suds_core::pressure::Pressure {
     suds_core::state::write_pause(
         &dirs.pause(),
         &suds_core::state::PauseState {
@@ -906,6 +903,17 @@ fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
         complete: true,
     };
     fs::write(dirs.pressure(), serde_json::to_vec_pretty(&hard).unwrap()).unwrap();
+    hard
+}
+
+#[test]
+fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
+
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    fs::create_dir_all(&dirs.state).unwrap();
+
+    pause_under_hard_pressure(&dirs);
 
     let env = Environment::default();
     let programs = suds_core::stores::Programs::default();
@@ -997,29 +1005,8 @@ fn a_paused_scheduled_run_reaches_a_fresh_reading_in_bounded_slices_and_reclaims
     let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
     assert!(settings.standing_approval);
     fs::create_dir_all(&dirs.state).unwrap();
-    suds_core::state::write_pause(
-        &dirs.pause(),
-        &suds_core::state::PauseState {
-            schema: suds_core::state::PAUSE_SCHEMA.to_owned(),
-            paused: true,
-            reason: Some("incident-hold".to_owned()),
-            updated_at: "2026-11-26T18:00:00Z".to_owned(),
-        },
-    )
-    .unwrap();
+    let frozen = pause_under_hard_pressure(&dirs);
     let pause_before = fs::read(dirs.pause()).unwrap();
-    let frozen = suds_core::pressure::Pressure {
-        schema: suds_core::pressure::PRESSURE_SCHEMA.to_owned(),
-        observed_at: "2026-11-26T18:00:00Z".to_owned(),
-        level: suds_core::pressure::Level::Hard,
-        lower_since: None,
-        usage_bytes: 1024 * 1024 * 1024,
-        ceiling_bytes: 1024 * 1024 * 1024,
-        enforced: false,
-        filesystem_available_bytes: None,
-        complete: true,
-    };
-    fs::write(dirs.pressure(), serde_json::to_vec_pretty(&frozen).unwrap()).unwrap();
 
     let env = Environment::default();
     let programs = suds_core::stores::Programs::default();
@@ -1069,7 +1056,7 @@ fn a_paused_scheduled_run_reaches_a_fresh_reading_in_bounded_slices_and_reclaims
         Some(fresh.observed_at)
     );
 
-    // The pause stands as it was written, and every build target remains.
+    // The pause file keeps its bytes, and every build target remains.
     assert_eq!(fs::read(dirs.pause()).unwrap(), pause_before);
     assert!(targets.iter().all(|target| target.exists()));
 }

@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 20
     # Use the same Bosun version as mise.toml.
     container:
-      image: ghcr.io/pithecene/bosun:0.28.3
+      image: ghcr.io/pithecene/bosun:0.29.1
       credentials: {username: bosun, password: "${{ secrets.BOSUN_REGISTRY_TOKEN }}"}
     # Bosun reads the enterprise layer that bosun.yaml extends from the same
     # registry, with the same read-only token.

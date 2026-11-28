@@ -547,8 +547,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
 }
 
 /// Runs observation slices until a reading is complete or `limit` slices have run. A cycle that stops at the
-/// limit keeps its visit count and its peak cursor, and its zero `allocated_bytes` states no usage: the outcome
-/// is incomplete, and a comparison refuses it.
+/// limit keeps its visit count and its peak cursor, and its zero `allocated_bytes` means that the cycle measured no
+/// usage, never that the root holds none, so the outcome is incomplete.
 fn observe_to_completion(
     settings: &Settings,
     dirs: &Directories,

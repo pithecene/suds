@@ -962,8 +962,9 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
             incompatibilities.push(format!("baseline lacks case {}", case.name));
         }
     }
-    // A case's memory is its rise above the peak that earlier cases left, so the same work reports a smaller
-    // rise, or none, after a case with a higher peak.
+    // A sample's memory is the rise of the process's peak during its timed step, from the peak that stood when the
+    // step began. Earlier cases raise that starting peak, so the same work reports a smaller rise, or none, after a
+    // case with a higher peak.
     let order = |report: &BenchReport| -> Vec<String> {
         report.cases.iter().map(|c| c.name.clone()).collect()
     };

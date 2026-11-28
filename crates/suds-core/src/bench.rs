@@ -827,7 +827,7 @@ impl ComparisonReport {
     /// The refusal of a comparison that the reports do not support, which names each reason, or none where they
     /// compare or `allow_incompatible` holds. A caller prints it in place of the deltas.
     pub fn refusal(&self, allow_incompatible: bool) -> Option<String> {
-        if self.compatible || (allow_incompatible && self.schemas_match) {
+        if self.schemas_match && (self.compatible || allow_incompatible) {
             return None;
         }
         let mut text = if self.schemas_match {
@@ -865,26 +865,32 @@ pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
         .map_err(|err| format!("{side} holds no report that Suds reads: {err}"))
 }
 
-/// Writes the comparison of two reports' texts to `out`, as JSON where `json` holds. A refusal comes before any
-/// output, so a reader of `out` never takes a delta from reports that do not compare.
+/// The form in which a comparison is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparisonFormat {
+    Text,
+    Json,
+}
+
+/// Writes the comparison of two reports to `out`. A refusal comes before any output, so a reader of `out` never
+/// takes a delta from reports that do not compare.
 pub fn write_comparison(
     out: &mut impl std::io::Write,
-    baseline: &str,
-    candidate: &str,
-    json: bool,
+    baseline: &BenchReport,
+    candidate: &BenchReport,
+    format: ComparisonFormat,
     allow_incompatible: bool,
 ) -> Result<(), String> {
-    let base = read_report("baseline", baseline)?;
-    let cand = read_report("candidate", candidate)?;
-    let comp = compare_reports(&base, &cand);
+    let comp = compare_reports(baseline, candidate);
     if let Some(refusal) = comp.refusal(allow_incompatible) {
         return Err(refusal);
     }
-    let text = if json {
-        let body = serde_json::to_string_pretty(&comp).map_err(|err| err.to_string())?;
-        format!("{body}\n")
-    } else {
-        format_comparison(&comp)
+    let text = match format {
+        ComparisonFormat::Json => {
+            let body = serde_json::to_string_pretty(&comp).map_err(|err| err.to_string())?;
+            format!("{body}\n")
+        }
+        ComparisonFormat::Text => format_comparison(&comp),
     };
     out.write_all(text.as_bytes())
         .map_err(|err| err.to_string())
@@ -903,6 +909,20 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
                 report.schema
             ));
         }
+    }
+    // The cases of a report of another schema mean something else, so the comparison reads none of them.
+    if !schemas_match {
+        return ComparisonReport {
+            suite: candidate.suite.clone(),
+            baseline_revision: baseline.environment.git_revision.clone(),
+            candidate_revision: candidate.environment.git_revision.clone(),
+            compatible: false,
+            schemas_match,
+            incompatibilities,
+            cases: Vec::new(),
+        };
+    }
+    for (side, report) in [("baseline", baseline), ("candidate", candidate)] {
         let mut seen = std::collections::BTreeSet::new();
         for case in &report.cases {
             if !seen.insert(case.name.as_str()) {
@@ -1054,7 +1074,7 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
         compatible: incompatibilities.is_empty(),
         schemas_match,
         incompatibilities,
-        cases: if schemas_match { cases } else { Vec::new() },
+        cases,
     }
 }
 
@@ -1503,26 +1523,39 @@ mod tests {
 
     #[test]
     fn a_refused_comparison_writes_nothing() {
-        use super::write_comparison;
+        use super::{ComparisonFormat, write_comparison};
 
-        let text = |filesystem: &str| {
-            let one = report(
+        let one = |filesystem: &str| {
+            report(
                 environment(Some(filesystem)),
                 vec![case("system/scan", "small")],
-            );
-            serde_json::to_string(&one).unwrap()
+            )
         };
-        for json in [false, true] {
+        for format in [ComparisonFormat::Text, ComparisonFormat::Json] {
             let mut out = Vec::new();
             let refusal =
-                write_comparison(&mut out, &text("ext4"), &text("tmpfs"), json, false).unwrap_err();
+                write_comparison(&mut out, &one("ext4"), &one("tmpfs"), format, false).unwrap_err();
             assert!(
                 refusal.contains("filesystem mismatch: ext4 vs tmpfs"),
                 "{refusal}"
             );
             assert!(out.is_empty());
-            write_comparison(&mut out, &text("ext4"), &text("tmpfs"), json, true).unwrap();
+            write_comparison(&mut out, &one("ext4"), &one("tmpfs"), format, true).unwrap();
             assert!(!out.is_empty());
         }
+    }
+
+    #[test]
+    fn a_schema_mismatch_refuses_whatever_else_a_comparison_states() {
+        let one = || {
+            report(
+                environment(Some("ext4")),
+                vec![case("system/scan", "small")],
+            )
+        };
+        let mut comp = compare_reports(&one(), &one());
+        comp.schemas_match = false;
+        assert!(comp.refusal(false).is_some());
+        assert!(comp.refusal(true).is_some());
     }
 }

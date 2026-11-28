@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use suds_core::bench::{
-    BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, EnvironmentInfo, ScaleProfile,
-    StepOutcome, measure_case, with_reference_scan, write_comparison,
+    BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, ComparisonFormat, EnvironmentInfo,
+    ScaleProfile, StepOutcome, measure_case, read_report, with_reference_scan, write_comparison,
 };
 use suds_core::budget::Budget;
 use suds_core::development::{Environment, inspect};
@@ -261,14 +261,24 @@ fn run() -> Result<(), String> {
             json,
             allow_incompatible,
         } => {
-            let text = |path: &Path| {
-                fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+            // Each side is read and checked in turn, so a baseline that is refused opens no candidate.
+            let read = |side: &str, path: &Path| -> Result<BenchReport, String> {
+                let text =
+                    fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                read_report(side, &text)
+            };
+            let base = read("baseline", &baseline)?;
+            let cand = read("candidate", &candidate)?;
+            let format = if json {
+                ComparisonFormat::Json
+            } else {
+                ComparisonFormat::Text
             };
             write_comparison(
                 &mut std::io::stdout().lock(),
-                &text(&baseline)?,
-                &text(&candidate)?,
-                json,
+                &base,
+                &cand,
+                format,
                 allow_incompatible,
             )
         }

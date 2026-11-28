@@ -9,6 +9,10 @@ and Suds adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A paused scheduled run still measures**: while `pause.json` is active, `suds maintain` takes the same bounded observation slice as `suds maintain --observe` and records the pressure. It reclaims nothing, trims no store, and leaves the pause as written. Before this change a paused scheduled run returned the last recorded pressure and refreshed nothing. Only an explicit `suds maintain --observe` refreshed the reading, and a client that held work on a hard reading waited on one.
+
 ## [0.1.10] - 2026-11-27
 
 ### Added

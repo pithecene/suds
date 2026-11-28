@@ -876,14 +876,11 @@ fn verification_debits_shared_budget_and_maintain_skips_external_store_adapters(
     );
 }
 
-#[test]
-fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
-    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
-
-    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
-    fs::create_dir_all(&dirs.state).unwrap();
-
-    // Seed durable pause and an active Hard pressure reading.
+/// Writes a durable pause and a complete hard reading into `dirs`, as an incident leaves them, and returns the
+/// reading.
+fn pause_under_hard_pressure(
+    dirs: &suds_core::state::Directories,
+) -> suds_core::pressure::Pressure {
     suds_core::state::write_pause(
         &dirs.pause(),
         &suds_core::state::PauseState {
@@ -906,6 +903,17 @@ fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
         complete: true,
     };
     fs::write(dirs.pressure(), serde_json::to_vec_pretty(&hard).unwrap()).unwrap();
+    hard
+}
+
+#[test]
+fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
+
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    fs::create_dir_all(&dirs.state).unwrap();
+
+    pause_under_hard_pressure(&dirs);
 
     let env = Environment::default();
     let programs = suds_core::stores::Programs::default();
@@ -987,6 +995,70 @@ fn multi_slice_observe_completes_pressure_while_paused_and_recovers_hard() {
         .unwrap();
     assert!(pause.paused);
     assert!(targets.iter().all(|t| t.exists()));
+}
+
+/// Liveness: a pause of recovery never freezes the reading. A client that holds work on a hard reading waits on
+/// the next reading, so the scheduled run must reach one in a bounded number of bounded slices while paused.
+#[test]
+fn a_paused_scheduled_run_reaches_a_fresh_reading_in_bounded_slices_and_reclaims_nothing() {
+    let (_tmp, base, workspace, targets) = multi_repo_workspace(18);
+    let (dirs, settings) = maintain_fixture(&base, workspace, 1024 * 1024 * 1024);
+    assert!(settings.standing_approval);
+    fs::create_dir_all(&dirs.state).unwrap();
+    let frozen = pause_under_hard_pressure(&dirs);
+    let pause_before = fs::read(dirs.pause()).unwrap();
+
+    let env = Environment::default();
+    let programs = suds_core::stores::Programs::default();
+    let git = Git::default();
+    let context = suds_core::maintain::Context {
+        directories: &dirs,
+        environment: &env,
+        programs: &programs,
+        git: &git,
+        now: FUTURE_NOW,
+    };
+
+    // The scheduled run, as `suds maintain` starts it, and not the run of `--observe`.
+    let mut clock_now = FUTURE_NOW;
+    let mut saw_cursor = false;
+    let mut fresh = None;
+    for _ in 0..10 {
+        let mut clock = || {
+            clock_now += 1;
+            clock_now
+        };
+        let report = run_maintain_step(&settings, &context, 80, &mut clock);
+        assert!(
+            report.entries_visited <= 80,
+            "a paused slice exceeded its entry budget: {}",
+            report.entries_visited
+        );
+        assert!(report.paused, "the run must state the pause");
+        assert_eq!(report.pause_reason.as_deref(), Some("incident-hold"));
+        assert!(report.reclaim.is_none(), "a paused run must never reclaim");
+        assert!(
+            report.stores.is_none(),
+            "a paused run must never trim stores"
+        );
+        if dirs.maintain_cursor().exists() {
+            saw_cursor = true;
+        } else if report.pressure.complete {
+            fresh = Some(report.pressure);
+            break;
+        }
+    }
+    assert!(saw_cursor, "each slice must stay within its budget");
+    let fresh = fresh.expect("a paused run must reach a complete reading within ten slices");
+    assert_ne!(fresh.observed_at, frozen.observed_at);
+    assert_eq!(
+        suds_core::maintain::read_pressure(&dirs.pressure()).map(|reading| reading.observed_at),
+        Some(fresh.observed_at)
+    );
+
+    // The pause file keeps its bytes, and every build target remains.
+    assert_eq!(fs::read(dirs.pause()).unwrap(), pause_before);
+    assert!(targets.iter().all(|target| target.exists()));
 }
 
 struct MaintainHarness {

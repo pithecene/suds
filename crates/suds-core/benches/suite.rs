@@ -7,13 +7,12 @@ use std::process::ExitCode;
 
 use suds_core::bench::{
     BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, EnvironmentInfo, ScaleProfile,
-    StepOutcome, compare_reports, format_comparison, measure_case, read_report,
-    with_reference_scan,
+    StepOutcome, measure_case, with_reference_scan, write_comparison,
 };
 use suds_core::budget::Budget;
 use suds_core::development::{Environment, inspect};
 use suds_core::maintain::{Context, maintain_observe_with_budget, maintain_with_budget};
-use suds_core::organize::journal::Journal;
+use suds_core::organize::journal::{Journal, RunStatus};
 use suds_core::reclaim::execute::{Authority, Conditions, apply};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
@@ -215,11 +214,13 @@ fn run() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     match command {
         BenchCommand::Component { samples, output } => {
+            // The cases make the temporary root, so the filesystem is read once they have run.
+            let cases = run_component(samples)?;
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "component".to_owned(),
                 environment: EnvironmentInfo::collect(&cwd, &std::env::temp_dir()),
-                cases: run_component(samples)?,
+                cases,
             };
             emit_report(&report, output.as_deref())
         }
@@ -260,27 +261,16 @@ fn run() -> Result<(), String> {
             json,
             allow_incompatible,
         } => {
-            let read = |side: &str, path: &Path| -> Result<BenchReport, String> {
-                let text =
-                    fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                read_report(side, &text)
+            let text = |path: &Path| {
+                fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
             };
-            let base = read("baseline", &baseline)?;
-            let cand = read("candidate", &candidate)?;
-            let comp = compare_reports(&base, &cand);
-            // A refusal prints no delta, so a reader of the output never takes one from reports that differ.
-            if let Some(refusal) = comp.refusal(allow_incompatible) {
-                return Err(refusal);
-            }
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&comp).map_err(|e| e.to_string())?
-                );
-            } else {
-                print!("{}", format_comparison(&comp));
-            }
-            Ok(())
+            write_comparison(
+                &mut std::io::stdout().lock(),
+                &text(&baseline)?,
+                &text(&candidate)?,
+                json,
+                allow_incompatible,
+            )
         }
     }
 }
@@ -467,8 +457,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             StepOutcome {
                 entries_visited: plan.candidates.len() as u64,
                 reclaimed_bytes: plan.removable_bytes(),
-                // The plan reads a scan that the case holds, so no part of it can stay unmeasured.
-                complete: true,
+                // The plan covers what its input scan read, so a partial scan makes a partial plan.
+                complete: full_scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -489,8 +479,9 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 let git = Git::default();
                 let mut journal = Journal::open(&ws.state_dir.join("journal")).unwrap();
                 let splan = seed::plan_seed(dest_wt, Some(src_repo), &git).unwrap();
-                let shared = splan.shared_bytes();
-                let _ = seed::apply(&mut journal, &splan, Some("bench")).unwrap();
+                let seeded = seed::apply(&mut journal, &splan, Some("bench")).unwrap();
+                // A filesystem without clones refuses the seed, and then the cycle shares and measures nothing.
+                let shared = seeded.shared_bytes;
 
                 let target_scan = inspect(std::slice::from_ref(dest_wt), &env);
                 let r_reg = registry::reading(&ws.state_dir.join("registry.jsonl"));
@@ -530,7 +521,9 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                     entries_visited: target_scan.entries_visited,
                     allocated_bytes: shared,
                     reclaimed_bytes: rreport.freed_bytes,
-                    complete: target_scan.outcome.is_complete(),
+                    complete: matches!(seeded.status, RunStatus::Complete)
+                        && target_scan.outcome.is_complete()
+                        && matches!(rreport.status, RunStatus::Complete),
                     ..StepOutcome::default()
                 }
             },

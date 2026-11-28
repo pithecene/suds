@@ -816,6 +816,9 @@ pub struct ComparisonReport {
     pub baseline_revision: String,
     pub candidate_revision: String,
     pub compatible: bool,
+    /// Whether both reports are of this suite's schema. Where one is not, no option compares them, and the
+    /// comparison holds no case.
+    pub schemas_match: bool,
     pub incompatibilities: Vec<String>,
     pub cases: Vec<CaseDelta>,
 }
@@ -824,12 +827,16 @@ impl ComparisonReport {
     /// The refusal of a comparison that the reports do not support, which names each reason, or none where they
     /// compare or `allow_incompatible` holds. A caller prints it in place of the deltas.
     pub fn refusal(&self, allow_incompatible: bool) -> Option<String> {
-        if self.compatible || allow_incompatible {
+        if self.compatible || (allow_incompatible && self.schemas_match) {
             return None;
         }
-        let mut text =
+        let mut text = if self.schemas_match {
             "the reports do not compare, and `--allow-incompatible` compares them anyway:"
-                .to_owned();
+                .to_owned()
+        } else {
+            "the reports are not both of this suite's schema, and no option compares them:"
+                .to_owned()
+        };
         for reason in &self.incompatibilities {
             text.push_str("\n  - ");
             text.push_str(reason);
@@ -841,27 +848,56 @@ impl ComparisonReport {
 /// Reads the report of `side` from `text`. A report of another schema lacks fields that this suite compares, so its
 /// schema answers before its fields are read, and no option compares it.
 pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|err| format!("{side} is no JSON report: {err}"))?;
-    match value["schema"].as_str() {
-        Some(schema) if schema == BENCHMARK_SCHEMA => {}
-        Some(schema) => {
-            return Err(format!(
-                "{side} has schema {schema}, and this suite compares {BENCHMARK_SCHEMA}"
-            ));
-        }
-        None => return Err(format!("{side} names no schema")),
+    // A typed reading refuses a field that the text names twice, which a reading into a generic value would not.
+    #[derive(Deserialize)]
+    struct Header {
+        schema: String,
     }
-    serde_json::from_value(value)
+    let header: Header = serde_json::from_str(text)
+        .map_err(|err| format!("{side} holds no report with one schema: {err}"))?;
+    if header.schema != BENCHMARK_SCHEMA {
+        return Err(format!(
+            "{side} has schema {}, and this suite compares {BENCHMARK_SCHEMA}",
+            header.schema
+        ));
+    }
+    serde_json::from_str(text)
         .map_err(|err| format!("{side} holds no report that Suds reads: {err}"))
+}
+
+/// Writes the comparison of two reports' texts to `out`, as JSON where `json` holds. A refusal comes before any
+/// output, so a reader of `out` never takes a delta from reports that do not compare.
+pub fn write_comparison(
+    out: &mut impl std::io::Write,
+    baseline: &str,
+    candidate: &str,
+    json: bool,
+    allow_incompatible: bool,
+) -> Result<(), String> {
+    let base = read_report("baseline", baseline)?;
+    let cand = read_report("candidate", candidate)?;
+    let comp = compare_reports(&base, &cand);
+    if let Some(refusal) = comp.refusal(allow_incompatible) {
+        return Err(refusal);
+    }
+    let text = if json {
+        let body = serde_json::to_string_pretty(&comp).map_err(|err| err.to_string())?;
+        format!("{body}\n")
+    } else {
+        format_comparison(&comp)
+    };
+    out.write_all(text.as_bytes())
+        .map_err(|err| err.to_string())
 }
 
 /// Compares matching benchmark cases between `baseline` and `candidate`, checking environment and workload compatibility.
 pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> ComparisonReport {
     let mut incompatibilities = Vec::new();
+    let mut schemas_match = true;
     // A report of another schema names its fields differently, so two such reports that agree still do not compare.
     for (side, report) in [("baseline", baseline), ("candidate", candidate)] {
         if report.schema != BENCHMARK_SCHEMA {
+            schemas_match = false;
             incompatibilities.push(format!(
                 "{side} has schema {}, and this suite compares {BENCHMARK_SCHEMA}",
                 report.schema
@@ -1016,8 +1052,9 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
         baseline_revision: baseline.environment.git_revision.clone(),
         candidate_revision: candidate.environment.git_revision.clone(),
         compatible: incompatibilities.is_empty(),
+        schemas_match,
         incompatibilities,
-        cases,
+        cases: if schemas_match { cases } else { Vec::new() },
     }
 }
 
@@ -1435,5 +1472,57 @@ mod tests {
         larger.target_files_per_checkout *= 2;
         assert_ne!(larger.parameters(), ScaleProfile::small().parameters());
         assert_eq!(ScaleProfile::small().parameters().len(), 5);
+    }
+    #[test]
+    fn no_option_compares_reports_of_different_schemas() {
+        let current = || {
+            report(
+                environment(Some("ext4")),
+                vec![case("system/scan", "small")],
+            )
+        };
+        let mut earlier = current();
+        earlier.schema = "suds.benchmark/v1".to_owned();
+        let comp = compare_reports(&earlier, &current());
+        assert!(!comp.schemas_match);
+        assert!(comp.cases.is_empty());
+        assert!(comp.refusal(true).is_some());
+    }
+
+    #[test]
+    fn a_report_that_names_its_schema_twice_is_refused() {
+        let current = report(
+            environment(Some("ext4")),
+            vec![case("system/scan", "small")],
+        );
+        let text = serde_json::to_string(&current).unwrap();
+        let twice = text.replacen('{', r#"{"schema":"suds.benchmark/v1","#, 1);
+        let refusal = read_report("baseline", &twice).unwrap_err();
+        assert!(refusal.contains("duplicate field"), "{refusal}");
+    }
+
+    #[test]
+    fn a_refused_comparison_writes_nothing() {
+        use super::write_comparison;
+
+        let text = |filesystem: &str| {
+            let one = report(
+                environment(Some(filesystem)),
+                vec![case("system/scan", "small")],
+            );
+            serde_json::to_string(&one).unwrap()
+        };
+        for json in [false, true] {
+            let mut out = Vec::new();
+            let refusal =
+                write_comparison(&mut out, &text("ext4"), &text("tmpfs"), json, false).unwrap_err();
+            assert!(
+                refusal.contains("filesystem mismatch: ext4 vs tmpfs"),
+                "{refusal}"
+            );
+            assert!(out.is_empty());
+            write_comparison(&mut out, &text("ext4"), &text("tmpfs"), json, true).unwrap();
+            assert!(!out.is_empty());
+        }
     }
 }

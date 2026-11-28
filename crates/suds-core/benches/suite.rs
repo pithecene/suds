@@ -214,7 +214,7 @@ fn run() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     match command {
         BenchCommand::Component { samples, output } => {
-            // The cases make the temporary root, so the filesystem is read once they have run.
+            // The cases make the temporary root, so the filesystem's reading follows them.
             let cases = run_component(samples)?;
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
@@ -389,47 +389,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 background_priority: false,
                 ..Budget::for_maintenance()
             };
-            let git = Git::default();
-            let mut ts = BENCH_NOW;
-            let mut visited = 0_u64;
-            let mut peak_cursor = 0_u64;
-            let mut usage = 0_u64;
-            let mut slices = 0_u64;
-            let mut complete = false;
-            for _ in 0..16 {
-                ts += 5;
-                let report = maintain_observe_with_budget(
-                    &obs_settings,
-                    &Context {
-                        directories: &dirs,
-                        environment: &env,
-                        programs: &programs,
-                        git: &git,
-                        now: ts,
-                    },
-                    &budget,
-                    &mut || ts,
-                )
-                .unwrap();
-                slices += 1;
-                visited += report.entries_visited;
-                if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
-                    peak_cursor = peak_cursor.max(meta.len());
-                }
-                if report.pressure.complete && !dirs.maintain_cursor().exists() {
-                    usage = report.pressure.usage_bytes;
-                    complete = true;
-                    break;
-                }
-            }
-            StepOutcome {
-                entries_visited: visited,
-                allocated_bytes: usage,
-                cursor_bytes: peak_cursor,
-                slices,
-                complete,
-                ..StepOutcome::default()
-            }
+            observe_to_completion(&obs_settings, &dirs, &env, &programs, &budget, 16)
         },
     ));
 
@@ -586,6 +546,48 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
     Ok(cases)
 }
 
+/// Runs observation slices until a reading is complete or `limit` slices have run, and returns what the cycle
+/// visited, its peak cursor, and whether it completed.
+fn observe_to_completion(
+    settings: &Settings,
+    dirs: &Directories,
+    env: &Environment,
+    programs: &Programs,
+    budget: &Budget,
+    limit: usize,
+) -> StepOutcome {
+    let git = Git::default();
+    let mut ts = BENCH_NOW;
+    let mut outcome = StepOutcome::default();
+    for _ in 0..limit {
+        ts += 5;
+        let report = maintain_observe_with_budget(
+            settings,
+            &Context {
+                directories: dirs,
+                environment: env,
+                programs,
+                git: &git,
+                now: ts,
+            },
+            budget,
+            &mut || ts,
+        )
+        .unwrap();
+        outcome.slices += 1;
+        outcome.entries_visited += report.entries_visited;
+        if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
+            outcome.cursor_bytes = outcome.cursor_bytes.max(meta.len());
+        }
+        if report.pressure.complete && !dirs.maintain_cursor().exists() {
+            outcome.allocated_bytes = report.pressure.usage_bytes;
+            outcome.complete = true;
+            break;
+        }
+    }
+    outcome
+}
+
 fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
     let scratch = std::env::temp_dir().join(format!("suds-live-bench-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
@@ -662,52 +664,12 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
             let _ = fs::remove_file(dirs.maintain_cursor());
         },
         |()| {
-            let git = Git::default();
             let budget = Budget {
                 pace_every: 0,
                 background_priority: false,
                 ..Budget::for_maintenance()
             };
-            let mut ts = BENCH_NOW;
-            let mut visited = 0_u64;
-            let mut peak_cursor = 0_u64;
-            let mut usage = 0_u64;
-            let mut slices = 0_u64;
-            let mut complete = false;
-            for _ in 0..256 {
-                ts += 5;
-                let report = maintain_observe_with_budget(
-                    &settings,
-                    &Context {
-                        directories: &dirs,
-                        environment: &env,
-                        programs: &programs,
-                        git: &git,
-                        now: ts,
-                    },
-                    &budget,
-                    &mut || ts,
-                )
-                .unwrap();
-                slices += 1;
-                visited += report.entries_visited;
-                if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
-                    peak_cursor = peak_cursor.max(meta.len());
-                }
-                if report.pressure.complete && !dirs.maintain_cursor().exists() {
-                    usage = report.pressure.usage_bytes;
-                    complete = true;
-                    break;
-                }
-            }
-            StepOutcome {
-                entries_visited: visited,
-                allocated_bytes: usage,
-                cursor_bytes: peak_cursor,
-                slices,
-                complete,
-                ..StepOutcome::default()
-            }
+            observe_to_completion(&settings, &dirs, &env, &programs, &budget, 256)
         },
     ));
 

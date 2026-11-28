@@ -147,7 +147,7 @@ fn capture_os() -> Option<ProcessSample> {
         self_sys_us: micros(own.system_time())?,
         child_user_us: micros(children.user_time())?,
         child_sys_us: micros(children.system_time())?,
-        // macOS states the peak resident size in bytes.
+        // On macOS the peak resident size is in bytes.
         peak_rss_bytes: u64::try_from(own.max_rss()).ok(),
     })
 }
@@ -846,7 +846,7 @@ impl ComparisonReport {
 }
 
 /// Reads the report of `side` from `text`. A report of another schema lacks fields that this suite compares, so its
-/// schema answers before its fields are read, and no option compares it.
+/// schema answers before any other field, and no option compares it.
 pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
     // A typed reading refuses a field that the text names twice, which a reading into a generic value would not.
     #[derive(Deserialize)]
@@ -865,8 +865,8 @@ pub fn read_report(side: &str, text: &str) -> Result<BenchReport, String> {
         .map_err(|err| format!("{side} holds no report that Suds reads: {err}"))
 }
 
-/// Reads the two reports of a comparison from their files, each checked in turn, so a baseline that is refused
-/// opens no candidate.
+/// Reads the two reports of a comparison from their files, one after the other, so a baseline that the suite
+/// refuses opens no candidate.
 pub fn read_reports(
     baseline: &Path,
     candidate: &Path,
@@ -887,7 +887,7 @@ fn read_reports_with(
     Ok((base, cand))
 }
 
-/// The form in which a comparison is written.
+/// The form of a comparison's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonFormat {
     Text,
@@ -962,7 +962,7 @@ pub fn compare_reports(baseline: &BenchReport, candidate: &BenchReport) -> Compa
             incompatibilities.push(format!("baseline lacks case {}", case.name));
         }
     }
-    // A case's memory is a rise of the process's peak, so the cases before it decide what is left to rise.
+    // A case's memory is a rise of the process's peak, so the cases before it decide how far the peak can still rise.
     let order = |report: &BenchReport| -> Vec<String> {
         report.cases.iter().map(|c| c.name.clone()).collect()
     };

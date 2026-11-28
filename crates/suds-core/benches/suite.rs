@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use suds_core::bench::{
-    BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, EnvironmentInfo, ScaleProfile,
-    StepOutcome, compare_reports, format_comparison, measure_case, with_reference_scan,
+    BENCHMARK_SCHEMA, BenchReport, BenchWorkspace, CaseReport, ComparisonFormat, EnvironmentInfo,
+    ScaleProfile, StepOutcome, measure_case, read_reports, with_reference_scan, write_comparison,
 };
 use suds_core::budget::Budget;
 use suds_core::development::{Environment, inspect};
 use suds_core::maintain::{Context, maintain_observe_with_budget, maintain_with_budget};
-use suds_core::organize::journal::Journal;
+use suds_core::organize::journal::{Journal, RunStatus};
 use suds_core::reclaim::execute::{Authority, Conditions, apply};
 use suds_core::reclaim::git::Git;
 use suds_core::reclaim::liveness::Liveness;
@@ -42,6 +42,7 @@ enum BenchCommand {
         baseline: PathBuf,
         candidate: PathBuf,
         json: bool,
+        allow_incompatible: bool,
     },
 }
 
@@ -116,23 +117,26 @@ fn parse_cli() -> Result<BenchCommand, String> {
         }
         "compare" => {
             let mut json = false;
+            let mut allow_incompatible = false;
             let mut positional = Vec::new();
             for item in rest {
-                if item == "--json" {
-                    json = true;
-                } else {
-                    positional.push(PathBuf::from(item));
+                match item.as_str() {
+                    "--json" => json = true,
+                    "--allow-incompatible" => allow_incompatible = true,
+                    _ => positional.push(PathBuf::from(item)),
                 }
             }
             if positional.len() != 2 {
                 return Err(
-                    "usage: suite compare <baseline.json> <candidate.json> [--json]".to_owned(),
+                    "usage: suite compare <baseline.json> <candidate.json> [--json] [--allow-incompatible]"
+                        .to_owned(),
                 );
             }
             Ok(BenchCommand::Compare {
                 baseline: positional[0].clone(),
                 candidate: positional[1].clone(),
                 json,
+                allow_incompatible,
             })
         }
         other => Err(format!("unknown subcommand `{other}`")),
@@ -210,11 +214,13 @@ fn run() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     match command {
         BenchCommand::Component { samples, output } => {
+            // The cases make the temporary root, so the filesystem's reading follows them.
+            let cases = run_component(samples)?;
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "component".to_owned(),
-                environment: EnvironmentInfo::collect(&cwd),
-                cases: run_component(samples)?,
+                environment: EnvironmentInfo::collect(&cwd, &std::env::temp_dir()),
+                cases,
             };
             emit_report(&report, output.as_deref())
         }
@@ -230,7 +236,7 @@ fn run() -> Result<(), String> {
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "system".to_owned(),
-                environment: EnvironmentInfo::collect(&cwd),
+                environment: EnvironmentInfo::collect(&cwd, &std::env::temp_dir()),
                 cases,
             };
             emit_report(&report, output.as_deref())
@@ -244,7 +250,7 @@ fn run() -> Result<(), String> {
             let report = BenchReport {
                 schema: BENCHMARK_SCHEMA.to_owned(),
                 suite: "live".to_owned(),
-                environment: EnvironmentInfo::collect(&root),
+                environment: EnvironmentInfo::collect(&cwd, &root),
                 cases: run_live(&root, samples)?,
             };
             emit_report(&report, output.as_deref())
@@ -253,27 +259,21 @@ fn run() -> Result<(), String> {
             baseline,
             candidate,
             json,
+            allow_incompatible,
         } => {
-            let base: BenchReport = serde_json::from_str(
-                &fs::read_to_string(&baseline)
-                    .map_err(|e| format!("{}: {e}", baseline.display()))?,
-            )
-            .map_err(|e| e.to_string())?;
-            let cand: BenchReport = serde_json::from_str(
-                &fs::read_to_string(&candidate)
-                    .map_err(|e| format!("{}: {e}", candidate.display()))?,
-            )
-            .map_err(|e| e.to_string())?;
-            let comp = compare_reports(&base, &cand);
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&comp).map_err(|e| e.to_string())?
-                );
+            let (base, cand) = read_reports(&baseline, &candidate)?;
+            let format = if json {
+                ComparisonFormat::Json
             } else {
-                print!("{}", format_comparison(&comp));
-            }
-            Ok(())
+                ComparisonFormat::Text
+            };
+            write_comparison(
+                &mut std::io::stdout().lock(),
+                &base,
+                &cand,
+                format,
+                allow_incompatible,
+            )
         }
     }
 }
@@ -283,8 +283,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
     let roots = vec![ws.workspace_root.clone(), ws.store_root.clone()];
     let env = Environment::default();
 
-    let mut params = BTreeMap::new();
-    params.insert("profile".to_owned(), "small".to_owned());
+    let params = ScaleProfile::small().parameters();
 
     let mut cases = Vec::new();
     cases.push(measure_case(
@@ -297,6 +296,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: scan.checkouts.iter().map(|c| c.own.allocated_bytes).sum(),
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -312,6 +312,7 @@ fn run_component(samples: usize) -> Result<Vec<CaseReport>, String> {
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: scan.checkouts.iter().map(|c| c.own.allocated_bytes).sum(),
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -326,10 +327,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
     let env = Environment::default();
     let programs = Programs::default();
 
-    let mut base_params = BTreeMap::new();
-    base_params.insert("profile".to_owned(), profile.name.clone());
-    base_params.insert("repositories".to_owned(), profile.repositories.to_string());
-    base_params.insert("worktrees".to_owned(), profile.worktrees.to_string());
+    let base_params = profile.parameters();
 
     let mut cases = Vec::new();
 
@@ -355,6 +353,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             StepOutcome {
                 entries_visited: scan.entries_visited,
                 allocated_bytes: allocated,
+                complete: scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -390,41 +389,7 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 background_priority: false,
                 ..Budget::for_maintenance()
             };
-            let git = Git::default();
-            let mut ts = BENCH_NOW;
-            let mut visited = 0_u64;
-            let mut peak_cursor = 0_u64;
-            let mut usage = 0_u64;
-            for _ in 0..16 {
-                ts += 5;
-                let report = maintain_observe_with_budget(
-                    &obs_settings,
-                    &Context {
-                        directories: &dirs,
-                        environment: &env,
-                        programs: &programs,
-                        git: &git,
-                        now: ts,
-                    },
-                    &budget,
-                    &mut || ts,
-                )
-                .unwrap();
-                visited += report.entries_visited;
-                if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
-                    peak_cursor = peak_cursor.max(meta.len());
-                }
-                if report.pressure.complete && !dirs.maintain_cursor().exists() {
-                    usage = report.pressure.usage_bytes;
-                    break;
-                }
-            }
-            StepOutcome {
-                entries_visited: visited,
-                allocated_bytes: usage,
-                cursor_bytes: peak_cursor,
-                ..StepOutcome::default()
-            }
+            observe_to_completion(&obs_settings, &dirs, &env, &programs, &budget, 16)
         },
     ));
 
@@ -455,6 +420,8 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
             StepOutcome {
                 entries_visited: plan.candidates.len() as u64,
                 reclaimed_bytes: plan.removable_bytes(),
+                // The plan covers what its input scan read, so a partial scan makes a partial plan.
+                complete: full_scan.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
@@ -475,8 +442,9 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 let git = Git::default();
                 let mut journal = Journal::open(&ws.state_dir.join("journal")).unwrap();
                 let splan = seed::plan_seed(dest_wt, Some(src_repo), &git).unwrap();
-                let shared = splan.shared_bytes();
-                let _ = seed::apply(&mut journal, &splan, Some("bench")).unwrap();
+                let seeded = seed::apply(&mut journal, &splan, Some("bench")).unwrap();
+                // A filesystem without clones refuses the seed, and then the cycle shares and measures nothing.
+                let shared = seeded.shared_bytes;
 
                 let target_scan = inspect(std::slice::from_ref(dest_wt), &env);
                 let r_reg = registry::reading(&ws.state_dir.join("registry.jsonl"));
@@ -516,6 +484,9 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                     entries_visited: target_scan.entries_visited,
                     allocated_bytes: shared,
                     reclaimed_bytes: rreport.freed_bytes,
+                    complete: matches!(seeded.status, RunStatus::Complete)
+                        && target_scan.outcome.is_complete()
+                        && matches!(rreport.status, RunStatus::Complete),
                     ..StepOutcome::default()
                 }
             },
@@ -565,12 +536,57 @@ fn run_system_profile(profile: &ScaleProfile, samples: usize) -> Result<Vec<Case
                 entries_visited: report.entries_visited,
                 allocated_bytes: report.pressure.usage_bytes,
                 reclaimed_bytes: freed,
+                slices: 1,
+                complete: report.outcome.is_complete(),
                 ..StepOutcome::default()
             }
         },
     ));
 
     Ok(cases)
+}
+
+/// Runs observation slices until a reading is complete or `limit` slices have run. A cycle that stops at the
+/// limit keeps its visit count and its peak cursor, and its outcome is incomplete. Its zero `allocated_bytes`
+/// means that the cycle measured no usage, never that the root holds none.
+fn observe_to_completion(
+    settings: &Settings,
+    dirs: &Directories,
+    env: &Environment,
+    programs: &Programs,
+    budget: &Budget,
+    limit: usize,
+) -> StepOutcome {
+    let git = Git::default();
+    let mut ts = BENCH_NOW;
+    let mut outcome = StepOutcome::default();
+    for _ in 0..limit {
+        ts += 5;
+        let report = maintain_observe_with_budget(
+            settings,
+            &Context {
+                directories: dirs,
+                environment: env,
+                programs,
+                git: &git,
+                now: ts,
+            },
+            budget,
+            &mut || ts,
+        )
+        .unwrap();
+        outcome.slices += 1;
+        outcome.entries_visited += report.entries_visited;
+        if let Ok(meta) = fs::metadata(dirs.maintain_cursor()) {
+            outcome.cursor_bytes = outcome.cursor_bytes.max(meta.len());
+        }
+        if report.pressure.complete && !dirs.maintain_cursor().exists() {
+            outcome.allocated_bytes = report.pressure.usage_bytes;
+            outcome.complete = true;
+            break;
+        }
+    }
+    outcome
 }
 
 fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
@@ -597,10 +613,11 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
 
     let mut cases = Vec::new();
     cases.push(measure_case(
-        "live/observe_root",
-        params,
+        "live/observe_root_single_slice",
+        params.clone(),
         samples,
         || {
+            let _ = fs::remove_file(dirs.pressure());
             let _ = fs::remove_file(dirs.maintain_cursor());
         },
         |()| {
@@ -627,11 +644,33 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
                 },
             )
             .unwrap();
+            let cursor_bytes = fs::metadata(dirs.maintain_cursor()).map_or(0, |m| m.len());
             StepOutcome {
                 entries_visited: report.entries_visited,
                 allocated_bytes: report.pressure.usage_bytes,
+                cursor_bytes,
+                slices: 1,
+                complete: report.pressure.complete,
                 ..StepOutcome::default()
             }
+        },
+    ));
+
+    cases.push(measure_case(
+        "live/observe_root_complete",
+        params,
+        samples,
+        || {
+            let _ = fs::remove_file(dirs.pressure());
+            let _ = fs::remove_file(dirs.maintain_cursor());
+        },
+        |()| {
+            let budget = Budget {
+                pace_every: 0,
+                background_priority: false,
+                ..Budget::for_maintenance()
+            };
+            observe_to_completion(&settings, &dirs, &env, &programs, &budget, 256)
         },
     ));
 
@@ -641,12 +680,16 @@ fn run_live(root: &Path, samples: usize) -> Result<Vec<CaseReport>, String> {
 
 fn emit_report(report: &BenchReport, output: Option<&Path>) -> Result<(), String> {
     println!(
-        "Suite: {} | rev: {} | os: {}/{} | block: {}B",
+        "Suite: {} | rev: {} | os: {}/{} | fs: {} | block: {}",
         report.suite,
         &report.environment.git_revision[..10.min(report.environment.git_revision.len())],
         report.environment.os,
         report.environment.arch,
-        report.environment.filesystem_block_size
+        report.environment.filesystem.as_deref().unwrap_or("-"),
+        report
+            .environment
+            .filesystem_block_size
+            .map_or_else(|| "-".to_owned(), |size| format!("{size}B"))
     );
     println!(
         "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
@@ -656,8 +699,9 @@ fn emit_report(report: &BenchReport, output: Option<&Path>) -> Result<(), String
         let cpu_col = c
             .median_cpu_us
             .map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+        let status = if c.complete { "" } else { " [INCOMPLETE]" };
         println!(
-            "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
+            "{:<42} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}{status}",
             c.name,
             c.median_us,
             cpu_col,

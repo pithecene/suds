@@ -22,6 +22,8 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 rustix = { version = "=1.1.6", features = ["fs", "process"] }
 libc = "=0.2.191"
+# getrusage on macOS, which rustix lacks: the benchmark suite reads CPU time and the peak resident size through it.
+nix = { version = "=0.31.4", features = ["resource"] }
 # Safe SIGINT/SIGTERM handling without unsafe code so CLI shutdown coordinates
 # with separate helper process groups and preserves removal lock exclusion.
 ctrlc = { version = "=3.5.3", features = ["termination"] }

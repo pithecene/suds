@@ -4398,6 +4398,7 @@ name = "suds-core"
 version = "0.1.10"
 dependencies = [
  "libc",
+ "nix",
  "rustix 1.1.6",
  "serde",
  "serde_json",

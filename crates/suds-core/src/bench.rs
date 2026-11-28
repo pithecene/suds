@@ -871,11 +871,20 @@ pub fn read_reports(
     baseline: &Path,
     candidate: &Path,
 ) -> Result<(BenchReport, BenchReport), String> {
-    let read = |side: &str, path: &Path| -> Result<BenchReport, String> {
-        let text = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-        read_report(side, &text)
-    };
-    Ok((read("baseline", baseline)?, read("candidate", candidate)?))
+    read_reports_with(baseline, candidate, |path| {
+        fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))
+    })
+}
+
+/// Like [`read_reports`], taking each file's text from `text`, which a test watches.
+fn read_reports_with(
+    baseline: &Path,
+    candidate: &Path,
+    mut text: impl FnMut(&Path) -> Result<String, String>,
+) -> Result<(BenchReport, BenchReport), String> {
+    let base = read_report("baseline", &text(baseline)?)?;
+    let cand = read_report("candidate", &text(candidate)?)?;
+    Ok((base, cand))
 }
 
 /// The form in which a comparison is written.
@@ -1156,6 +1165,7 @@ fn signed_delta(base: u64, cand: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     use super::{
         BENCHMARK_SCHEMA, BenchReport, CaseReport, EnvironmentInfo, ProcessSample, ScaleProfile,
@@ -1573,14 +1583,21 @@ mod tests {
     }
     #[test]
     fn a_refused_baseline_opens_no_candidate() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let baseline = dir.path().join("baseline.json");
-        std::fs::write(&baseline, r#"{"schema":"suds.benchmark/v1"}"#).unwrap();
-        let refusal = super::read_reports(&baseline, &dir.path().join("absent.json")).unwrap_err();
+        let mut opened = Vec::new();
+        let refusal = super::read_reports_with(
+            Path::new("baseline.json"),
+            Path::new("candidate.json"),
+            |path| {
+                opened.push(path.to_path_buf());
+                Ok(r#"{"schema":"suds.benchmark/v1"}"#.to_owned())
+            },
+        )
+        .unwrap_err();
         assert_eq!(
             refusal,
             "baseline has schema suds.benchmark/v1, and this suite compares suds.benchmark/v2"
         );
+        assert_eq!(opened, [Path::new("baseline.json")]);
     }
 
     #[test]
